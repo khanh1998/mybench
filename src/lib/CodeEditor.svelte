@@ -1,11 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
-  import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection } from '@codemirror/view';
-  import { EditorState } from '@codemirror/state';
-  import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
-  import { indentOnInput, bracketMatching, foldGutter, foldKeymap } from '@codemirror/language';
-  import { closeBrackets, closeBracketsKeymap, autocompletion, completionKeymap } from '@codemirror/autocomplete';
-  import { searchKeymap, highlightSelectionMatches } from '@codemirror/search';
+  import CodeMirror from 'svelte-codemirror-editor';
   import { sql } from '@codemirror/lang-sql';
   import { oneDark } from '@codemirror/theme-one-dark';
 
@@ -15,80 +9,51 @@
   }
 
   let { value = $bindable(''), onchange }: Props = $props();
-
-  let container: HTMLDivElement;
-  let view: EditorView | null = null;
-  let skipEffect = false;
-
-  onMount(() => {
-    view = new EditorView({
-      state: EditorState.create({
-        doc: value,
-        extensions: [
-          lineNumbers(),
-          highlightActiveLineGutter(),
-          foldGutter(),
-          drawSelection(),
-          highlightActiveLine(),
-          highlightSelectionMatches(),
-          sql(),
-          oneDark,
-          history(),
-          indentOnInput(),
-          bracketMatching(),
-          closeBrackets(),
-          autocompletion(),
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          keymap.of([
-            indentWithTab as any,
-            ...closeBracketsKeymap as any[],
-            ...defaultKeymap as any[],
-            ...historyKeymap as any[],
-            ...foldKeymap as any[],
-            ...completionKeymap as any[],
-            ...searchKeymap as any[],
-          ]),
-          EditorView.theme({
-            '&': { height: '100%' },
-            '.cm-scroller': { overflow: 'auto' },
-          }),
-          EditorView.updateListener.of((update) => {
-            if (update.docChanged) {
-              skipEffect = true;
-              value = update.state.doc.toString();
-              onchange?.(value);
-              skipEffect = false;
-            }
-          }),
-        ],
-      }),
-      parent: container,
-    });
-  });
-
-  $effect(() => {
-    if (!view || skipEffect) return;
-    const current = view.state.doc.toString();
-    if (current !== value) {
-      view.dispatch({ changes: { from: 0, to: current.length, insert: value } });
-    }
-  });
-
-  onDestroy(() => view?.destroy());
 </script>
 
-<div bind:this={container} class="editor-root"></div>
+<div class="editor-root">
+  <CodeMirror
+    bind:value
+    lang={sql()}
+    theme={oneDark}
+    lineNumbers
+    {onchange}
+    styles={{
+      '&': { height: '100%' },
+      '.cm-scroller': { overflow: 'auto' }
+    }}
+  />
+</div>
 
 <style>
   .editor-root {
     position: absolute;
     inset: 0;
+    display: flex;
+    flex-direction: column;
   }
+
+  /* svelte-codemirror-editor renders a wrapper div — make it fill the container */
+  .editor-root :global(> div) {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .editor-root :global(.cm-editor) {
+    flex: 1;
+    min-height: 0;
+    height: 100%;
+  }
+
   .editor-root :global(.cm-scroller) {
+    overflow: auto !important;
     font-family: 'Menlo', 'Monaco', 'Courier New', monospace !important;
     font-size: 13px;
     line-height: 1.6;
   }
+
   .editor-root :global(.cm-focused) {
     outline: none;
   }
