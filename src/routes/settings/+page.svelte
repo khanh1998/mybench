@@ -3,7 +3,7 @@
   import { goto } from '$app/navigation';
 
   interface Server {
-    id: number; name: string; host: string; port: number; username: string; password: string;
+    id: number; name: string; host: string; port: number; username: string; password: string; ssl: number;
   }
   interface TableSel { table_name: string; enabled: number; }
 
@@ -23,7 +23,7 @@
   }
 
   function startNew() {
-    editing = { name: '', host: 'localhost', port: 5432, username: 'postgres', password: '' };
+    editing = { name: '', host: 'localhost', port: 5432, username: 'postgres', password: '', ssl: 0 };
     isNew = true;
     testMsg = '';
     testOk = null;
@@ -130,6 +130,17 @@
         <label for="conn-pass">Password</label>
         <input id="conn-pass" type="password" bind:value={editing.password} />
       </div>
+      <div class="form-group" style="flex:0; justify-content:flex-end; padding-top:20px">
+        <label style="display:flex; align-items:center; gap:6px; font-weight:normal; cursor:pointer; white-space:nowrap">
+          <input
+            type="checkbox"
+            style="width:auto"
+            checked={!!editing.ssl}
+            onchange={(e) => { if (editing) editing.ssl = (e.currentTarget as HTMLInputElement).checked ? 1 : 0; }}
+          />
+          SSL
+        </label>
+      </div>
     </div>
     <div class="row">
       <button class="primary" onclick={save} disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
@@ -155,7 +166,7 @@
     <div class="row">
       <div>
         <strong>{s.name}</strong>
-        <span style="color:#666; font-size:12px; margin-left:8px">{s.username}@{s.host}:{s.port}</span>
+        <span style="color:#666; font-size:12px; margin-left:8px">{s.username}@{s.host}:{s.port}{s.ssl ? ' · SSL' : ''}</span>
       </div>
       <span class="spacer"></span>
       <button onclick={() => loadTables(s.id)}>pg_stat tables</button>

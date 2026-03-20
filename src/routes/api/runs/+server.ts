@@ -2,10 +2,11 @@ import { json, error } from '@sveltejs/kit';
 import getDb from '$lib/server/db';
 import { createPool } from '$lib/server/pg-client';
 import { collectSnapshot, getEnabledTablesForRun } from '$lib/server/pg-stats';
-import { runPgbench, runSqlStep } from '$lib/server/pgbench';
+import { runPgbench, runSqlStep, type SqlStepOptions } from '$lib/server/pgbench';
 import { createRun, completeRun, setPool, setSnapshotTimer } from '$lib/server/run-manager';
+import { substituteParams } from '$lib/server/params';
 import type { RequestHandler } from './$types';
-import type { PgServer, DesignStep } from '$lib/types';
+import type { PgServer, DesignStep, PgbenchScript, DesignParam } from '$lib/types';
 
 export const GET: RequestHandler = ({ url }) => {
 	const db = getDb();
@@ -33,6 +34,21 @@ export const POST: RequestHandler = async ({ request }) => {
 		'SELECT * FROM design_steps WHERE design_id = ? AND enabled = 1 ORDER BY position'
 	).all(design.id) as DesignStep[];
 
+	const pgbenchScripts = db.prepare(
+		'SELECT * FROM pgbench_scripts WHERE step_id IN (SELECT id FROM design_steps WHERE design_id = ? AND enabled = 1) ORDER BY step_id, position'
+	).all(design.id) as PgbenchScript[];
+
+	const scriptsByStep = new Map<number, PgbenchScript[]>();
+	for (const ps of pgbenchScripts) {
+		const arr = scriptsByStep.get(ps.step_id) ?? [];
+		arr.push(ps);
+		scriptsByStep.set(ps.step_id, arr);
+	}
+
+	const designParams = db.prepare(
+		'SELECT * FROM design_params WHERE design_id = ? ORDER BY position'
+	).all(design.id) as DesignParam[];
+
 	// Create run record
 	const runResult = db.prepare(
 		'INSERT INTO benchmark_runs (design_id, status, snapshot_interval_seconds) VALUES (?, ?, ?)'
@@ -58,7 +74,9 @@ export const POST: RequestHandler = async ({ request }) => {
 		try {
 			for (const step of steps) {
 				// Mark step as running
-				db.prepare(`UPDATE run_step_results SET status='running', started_at=datetime('now') WHERE run_id=? AND step_id=?`).run(runId, step.id);
+				const startedAt = new Date().toISOString().replace('T', ' ').slice(0, 19);
+				db.prepare(`UPDATE run_step_results SET status='running', started_at=? WHERE run_id=? AND step_id=?`).run(startedAt, runId, step.id);
+				activeRun.emitter.emit('step', { step_id: step.id, status: 'running', started_at: startedAt });
 				activeRun.emitter.emit('line', `\n=== Step: ${step.name} (${step.type}) ===`);
 
 				let stdout = '';
@@ -81,6 +99,18 @@ export const POST: RequestHandler = async ({ request }) => {
 					}, snapshot_interval_seconds * 1000);
 					setSnapshotTimer(runId, timer);
 
+					// Load scripts for this step (fallback for unmigrated steps)
+					let scripts = scriptsByStep.get(step.id) ?? [];
+					if (scripts.length === 0 && step.script) {
+						scripts = [{ id: step.id, name: 'script', weight: 1, script: step.script, step_id: step.id, position: 0 }];
+					}
+
+					// Apply param substitution to all scripts
+					const substitutedScripts = scripts.map(ps => ({
+						...ps,
+						script: substituteParams(ps.script, designParams)
+					}));
+
 					// Run pgbench
 					const result = await runPgbench(
 						{
@@ -89,8 +119,8 @@ export const POST: RequestHandler = async ({ request }) => {
 							user: server.username,
 							password: server.password,
 							database: design.database,
-							script: step.script,
-							options: step.pgbench_options,
+							scripts: substitutedScripts,
+							options: substituteParams(step.pgbench_options, designParams),
 							runId,
 							stepId: step.id
 						},
@@ -100,6 +130,11 @@ export const POST: RequestHandler = async ({ request }) => {
 
 					clearInterval(timer);
 					exitCode = result.exitCode;
+
+					// Save command + processed script
+					const pgbenchScript = substitutedScripts.map(ps => `-- [${ps.name} @${ps.weight}]\n${ps.script}`).join('\n\n');
+					db.prepare(`UPDATE run_step_results SET command=?, processed_script=? WHERE run_id=? AND step_id=?`)
+						.run(result.command, pgbenchScript, runId, step.id);
 
 					// Final snapshot
 					activeRun.emitter.emit('line', '[snapshot] Taking final snapshot...');
@@ -112,18 +147,32 @@ export const POST: RequestHandler = async ({ request }) => {
 						).run(result.tps, result.latencyAvgMs, result.latencyStddevMs, result.transactions, runId);
 					}
 				} else {
-					// SQL step
-					const result = await runSqlStep(pool, step.script, activeRun.emitter, onLine);
+					// SQL step — run via psql CLI so \echo, \set, \if etc. all work
+					const sqlOpts: SqlStepOptions = {
+						host: server.host,
+						port: server.port,
+						user: server.username,
+						password: server.password,
+						database: design.database
+					};
+					const processedSqlScript = substituteParams(step.script, designParams);
+					const result = await runSqlStep(sqlOpts, processedSqlScript, activeRun.emitter, onLine);
 					exitCode = result.exitCode;
+					db.prepare(`UPDATE run_step_results SET command=?, processed_script=? WHERE run_id=? AND step_id=?`)
+						.run(result.command, processedSqlScript, runId, step.id);
 				}
 
 				const stepStatus = exitCode === 0 ? 'completed' : 'failed';
+				const finishedAt = new Date().toISOString().replace('T', ' ').slice(0, 19);
 				db.prepare(
-					`UPDATE run_step_results SET status=?, stdout=?, stderr=?, exit_code=?, finished_at=datetime('now') WHERE run_id=? AND step_id=?`
-				).run(stepStatus, stdout, stderr, exitCode, runId, step.id);
+					`UPDATE run_step_results SET status=?, stdout=?, stderr=?, exit_code=?, finished_at=? WHERE run_id=? AND step_id=?`
+				).run(stepStatus, stdout, stderr, exitCode, finishedAt, runId, step.id);
+				activeRun.emitter.emit('step', { step_id: step.id, status: stepStatus, finished_at: finishedAt });
 
 				if (stepStatus === 'failed') {
-					activeRun.emitter.emit('line', `\n[ERROR] Step "${step.name}" failed with exit code ${exitCode}`);
+					activeRun.emitter.emit('line', `\n[ERROR] Step "${step.name}" failed with exit code ${exitCode}. Stopping.`);
+					db.prepare(`UPDATE benchmark_runs SET status='failed', finished_at=datetime('now') WHERE id=?`).run(runId);
+					return;
 				}
 			}
 

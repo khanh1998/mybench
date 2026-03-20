@@ -3,9 +3,25 @@
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import CodeEditor from '$lib/CodeEditor.svelte';
+  import { validateDesignParams, type ValidationError } from '$lib/params';
 
   const id = $derived(Number($page.params.id));
 
+  interface PgbenchScript {
+    id: number;
+    step_id: number;
+    position: number;
+    name: string;
+    weight: number;
+    script: string;
+  }
+  interface Param {
+    id: number;
+    design_id: number;
+    position: number;
+    name: string;
+    value: string;
+  }
   interface Step {
     id: number;
     design_id: number;
@@ -15,10 +31,11 @@
     script: string;
     pgbench_options: string;
     enabled: number;
+    pgbench_scripts?: PgbenchScript[];
   }
   interface Design {
     id: number; decision_id: number; name: string; description: string;
-    server_id: number|null; database: string; steps: Step[];
+    server_id: number|null; database: string; steps: Step[]; params: Param[];
   }
   interface Server { id: number; name: string; }
   interface Run { id: number; status: string; tps: number|null; latency_avg_ms: number|null; started_at: string; }
@@ -27,15 +44,27 @@
   let servers: Server[] = $state([]);
   let runs: Run[] = $state([]);
   let selectedStepId = $state<number|null>(null);
+  let selectedScriptIdx = $state(0);
   let saving = $state(false);
   let startingRun = $state(false);
   let snapshotInterval = $state(30);
   let msg = $state('');
   let showConfig = $state(false);
+  let showValidation = $state(false);
+  let showParams = $state(false);
 
   const selectedStep: Step | null = $derived(
     (design as Design | null)?.steps.find((s: Step) => s.id === selectedStepId) ?? null
   );
+
+  const paramNames: string[] = $derived(
+    (design as Design | null)?.params?.map((p: Param) => p.name).filter(Boolean) ?? []
+  );
+
+  const validationErrors: ValidationError[] = $derived(
+    design ? validateDesignParams(design) : []
+  );
+  const isValid = $derived(validationErrors.length === 0);
 
   async function load() {
     const [dRes, sRes, rRes] = await Promise.all([
@@ -44,6 +73,7 @@
       fetch(`/api/runs?design_id=${id}`)
     ]);
     design = await dRes.json();
+    if (design && !design.params) design.params = [];
     servers = await sRes.json();
     runs = await rRes.json();
     // Select first enabled step by default
@@ -54,6 +84,14 @@
 
   async function save() {
     if (!design) return;
+    if (!isValid) {
+      const ok = confirm(
+        `${validationErrors.length} undefined placeholder(s) found.\n` +
+        validationErrors.map(e => `  {{${e.placeholder}}} in "${e.step} / ${e.script}"`).join('\n') +
+        '\n\nSave anyway?'
+      );
+      if (!ok) return;
+    }
     saving = true;
     await fetch(`/api/designs/${id}`, {
       method: 'PUT',
@@ -67,6 +105,10 @@
 
   async function startRun() {
     if (!design) return;
+    if (!isValid) {
+      msg = `Cannot run: ${validationErrors.length} undefined placeholder(s). Check params.`;
+      return;
+    }
     startingRun = true;
     const res = await fetch('/api/runs', {
       method: 'POST',
@@ -76,6 +118,16 @@
     const { run_id } = await res.json();
     startingRun = false;
     goto(`/designs/${id}/runs/${run_id}`);
+  }
+
+  function addParam() {
+    if (!design) return;
+    design.params = [...design.params, { id: -(Date.now()), design_id: id, position: design.params.length, name: '', value: '' }];
+  }
+
+  function removeParam(idx: number) {
+    if (!design) return;
+    design.params = design.params.filter((_, i) => i !== idx).map((p, i) => ({ ...p, position: i }));
   }
 
   async function deleteDesign() {
@@ -96,10 +148,32 @@
       type: 'sql',
       script: '',
       pgbench_options: '',
-      enabled: 1
+      enabled: 1,
+      pgbench_scripts: []
     };
     design.steps = [...design.steps, newStep];
     selectedStepId = newStep.id;
+    selectedScriptIdx = 0;
+  }
+
+  function addScript(step: Step) {
+    if (!step.pgbench_scripts) step.pgbench_scripts = [];
+    const idx = step.pgbench_scripts.length;
+    step.pgbench_scripts = [...step.pgbench_scripts, {
+      id: -(Date.now()),
+      step_id: step.id,
+      position: idx,
+      name: `script_${idx + 1}`,
+      weight: 100,
+      script: ''
+    }];
+    selectedScriptIdx = step.pgbench_scripts.length - 1;
+  }
+
+  function removeScript(step: Step, idx: number) {
+    if (!step.pgbench_scripts) return;
+    step.pgbench_scripts = step.pgbench_scripts.filter((_, i) => i !== idx).map((ps, i) => ({ ...ps, position: i }));
+    selectedScriptIdx = Math.min(selectedScriptIdx, Math.max(0, step.pgbench_scripts.length - 1));
   }
 
   function removeStep(stepId: number) {
@@ -120,7 +194,18 @@
     design.steps = steps.map((s, i) => ({ ...s, position: i }));
   }
 
-  onMount(load);
+  function handleKeydown(e: KeyboardEvent) {
+    if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+      e.preventDefault();
+      save();
+    }
+  }
+
+  onMount(() => {
+    load();
+    window.addEventListener('keydown', handleKeydown);
+    return () => window.removeEventListener('keydown', handleKeydown);
+  });
 </script>
 
 {#if design}
@@ -134,6 +219,15 @@
   </div>
   <div class="topbar-right">
     <button onclick={() => showConfig = !showConfig} class:active={showConfig}>⚙ Config</button>
+    <button onclick={() => showParams = !showParams} class:active={showParams}>
+      {isValid ? '{ }' : '{ }'} Params {#if (design?.params ?? []).length > 0}<span class="param-count">{(design?.params ?? []).length}</span>{/if}
+    </button>
+    <button
+      onclick={() => showValidation = !showValidation}
+      class:warn={!isValid}
+      class:active={showValidation}
+      title="Validation status"
+    >{isValid ? '✓ Valid' : `⚠ ${validationErrors.length} issue(s)`}</button>
     <label class="inline-label">
       Interval (s)
       <input type="number" bind:value={snapshotInterval} style="width:60px" min="5" max="300" />
@@ -145,6 +239,16 @@
     <button class="danger" onclick={deleteDesign}>Delete</button>
   </div>
 </div>
+
+<!-- Validation panel (collapsible) -->
+{#if showValidation && !isValid}
+  <div class="validation-panel">
+    <div class="validation-title">⚠ Undefined placeholders:</div>
+    {#each validationErrors as e}
+      <div class="validation-item">· {e.step} / {e.script}: <code>&#123;&#123;{e.placeholder}&#125;&#125;</code></div>
+    {/each}
+  </div>
+{/if}
 
 <!-- Config panel (collapsible) -->
 {#if showConfig}
@@ -192,8 +296,8 @@
           class:disabled-step={!step.enabled}
           role="button"
           tabindex="0"
-          onclick={() => selectedStepId = step.id}
-          onkeydown={(e) => e.key === 'Enter' && (selectedStepId = step.id)}
+          onclick={() => { selectedStepId = step.id; selectedScriptIdx = 0; }}
+          onkeydown={(e) => { if (e.key === 'Enter') { selectedStepId = step.id; selectedScriptIdx = 0; } }}
         >
           <div class="step-item-main">
             <span class="step-item-name">{step.name}</span>
@@ -248,7 +352,7 @@
   </div>
 
   <!-- RIGHT: Editor -->
-  <div class="editor-panel">
+  <div class="editor-panel" class:shrunk={showParams}>
     {#if selectedStep}
       <div class="editor-top-bar">
         <input
@@ -269,13 +373,103 @@
           />
         {/if}
       </div>
-      <div class="editor-wrap">
-        <CodeEditor bind:value={selectedStep.script} />
-      </div>
+      {#if selectedStep.type === 'pgbench'}
+        {@const scripts = selectedStep.pgbench_scripts ?? []}
+        {@const totalWeight = scripts.reduce((s, ps) => s + (ps.weight || 0), 0)}
+        <div class="pgbench-split">
+          <div class="scripts-panel">
+            <div class="scripts-list">
+              {#each scripts as ps, i (ps.id)}
+                <div
+                  class="script-item"
+                  class:script-selected={selectedScriptIdx === i}
+                  role="button"
+                  tabindex="0"
+                  onclick={() => selectedScriptIdx = i}
+                  onkeydown={(e) => e.key === 'Enter' && (selectedScriptIdx = i)}
+                >
+                  <div class="script-item-name-row">
+                    {#if selectedScriptIdx === i}
+                      <input
+                        class="script-name-input"
+                        value={ps.name}
+                        oninput={(e) => { ps.name = (e.currentTarget as HTMLInputElement).value; }}
+                        onclick={(e) => e.stopPropagation()}
+                        placeholder="script name"
+                      />
+                    {:else}
+                      <span class="script-name-label">{ps.name || 'script'}</span>
+                    {/if}
+                  </div>
+                  <div class="script-item-controls-row">
+                    <span class="weight-label">weight</span>
+                    <input
+                      type="number"
+                      class="weight-input"
+                      value={ps.weight}
+                      oninput={(e) => { ps.weight = parseInt((e.currentTarget as HTMLInputElement).value) || 1; }}
+                      onclick={(e) => e.stopPropagation()}
+                      min="1"
+                    />
+                    <button
+                      class="icon-btn danger-icon"
+                      onclick={(e) => { e.stopPropagation(); removeScript(selectedStep!, i); }}
+                      title="Remove script"
+                    >✕</button>
+                  </div>
+                </div>
+              {/each}
+              <button class="add-script-btn" onclick={() => addScript(selectedStep!)}>+ Add Script</button>
+            </div>
+            <div class="scripts-total" class:total-exact={totalWeight === 100} class:total-warn={totalWeight !== 100}>
+              Total weight: <strong>{totalWeight}</strong>
+              {#if totalWeight !== 100}<span class="total-hint">(target: 100)</span>{/if}
+            </div>
+          </div>
+          <div class="editor-wrap">
+            {#if (selectedStep.pgbench_scripts ?? []).length > 0}
+              {#key `${selectedStep.id}-${selectedScriptIdx}`}
+                {@const ps = (selectedStep.pgbench_scripts ?? [])[selectedScriptIdx]}
+                {#if ps}
+                  <CodeEditor value={ps.script} onchange={(v: string) => { ps.script = v; }} params={paramNames} />
+                {/if}
+              {/key}
+            {:else}
+              <div class="editor-empty">Add a script to get started</div>
+            {/if}
+          </div>
+        </div>
+      {:else}
+        <div class="editor-wrap">
+          <CodeEditor bind:value={selectedStep.script} params={paramNames} />
+        </div>
+      {/if}
     {:else}
       <div class="editor-empty">Select a step to edit</div>
     {/if}
   </div>
+
+  <!-- FAR RIGHT: Params panel -->
+  {#if showParams}
+    <div class="params-panel">
+      <div class="params-panel-header">
+        <span class="steps-title">Parameters</span>
+        <button onclick={addParam} class="add-btn">+ Add</button>
+      </div>
+      <div class="params-panel-body">
+        {#if design.params.length === 0}
+          <div class="params-empty">No parameters yet</div>
+        {/if}
+        {#each design.params as p, i (p.id)}
+          <div class="param-item">
+            <input class="param-item-name" bind:value={p.name} placeholder="NAME" spellcheck="false" />
+            <input class="param-item-value" bind:value={p.value} placeholder="value" spellcheck="false" />
+            <button class="icon-btn danger-icon" onclick={() => removeParam(i)} title="Remove">✕</button>
+          </div>
+        {/each}
+      </div>
+    </div>
+  {/if}
 
 </div>
 
@@ -325,6 +519,20 @@
   .inline-label input { width: 60px; }
 
   button.active { background: #e8f0fe; border-color: #0066cc; color: #0066cc; }
+  button.warn { background: #fff3cd; border-color: #f0a500; color: #7a4f00; }
+  button.warn.active { background: #ffe08a; }
+
+  .validation-panel {
+    background: #fff8e1;
+    border-bottom: 1px solid #f0c040;
+    padding: 8px 16px;
+    flex-shrink: 0;
+    font-size: 12px;
+    color: #5c4300;
+  }
+  .validation-title { font-weight: 600; margin-bottom: 4px; }
+  .validation-item { padding: 1px 0; }
+  .validation-item code { font-family: monospace; background: #ffe0804a; padding: 0 3px; border-radius: 2px; }
 
   .config-panel {
     background: #f8f8f8;
@@ -333,6 +541,90 @@
     flex-shrink: 0;
   }
   .config-row { display: flex; gap: 12px; }
+
+  .param-count {
+    display: inline-block;
+    background: #89b4fa;
+    color: #1e1e2e;
+    border-radius: 8px;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 0 5px;
+    margin-left: 2px;
+    line-height: 1.6;
+  }
+
+  /* Params right-side panel */
+  .params-panel {
+    width: 220px;
+    flex-shrink: 0;
+    background: #1e1e2e;
+    color: #cdd6f4;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border-left: 1px solid #313244;
+  }
+  .params-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 12px;
+    border-bottom: 1px solid #313244;
+    flex-shrink: 0;
+  }
+  .params-panel-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 8px;
+  }
+  .params-empty {
+    color: #585b70;
+    font-size: 12px;
+    padding: 4px 4px;
+  }
+  .param-item {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    margin-bottom: 10px;
+    position: relative;
+  }
+  .param-item-name {
+    background: #313244;
+    border: 1px solid #45475a;
+    color: #cba6f7;
+    font-family: monospace;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 6px;
+    border-radius: 3px;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .param-item-name:focus { outline: none; border-color: #89b4fa; }
+  .param-item-name::placeholder { color: #585b70; font-weight: 400; }
+  .param-item-value {
+    background: #181825;
+    border: 1px solid #313244;
+    color: #a6e3a1;
+    font-family: monospace;
+    font-size: 11px;
+    padding: 3px 6px;
+    border-radius: 3px;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .param-item-value:focus { outline: none; border-color: #89b4fa; }
+  .param-item-value::placeholder { color: #585b70; }
+  .param-item .icon-btn {
+    position: absolute;
+    top: 3px;
+    right: 3px;
+    padding: 0 4px;
+    font-size: 10px;
+    line-height: 1.6;
+  }
 
   /* Split pane — fills remaining height after topbar (+config) */
   .split-pane {
@@ -497,6 +789,106 @@
   .options-input:focus { outline: none; border-color: #0066cc; }
   .options-input::placeholder { color: #666; }
   .step-name-edit::placeholder { color: #666; }
+
+  /* pgbench multi-script split */
+  .pgbench-split {
+    flex: 1;
+    display: flex;
+    flex-direction: row;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .scripts-panel {
+    width: 210px;
+    flex-shrink: 0;
+    background: #1e1e2e;
+    border-right: 1px solid #313244;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .scripts-list {
+    flex: 1;
+    overflow-y: auto;
+    min-height: 0;
+  }
+  .script-item {
+    display: flex;
+    flex-direction: column;
+    padding: 6px 8px 5px;
+    border-bottom: 1px solid #252535;
+    cursor: pointer;
+    border-left: 3px solid transparent;
+  }
+  .script-item:hover { background: #2a2a3e; }
+  .script-item.script-selected { border-left-color: #a6e3a1; background: #252535; }
+  .script-item-name-row {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+    margin-bottom: 4px;
+  }
+  .script-item-controls-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .script-name-label {
+    flex: 1;
+    min-width: 0;
+    color: #cdd6f4;
+    font-size: 12px;
+    padding: 1px 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    user-select: none;
+  }
+  .script-name-input {
+    flex: 1;
+    min-width: 0;
+    background: transparent;
+    border: none;
+    color: #cdd6f4;
+    font-size: 12px;
+    padding: 1px 2px;
+  }
+  .script-name-input:focus { outline: 1px solid #45475a; border-radius: 2px; }
+  .script-name-input::placeholder { color: #585b70; }
+  .weight-label { color: #585b70; font-size: 10px; flex-shrink: 0; }
+  .weight-input {
+    width: 40px;
+    background: #313244;
+    border: 1px solid #45475a;
+    color: #cdd6f4;
+    font-size: 11px;
+    padding: 1px 3px;
+    border-radius: 3px;
+    text-align: center;
+    flex-shrink: 0;
+  }
+  .add-script-btn {
+    margin: 6px;
+    font-size: 11px;
+    padding: 4px 8px;
+    background: #313244;
+    color: #cdd6f4;
+    border: 1px solid #45475a;
+    border-radius: 3px;
+    cursor: pointer;
+    text-align: left;
+  }
+  .add-script-btn:hover { background: #45475a; }
+  .scripts-total {
+    flex-shrink: 0;
+    padding: 6px 10px;
+    font-size: 11px;
+    border-top: 1px solid #313244;
+    color: #a6adc8;
+  }
+  .scripts-total.total-exact { color: #a6e3a1; border-top-color: #a6e3a133; }
+  .scripts-total.total-warn { color: #f9e2af; }
+  .total-hint { color: #585b70; margin-left: 4px; }
 
   /* editor-wrap: must have position:relative + explicit size for position:absolute children */
   .editor-wrap {

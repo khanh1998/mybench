@@ -59,6 +59,9 @@ export const GET: RequestHandler = ({ params }) => {
 			const onLine = (line: string) => {
 				controller.enqueue(encoder.encode(`data: ${JSON.stringify(line)}\n\n`));
 			};
+			const onStep = (data: object) => {
+				controller.enqueue(encoder.encode(`event: step\ndata: ${JSON.stringify(data)}\n\n`));
+			};
 			const onDone = () => {
 				const r = db.prepare('SELECT status FROM benchmark_runs WHERE id = ?').get(runId) as { status: string } | undefined;
 				controller.enqueue(encoder.encode(`event: done\ndata: ${r?.status ?? 'completed'}\n\n`));
@@ -66,6 +69,7 @@ export const GET: RequestHandler = ({ params }) => {
 			};
 
 			activeRun.emitter.on('line', onLine);
+			activeRun.emitter.on('step', onStep);
 			activeRun.emitter.once('done', onDone);
 		}
 	});

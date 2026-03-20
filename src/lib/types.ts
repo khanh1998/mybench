@@ -5,6 +5,7 @@ export interface PgServer {
 	port: number;
 	username: string;
 	password: string;
+	ssl: number; // 0 or 1
 }
 
 export interface PgStatTableSelection {
@@ -28,6 +29,23 @@ export interface Design {
 	database: string;
 }
 
+export interface PgbenchScript {
+	id: number;
+	step_id: number;
+	position: number;
+	name: string;
+	weight: number;
+	script: string;
+}
+
+export interface DesignParam {
+	id: number;
+	design_id: number;
+	position: number;
+	name: string;
+	value: string;
+}
+
 export interface DesignStep {
 	id: number;
 	design_id: number;
@@ -37,6 +55,7 @@ export interface DesignStep {
 	script: string;
 	pgbench_options: string;
 	enabled: number; // 0 or 1
+	pgbench_scripts?: PgbenchScript[];
 }
 
 export type RunStatus = 'running' | 'completed' | 'failed' | 'stopped';

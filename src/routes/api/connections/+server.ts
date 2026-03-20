@@ -11,10 +11,10 @@ export const GET: RequestHandler = () => {
 export const POST: RequestHandler = async ({ request }) => {
 	const db = getDb();
 	const body = await request.json();
-	const { name, host, port, username, password } = body;
+	const { name, host, port, username, password, ssl } = body;
 	const result = db.prepare(
-		'INSERT INTO pg_servers (name, host, port, username, password) VALUES (?, ?, ?, ?, ?)'
-	).run(name, host ?? 'localhost', port ?? 5432, username ?? 'postgres', password ?? '');
+		'INSERT INTO pg_servers (name, host, port, username, password, ssl) VALUES (?, ?, ?, ?, ?, ?)'
+	).run(name, host ?? 'localhost', port ?? 5432, username ?? 'postgres', password ?? '', ssl ? 1 : 0);
 	const server = db.prepare('SELECT * FROM pg_servers WHERE id = ?').get(result.lastInsertRowid);
 	return json(server, { status: 201 });
 };

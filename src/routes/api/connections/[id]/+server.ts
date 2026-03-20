@@ -12,10 +12,10 @@ export const GET: RequestHandler = ({ params }) => {
 export const PUT: RequestHandler = async ({ params, request }) => {
 	const db = getDb();
 	const body = await request.json();
-	const { name, host, port, username, password } = body;
+	const { name, host, port, username, password, ssl } = body;
 	db.prepare(
-		'UPDATE pg_servers SET name=?, host=?, port=?, username=?, password=? WHERE id=?'
-	).run(name, host, port, username, password, Number(params.id));
+		'UPDATE pg_servers SET name=?, host=?, port=?, username=?, password=?, ssl=? WHERE id=?'
+	).run(name, host, port, username, password, ssl ? 1 : 0, Number(params.id));
 	const server = db.prepare('SELECT * FROM pg_servers WHERE id = ?').get(Number(params.id));
 	return json(server);
 };

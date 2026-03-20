@@ -1,6 +1,10 @@
 import pg from 'pg';
 import type { PgServer } from '$lib/types';
 
+function sslConfig(server: PgServer) {
+	return server.ssl ? { rejectUnauthorized: false } : false;
+}
+
 const pools = new Map<number, pg.Pool>();
 
 export function getPool(server: PgServer, database: string): pg.Pool {
@@ -16,6 +20,7 @@ export function getPool(server: PgServer, database: string): pg.Pool {
 		user: server.username,
 		password: server.password,
 		database,
+		ssl: sslConfig(server),
 		max: 5,
 		connectionTimeoutMillis: 10000
 	});
@@ -28,6 +33,7 @@ export function createPool(server: PgServer, database: string): pg.Pool {
 		user: server.username,
 		password: server.password,
 		database,
+		ssl: sslConfig(server),
 		max: 5,
 		connectionTimeoutMillis: 10000
 	});
@@ -40,6 +46,7 @@ export async function testConnection(server: PgServer, database: string = 'postg
 		user: server.username,
 		password: server.password,
 		database,
+		ssl: sslConfig(server),
 		max: 1,
 		connectionTimeoutMillis: 5000
 	});
@@ -60,6 +67,7 @@ export async function discoverPgStatTables(server: PgServer, database: string = 
 		user: server.username,
 		password: server.password,
 		database,
+		ssl: sslConfig(server),
 		max: 1,
 		connectionTimeoutMillis: 5000
 	});

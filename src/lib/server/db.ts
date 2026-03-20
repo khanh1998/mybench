@@ -27,7 +27,8 @@ function migrate(db: Database.Database) {
       host TEXT NOT NULL DEFAULT 'localhost',
       port INTEGER NOT NULL DEFAULT 5432,
       username TEXT NOT NULL DEFAULT 'postgres',
-      password TEXT NOT NULL DEFAULT ''
+      password TEXT NOT NULL DEFAULT '',
+      ssl INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS pg_stat_table_selections (
@@ -97,6 +98,43 @@ function migrate(db: Database.Database) {
       name TEXT NOT NULL,
       sql TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS pgbench_scripts (
+      id       INTEGER PRIMARY KEY AUTOINCREMENT,
+      step_id  INTEGER NOT NULL REFERENCES design_steps(id) ON DELETE CASCADE,
+      position INTEGER NOT NULL DEFAULT 0,
+      name     TEXT    NOT NULL DEFAULT 'script',
+      weight   INTEGER NOT NULL DEFAULT 1,
+      script   TEXT    NOT NULL DEFAULT ''
+    );
+
+    CREATE TABLE IF NOT EXISTS design_params (
+      id        INTEGER PRIMARY KEY AUTOINCREMENT,
+      design_id INTEGER NOT NULL REFERENCES designs(id) ON DELETE CASCADE,
+      position  INTEGER NOT NULL DEFAULT 0,
+      name      TEXT    NOT NULL DEFAULT '',
+      value     TEXT    NOT NULL DEFAULT ''
+    );
+  `);
+
+  // Add ssl column to pg_servers if it doesn't exist (idempotent)
+  const hasSslCol = (db.prepare(`PRAGMA table_info(pg_servers)`).all() as { name: string }[]).some(c => c.name === 'ssl');
+  if (!hasSslCol) db.exec(`ALTER TABLE pg_servers ADD COLUMN ssl INTEGER NOT NULL DEFAULT 0`);
+
+  // Add command + processed_script to run_step_results (idempotent)
+  const stepResultCols = (db.prepare(`PRAGMA table_info(run_step_results)`).all() as { name: string }[]).map(c => c.name);
+  if (!stepResultCols.includes('command')) db.exec(`ALTER TABLE run_step_results ADD COLUMN command TEXT NOT NULL DEFAULT ''`);
+  if (!stepResultCols.includes('processed_script')) db.exec(`ALTER TABLE run_step_results ADD COLUMN processed_script TEXT NOT NULL DEFAULT ''`);
+
+  // One-time backfill: migrate existing pgbench step scripts (idempotent)
+  db.exec(`
+    INSERT INTO pgbench_scripts (step_id, position, name, weight, script)
+    SELECT id, 0, 'script', 100, script
+    FROM design_steps
+    WHERE type = 'pgbench' AND script != ''
+      AND id NOT IN (SELECT DISTINCT step_id FROM pgbench_scripts);
+
+    UPDATE pgbench_scripts SET weight = 100 WHERE weight = 1;
   `);
 
 	// Snap tables

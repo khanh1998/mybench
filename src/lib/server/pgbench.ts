@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import { writeFileSync, unlinkSync, existsSync } from 'fs';
 import { join } from 'path';
 import { EventEmitter } from 'events';
+import type { PgbenchScript } from '$lib/types';
 
 export interface PgbenchResult {
 	tps: number | null;
@@ -9,6 +10,7 @@ export interface PgbenchResult {
 	latencyStddevMs: number | null;
 	transactions: number | null;
 	exitCode: number | null;
+	command: string;
 }
 
 export interface PgbenchRunOptions {
@@ -17,7 +19,7 @@ export interface PgbenchRunOptions {
 	user: string;
 	password: string;
 	database: string;
-	script: string;
+	scripts: PgbenchScript[];
 	options: string; // extra pgbench flags e.g. "-c 10 -T 60"
 	runId: number;
 	stepId: number;
@@ -29,18 +31,25 @@ export function runPgbench(
 	onLine: (line: string, stream: 'stdout' | 'stderr') => void
 ): Promise<PgbenchResult> {
 	return new Promise((resolve) => {
-		const scriptPath = join('/tmp', `mybench-${opts.runId}-${opts.stepId}.pgbench`);
-		writeFileSync(scriptPath, opts.script, 'utf8');
+		const tempFiles: string[] = [];
+		const fileArgs: string[] = [];
+		for (const s of opts.scripts) {
+			const p = join('/tmp', `mybench-${opts.runId}-${opts.stepId}-${s.id}.pgbench`);
+			writeFileSync(p, s.script, 'utf8');
+			tempFiles.push(p);
+			fileArgs.push('-f', `${p}@${s.weight}`);
+		}
 
 		const args = [
 			'-h', opts.host,
 			'-p', String(opts.port),
 			'-U', opts.user,
 			'-d', opts.database,
-			'-f', scriptPath,
+			...fileArgs,
 			...parseOptions(opts.options)
 		];
 
+		const command = `pgbench ${args.join(' ')}`;
 		const env = { ...process.env, PGPASSWORD: opts.password };
 		const proc = spawn('pgbench', args, { env });
 
@@ -70,10 +79,13 @@ export function runPgbench(
 		proc.on('close', (code) => {
 			if (stdoutBuf) { emitter.emit('line', stdoutBuf); onLine(stdoutBuf, 'stdout'); }
 			if (stderrBuf) { emitter.emit('line', '[stderr] ' + stderrBuf); onLine(stderrBuf, 'stderr'); }
-			try { if (existsSync(scriptPath)) unlinkSync(scriptPath); } catch {}
+			for (const p of tempFiles) {
+				try { if (existsSync(p)) unlinkSync(p); } catch {}
+			}
 			resolve({
 				...parsePgbenchOutput(stderrBuf + '\n'),
-				exitCode: code
+				exitCode: code,
+				command
 			});
 		});
 
@@ -82,35 +94,68 @@ export function runPgbench(
 	});
 }
 
+export interface SqlStepOptions {
+	host: string;
+	port: number;
+	user: string;
+	password: string;
+	database: string;
+}
+
 export function runSqlStep(
-	pool: import('pg').Pool,
+	opts: SqlStepOptions,
 	script: string,
 	emitter: EventEmitter,
 	onLine: (line: string, stream: 'stdout' | 'stderr') => void
-): Promise<{ exitCode: number }> {
-	return new Promise(async (resolve) => {
-		try {
-			// Split on semicolons (naive but workable for typical DDL/DML)
-			const statements = script
-				.split(';')
-				.map((s) => s.trim())
-				.filter((s) => s.length > 0);
+): Promise<{ exitCode: number; command: string }> {
+	return new Promise((resolve) => {
+		const tmpFile = join('/tmp', `mybench-sql-${opts.database}-${Date.now()}.sql`);
+		writeFileSync(tmpFile, script, 'utf8');
 
-			for (const stmt of statements) {
-				onLine(`> ${stmt.slice(0, 80)}${stmt.length > 80 ? '…' : ''}`, 'stdout');
-				emitter.emit('line', `> ${stmt.slice(0, 80)}${stmt.length > 80 ? '…' : ''}`);
-				const result = await pool.query(stmt);
-				const msg = `OK (${result.rowCount ?? 0} rows affected)`;
-				onLine(msg, 'stdout');
-				emitter.emit('line', msg);
+		const args = [
+			'-h', opts.host,
+			'-p', String(opts.port),
+			'-U', opts.user,
+			'-d', opts.database,
+			'-v', 'ON_ERROR_STOP=1',   // exit non-zero on first SQL error
+			'--single-transaction',    // wrap entire file in BEGIN/COMMIT, rollback on error
+			'--no-psqlrc',             // ignore user's ~/.psqlrc
+			'-f', tmpFile
+		];
+		const command = `psql ${args.join(' ')}`;
+
+		const env = { ...process.env, PGPASSWORD: opts.password };
+		const proc = spawn('psql', args, { env });
+
+		let stdoutBuf = '';
+		let stderrBuf = '';
+
+		proc.stdout.on('data', (chunk: Buffer) => {
+			stdoutBuf += chunk.toString();
+			const lines = stdoutBuf.split('\n');
+			stdoutBuf = lines.pop() ?? '';
+			for (const line of lines) {
+				emitter.emit('line', line);
+				onLine(line, 'stdout');
 			}
-			resolve({ exitCode: 0 });
-		} catch (err: unknown) {
-			const msg = `ERROR: ${err instanceof Error ? err.message : String(err)}`;
-			onLine(msg, 'stderr');
-			emitter.emit('line', '[stderr] ' + msg);
-			resolve({ exitCode: 1 });
-		}
+		});
+
+		proc.stderr.on('data', (chunk: Buffer) => {
+			stderrBuf += chunk.toString();
+			const lines = stderrBuf.split('\n');
+			stderrBuf = lines.pop() ?? '';
+			for (const line of lines) {
+				emitter.emit('line', '[stderr] ' + line);
+				onLine(line, 'stderr');
+			}
+		});
+
+		proc.on('close', (code) => {
+			if (stdoutBuf) { emitter.emit('line', stdoutBuf); onLine(stdoutBuf, 'stdout'); }
+			if (stderrBuf) { emitter.emit('line', '[stderr] ' + stderrBuf); onLine(stderrBuf, 'stderr'); }
+			try { if (existsSync(tmpFile)) unlinkSync(tmpFile); } catch {}
+			resolve({ exitCode: code ?? 1, command });
+		});
 	});
 }
 
@@ -120,7 +165,7 @@ function parseOptions(opts: string): string[] {
 	return opts.trim().split(/\s+/);
 }
 
-function parsePgbenchOutput(output: string): Omit<PgbenchResult, 'exitCode'> {
+function parsePgbenchOutput(output: string): Omit<PgbenchResult, 'exitCode' | 'command'> {
 	// pgbench outputs like:
 	// tps = 1234.56 (without initial connection establishment)
 	// latency average = 0.810 ms
