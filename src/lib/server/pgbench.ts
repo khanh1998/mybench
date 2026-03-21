@@ -112,7 +112,8 @@ export function runSqlStep(
 	opts: SqlStepOptions,
 	script: string,
 	emitter: EventEmitter,
-	onLine: (line: string, stream: 'stdout' | 'stderr') => void
+	onLine: (line: string, stream: 'stdout' | 'stderr') => void,
+	noTransaction = false
 ): Promise<{ exitCode: number; command: string }> {
 	return new Promise((resolve) => {
 		const tmpFile = join('/tmp', `mybench-sql-${opts.database}-${Date.now()}.sql`);
@@ -124,7 +125,7 @@ export function runSqlStep(
 			'-U', opts.user,
 			'-d', opts.database,
 			'-v', 'ON_ERROR_STOP=1',   // exit non-zero on first SQL error
-			'--single-transaction',    // wrap entire file in BEGIN/COMMIT, rollback on error
+			...(noTransaction ? [] : ['--single-transaction']),
 			'--no-psqlrc',             // ignore user's ~/.psqlrc
 			'-f', tmpFile
 		];

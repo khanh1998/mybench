@@ -55,6 +55,7 @@ export interface DesignStep {
 	script: string;
 	pgbench_options: string;
 	duration_secs: number;
+	no_transaction: number; // 0 or 1 — SQL steps only: omit --single-transaction
 	enabled: number; // 0 or 1
 	pgbench_scripts?: PgbenchScript[];
 }

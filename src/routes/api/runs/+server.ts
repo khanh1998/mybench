@@ -221,7 +221,7 @@ export const POST: RequestHandler = async ({ request }) => {
 						database: resolvedDatabase
 					};
 					const processedSqlScript = substituteParams(step.script, designParams);
-					const result = await runSqlStep(sqlOpts, processedSqlScript, activeRun.emitter, onLine);
+					const result = await runSqlStep(sqlOpts, processedSqlScript, activeRun.emitter, onLine, !!step.no_transaction);
 					exitCode = result.exitCode;
 					db.prepare(`UPDATE run_step_results SET command=?, processed_script=? WHERE run_id=? AND step_id=?`)
 						.run(result.command, processedSqlScript, runId, step.id);

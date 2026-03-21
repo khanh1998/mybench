@@ -31,6 +31,7 @@
     script: string;
     pgbench_options: string;
     duration_secs: number;
+    no_transaction: number;
     enabled: number;
     pgbench_scripts?: PgbenchScript[];
   }
@@ -200,6 +201,7 @@
       script: '',
       pgbench_options: '',
       duration_secs: 0,
+      no_transaction: 0,
       enabled: 1,
       pgbench_scripts: []
     };
@@ -491,6 +493,15 @@
             Duration
             <input type="number" bind:value={selectedStep.duration_secs} min="0" max="3600" class="collect-duration-input" />
             s
+          </label>
+        {:else}
+          <label class="no-txn-label" title="Run statements outside a transaction block — required for VACUUM, CREATE INDEX CONCURRENTLY, etc.">
+            <input
+              type="checkbox"
+              checked={!!selectedStep.no_transaction}
+              onchange={(e) => { selectedStep.no_transaction = (e.currentTarget as HTMLInputElement).checked ? 1 : 0; }}
+            />
+            No transaction
           </label>
         {/if}
       </div>
@@ -1075,6 +1086,10 @@
     color: #555;
     font-size: 14px;
   }
+
+  /* SQL step — no transaction toggle */
+  .no-txn-label { display: flex; align-items: center; gap: 5px; color: #a6adc8; font-size: 11px; white-space: nowrap; cursor: pointer; user-select: none; }
+  .no-txn-label input { cursor: pointer; }
 
   /* Collect step */
   .collect-duration-label { display: flex; align-items: center; gap: 6px; color: #d4d4d4; font-size: 12px; white-space: nowrap; }

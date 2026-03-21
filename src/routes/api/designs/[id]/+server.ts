@@ -51,17 +51,17 @@ export const PUT: RequestHandler = async ({ params: routeParams, request }) => {
 
 	if (body.steps) {
 		const upsert = db.prepare(
-			`INSERT INTO design_steps (id, design_id, position, name, type, script, pgbench_options, enabled, duration_secs)
-       VALUES (@id, @design_id, @position, @name, @type, @script, @pgbench_options, @enabled, @duration_secs)
+			`INSERT INTO design_steps (id, design_id, position, name, type, script, pgbench_options, enabled, duration_secs, no_transaction)
+       VALUES (@id, @design_id, @position, @name, @type, @script, @pgbench_options, @enabled, @duration_secs, @no_transaction)
        ON CONFLICT(id) DO UPDATE SET
          position=excluded.position, name=excluded.name, type=excluded.type,
          script=excluded.script, pgbench_options=excluded.pgbench_options, enabled=excluded.enabled,
-         duration_secs=excluded.duration_secs`
+         duration_secs=excluded.duration_secs, no_transaction=excluded.no_transaction`
 		);
 
 		const doUpsert = db.transaction(() => {
 			for (const s of body.steps) {
-				upsert.run({ ...s, design_id: designId, duration_secs: s.duration_secs ?? 0 });
+				upsert.run({ ...s, design_id: designId, duration_secs: s.duration_secs ?? 0, no_transaction: s.no_transaction ?? 0 });
 				if (s.type === 'pgbench') {
 					deleteScripts.run(s.id);
 					for (const ps of s.pgbench_scripts ?? []) {
