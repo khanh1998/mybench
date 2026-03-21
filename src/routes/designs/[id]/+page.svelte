@@ -67,18 +67,18 @@
     if (!raw) return;
     try {
       const cfg = JSON.parse(raw);
-      if (cfg.server_id !== undefined && design) design.server_id = cfg.server_id;
-      if (cfg.database !== undefined && design) design.database = cfg.database;
+      // Only restore snapshot interval — server/database come from the API,
+      // not localStorage (which was overwriting the saved design config).
       if (cfg.snapshotInterval !== undefined) snapshotInterval = cfg.snapshotInterval;
     } catch {}
   }
 
   function persistRunConfig() {
-    if (typeof localStorage === 'undefined' || !design) return;
+    if (typeof localStorage === 'undefined') return;
     localStorage.setItem(`run-config-${id}`, JSON.stringify({
-      server_id: design.server_id,
-      database: design.database,
-      snapshotInterval
+      server_id: runServer,
+      database: runDatabase,
+      snapshotInterval: runSnapshotInterval
     }));
   }
 
@@ -88,10 +88,21 @@
       msg = `Cannot run: ${validationErrors.length} undefined placeholder(s). Check params.`;
       return;
     }
-    // Pre-fill modal with current persisted values
+    // Start from design's saved values, then apply any persisted run overrides
     runServer = design.server_id;
     runDatabase = design.database;
     runSnapshotInterval = snapshotInterval;
+    if (typeof localStorage !== 'undefined') {
+      const raw = localStorage.getItem(`run-config-${id}`);
+      if (raw) {
+        try {
+          const cfg = JSON.parse(raw);
+          if (cfg.server_id != null) runServer = cfg.server_id;
+          if (cfg.database) runDatabase = cfg.database;
+          if (cfg.snapshotInterval) runSnapshotInterval = cfg.snapshotInterval;
+        } catch {}
+      }
+    }
     showRunModal = true;
   }
 
