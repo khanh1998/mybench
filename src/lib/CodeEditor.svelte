@@ -11,9 +11,10 @@
     value: string;
     onchange?: (value: string) => void;
     params?: string[];
+    schema?: Record<string, string[]>;
   }
 
-  let { value = $bindable(''), onchange, params }: Props = $props();
+  let { value = $bindable(''), onchange, params, schema }: Props = $props();
 
   let vimMode = $state(browser ? localStorage.getItem('editor-vim') === '1' : false);
 
@@ -35,7 +36,7 @@
   <div class="editor-body">
     <CodeMirror
       bind:value
-      lang={sql()}
+      lang={sql({ schema })}
       theme={oneDark}
       lineNumbers
       {onchange}

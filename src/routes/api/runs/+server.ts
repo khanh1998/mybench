@@ -20,14 +20,17 @@ export const GET: RequestHandler = ({ url }) => {
 export const POST: RequestHandler = async ({ request }) => {
 	const db = getDb();
 	const body = await request.json();
-	const { design_id, snapshot_interval_seconds = 30 } = body;
+	const { design_id, server_id, database, snapshot_interval_seconds = 30 } = body;
 
 	const design = db.prepare('SELECT * FROM designs WHERE id = ?').get(Number(design_id)) as {
 		id: number; decision_id: number; name: string; server_id: number; database: string;
 	} | undefined;
 	if (!design) throw error(404, 'Design not found');
 
-	const server = db.prepare('SELECT * FROM pg_servers WHERE id = ?').get(design.server_id) as PgServer | undefined;
+	const resolvedServerId = server_id ?? design.server_id;
+	const resolvedDatabase: string = database ?? design.database;
+
+	const server = db.prepare('SELECT * FROM pg_servers WHERE id = ?').get(resolvedServerId) as PgServer | undefined;
 	if (!server) throw error(400, 'Server not configured for this design');
 
 	const steps = db.prepare(
@@ -67,7 +70,7 @@ export const POST: RequestHandler = async ({ request }) => {
 
 	// Run asynchronously
 	(async () => {
-		const pool = createPool(server, design.database);
+		const pool = createPool(server, resolvedDatabase);
 		setPool(runId, pool);
 		const enabledTables = getEnabledTablesForRun(server.id);
 
@@ -118,7 +121,7 @@ export const POST: RequestHandler = async ({ request }) => {
 							port: server.port,
 							user: server.username,
 							password: server.password,
-							database: design.database,
+							database: resolvedDatabase,
 							scripts: substitutedScripts,
 							options: substituteParams(step.pgbench_options, designParams),
 							runId,
@@ -153,7 +156,7 @@ export const POST: RequestHandler = async ({ request }) => {
 						port: server.port,
 						user: server.username,
 						password: server.password,
-						database: design.database
+						database: resolvedDatabase
 					};
 					const processedSqlScript = substituteParams(step.script, designParams);
 					const result = await runSqlStep(sqlOpts, processedSqlScript, activeRun.emitter, onLine);

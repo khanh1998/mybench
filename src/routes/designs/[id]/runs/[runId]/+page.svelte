@@ -1,5 +1,6 @@
 <script lang="ts">
   import { page } from '$app/stores';
+  import { goto } from '$app/navigation';
   import { onMount, onDestroy } from 'svelte';
 
   const designId = $derived(Number($page.params.id));
@@ -48,9 +49,24 @@
     outputEl.scrollTop = outputEl.scrollHeight;
   }
 
-  async function loadRun() {
+  async function loadRun(): Promise<void> {
     const res = await fetch(`/api/runs/${runId}`);
     run = await res.json();
+  }
+
+  function renderStoredOutput() {
+    if (!run?.steps?.length || !outputEl) return;
+    const frag = document.createDocumentFragment();
+    for (const s of run.steps) {
+      frag.appendChild(document.createTextNode(`\n=== Step: ${s.name} (${s.type}) ===\n`));
+      if (s.stdout) frag.appendChild(document.createTextNode(s.stdout));
+      if (s.stderr) {
+        for (const line of s.stderr.split('\n')) {
+          if (line) frag.appendChild(document.createTextNode('[stderr] ' + line + '\n'));
+        }
+      }
+    }
+    outputEl.appendChild(frag);
   }
 
   function connectSSE() {
@@ -90,15 +106,27 @@
     loadRun();
   }
 
+  async function deleteRun() {
+    if (!confirm(`Delete run #${runId}?`)) return;
+    eventSource?.close();
+    await fetch(`/api/runs/${runId}?action=delete`, { method: 'DELETE' });
+    goto(`/designs/${designId}`);
+  }
+
   function toggleStep(stepId: number) {
     expandedStep = expandedStep === stepId ? null : stepId;
   }
 
-  onMount(() => {
-    loadRun();
-    connectSSE();
-    // flush any lines that arrived before outputEl was bound
-    setTimeout(flushPending, 0);
+  onMount(async () => {
+    await loadRun();
+    if (run?.status === 'running') {
+      connectSSE();
+      setTimeout(flushPending, 0);
+    } else {
+      done = true;
+      finalStatus = run?.status ?? '';
+      renderStoredOutput();
+    }
   });
 
   onDestroy(() => {
@@ -115,6 +143,9 @@
   <span class="spacer"></span>
   {#if !done && run?.status === 'running'}
     <button class="danger" onclick={stopRun}>Stop Run</button>
+  {/if}
+  {#if done}
+    <button class="danger" onclick={deleteRun}>Delete Run</button>
   {/if}
 </div>
 

@@ -6,11 +6,8 @@ export const SNAP_TABLE_MAP: Record<string, string> = {
 	pg_stat_database: 'snap_pg_stat_database',
 	pg_stat_bgwriter: 'snap_pg_stat_bgwriter',
 	pg_stat_user_tables: 'snap_pg_stat_user_tables',
-	pg_stat_all_tables: 'snap_pg_stat_all_tables',
 	pg_stat_user_indexes: 'snap_pg_stat_user_indexes',
-	pg_stat_all_indexes: 'snap_pg_stat_all_indexes',
 	pg_statio_user_tables: 'snap_pg_statio_user_tables',
-	pg_statio_all_tables: 'snap_pg_statio_all_tables',
 	pg_statio_user_indexes: 'snap_pg_statio_user_indexes',
 	pg_statio_user_sequences: 'snap_pg_statio_user_sequences',
 	pg_stat_database_conflicts: 'snap_pg_stat_database_conflicts',
@@ -47,6 +44,23 @@ export async function collectSnapshot(
 			if (result.rows.length === 0) continue;
 
 			const cols = result.fields.map((f: pg.FieldDef) => f.name);
+
+			// Ensure snap table exists and has all columns PG returned
+			db.exec(`CREATE TABLE IF NOT EXISTS ${snapTable} (
+				_id INTEGER PRIMARY KEY AUTOINCREMENT,
+				_run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+				_collected_at TEXT NOT NULL,
+				_is_baseline INTEGER NOT NULL DEFAULT 0
+			)`);
+			const existingCols = new Set(
+				(db.prepare(`PRAGMA table_info(${snapTable})`).all() as { name: string }[]).map(r => r.name)
+			);
+			for (const col of cols) {
+				if (!existingCols.has(col)) {
+					db.exec(`ALTER TABLE ${snapTable} ADD COLUMN ${col} TEXT`);
+				}
+			}
+
 			const insertCols = ['_run_id', '_collected_at', '_is_baseline', ...cols];
 			const placeholders = insertCols.map((_, i) => `@p${i}`).join(', ');
 			const stmt = db.prepare(
@@ -62,8 +76,10 @@ export async function collectSnapshot(
 					};
 					cols.forEach((col: string, i: number) => {
 						const val = row[col];
-						// Convert booleans to int
-						params[`p${i + 3}`] = typeof val === 'boolean' ? (val ? 1 : 0) : val ?? null;
+						params[`p${i + 3}`] =
+							val instanceof Date ? val.toISOString() :
+							typeof val === 'boolean' ? (val ? 1 : 0) :
+							val ?? null;
 					});
 					stmt.run(params);
 				}
@@ -71,7 +87,7 @@ export async function collectSnapshot(
 
 			insertMany(result.rows);
 		} catch (_err) {
-			// Skip tables that fail (version incompatibility, permissions, etc.)
+			// Skip tables that fail (permissions, etc.)
 		}
 	}
 }

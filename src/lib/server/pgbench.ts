@@ -54,10 +54,14 @@ export function runPgbench(
 		const proc = spawn('pgbench', args, { env });
 
 		let stdoutBuf = '';
+		let fullStdout = '';
 		let stderrBuf = '';
+		let fullStderr = '';
 
 		proc.stdout.on('data', (chunk: Buffer) => {
-			stdoutBuf += chunk.toString();
+			const sout = chunk.toString();
+			fullStdout += sout;
+			stdoutBuf += sout;
 			const lines = stdoutBuf.split('\n');
 			stdoutBuf = lines.pop() ?? '';
 			for (const line of lines) {
@@ -67,7 +71,9 @@ export function runPgbench(
 		});
 
 		proc.stderr.on('data', (chunk: Buffer) => {
-			stderrBuf += chunk.toString();
+			const text = chunk.toString();
+			fullStderr += text;
+			stderrBuf += text;
 			const lines = stderrBuf.split('\n');
 			stderrBuf = lines.pop() ?? '';
 			for (const line of lines) {
@@ -83,7 +89,7 @@ export function runPgbench(
 				try { if (existsSync(p)) unlinkSync(p); } catch {}
 			}
 			resolve({
-				...parsePgbenchOutput(stderrBuf + '\n'),
+				...parsePgbenchOutput(fullStdout),
 				exitCode: code,
 				command
 			});

@@ -11,10 +11,14 @@ export const GET: RequestHandler = ({ params }) => {
 	return json({ ...run as object, steps });
 };
 
-export const DELETE: RequestHandler = async ({ params }) => {
+export const DELETE: RequestHandler = async ({ params, url }) => {
 	const runId = Number(params.id);
 	const db = getDb();
 	await stopRun(runId);
-	db.prepare(`UPDATE benchmark_runs SET status='stopped', finished_at=datetime('now') WHERE id=? AND status='running'`).run(runId);
+	if (url.searchParams.get('action') === 'delete') {
+		db.prepare(`DELETE FROM benchmark_runs WHERE id = ?`).run(runId);
+	} else {
+		db.prepare(`UPDATE benchmark_runs SET status='stopped', finished_at=datetime('now') WHERE id=? AND status='running'`).run(runId);
+	}
 	return json({ ok: true });
 };

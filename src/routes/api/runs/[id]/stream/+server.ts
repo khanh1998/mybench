@@ -48,6 +48,10 @@ export const GET: RequestHandler = ({ params }) => {
 	// Active run — subscribe to emitter
 	const activeRun = getActiveRun(runId);
 
+	let onLine: (line: string) => void;
+	let onStep: (data: object) => void;
+	let onDone: () => void;
+
 	const stream = new ReadableStream({
 		start(controller) {
 			if (!activeRun) {
@@ -56,21 +60,28 @@ export const GET: RequestHandler = ({ params }) => {
 				return;
 			}
 
-			const onLine = (line: string) => {
-				controller.enqueue(encoder.encode(`data: ${JSON.stringify(line)}\n\n`));
+			onLine = (line: string) => {
+				try { controller.enqueue(encoder.encode(`data: ${JSON.stringify(line)}\n\n`)); } catch {}
 			};
-			const onStep = (data: object) => {
-				controller.enqueue(encoder.encode(`event: step\ndata: ${JSON.stringify(data)}\n\n`));
+			onStep = (data: object) => {
+				try { controller.enqueue(encoder.encode(`event: step\ndata: ${JSON.stringify(data)}\n\n`)); } catch {}
 			};
-			const onDone = () => {
+			onDone = () => {
 				const r = db.prepare('SELECT status FROM benchmark_runs WHERE id = ?').get(runId) as { status: string } | undefined;
-				controller.enqueue(encoder.encode(`event: done\ndata: ${r?.status ?? 'completed'}\n\n`));
-				controller.close();
+				try {
+					controller.enqueue(encoder.encode(`event: done\ndata: ${r?.status ?? 'completed'}\n\n`));
+					controller.close();
+				} catch {}
 			};
 
 			activeRun.emitter.on('line', onLine);
 			activeRun.emitter.on('step', onStep);
 			activeRun.emitter.once('done', onDone);
+		},
+		cancel() {
+			activeRun?.emitter.off('line', onLine);
+			activeRun?.emitter.off('step', onStep);
+			activeRun?.emitter.off('done', onDone);
 		}
 	});
 

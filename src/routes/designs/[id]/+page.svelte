@@ -52,6 +52,46 @@
   let showConfig = $state(false);
   let showValidation = $state(false);
   let showParams = $state(false);
+  let showRunModal = $state(false);
+
+  // Run modal ephemeral state (editable, not persisted)
+  let runServer = $state<number|null>(null);
+  let runDatabase = $state('');
+  let runSnapshotInterval = $state(30);
+
+  function loadPersistedRunConfig() {
+    if (typeof localStorage === 'undefined') return;
+    const raw = localStorage.getItem(`run-config-${id}`);
+    if (!raw) return;
+    try {
+      const cfg = JSON.parse(raw);
+      if (cfg.server_id !== undefined && design) design.server_id = cfg.server_id;
+      if (cfg.database !== undefined && design) design.database = cfg.database;
+      if (cfg.snapshotInterval !== undefined) snapshotInterval = cfg.snapshotInterval;
+    } catch {}
+  }
+
+  function persistRunConfig() {
+    if (typeof localStorage === 'undefined' || !design) return;
+    localStorage.setItem(`run-config-${id}`, JSON.stringify({
+      server_id: design.server_id,
+      database: design.database,
+      snapshotInterval
+    }));
+  }
+
+  function openRunModal() {
+    if (!design) return;
+    if (!isValid) {
+      msg = `Cannot run: ${validationErrors.length} undefined placeholder(s). Check params.`;
+      return;
+    }
+    // Pre-fill modal with current persisted values
+    runServer = design.server_id;
+    runDatabase = design.database;
+    runSnapshotInterval = snapshotInterval;
+    showRunModal = true;
+  }
 
   const selectedStep: Step | null = $derived(
     (design as Design | null)?.steps.find((s: Step) => s.id === selectedStepId) ?? null
@@ -105,15 +145,19 @@
 
   async function startRun() {
     if (!design) return;
-    if (!isValid) {
-      msg = `Cannot run: ${validationErrors.length} undefined placeholder(s). Check params.`;
-      return;
-    }
+    showRunModal = false;
     startingRun = true;
+    // Persist chosen config for next time
+    persistRunConfig();
     const res = await fetch('/api/runs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ design_id: id, snapshot_interval_seconds: snapshotInterval })
+      body: JSON.stringify({
+        design_id: id,
+        server_id: runServer,
+        database: runDatabase,
+        snapshot_interval_seconds: runSnapshotInterval
+      })
     });
     const { run_id } = await res.json();
     startingRun = false;
@@ -128,6 +172,12 @@
   function removeParam(idx: number) {
     if (!design) return;
     design.params = design.params.filter((_, i) => i !== idx).map((p, i) => ({ ...p, position: i }));
+  }
+
+  async function deleteRun(runId: number) {
+    if (!confirm(`Delete run #${runId}?`)) return;
+    await fetch(`/api/runs/${runId}?action=delete`, { method: 'DELETE' });
+    runs = runs.filter(r => r.id !== runId);
   }
 
   async function deleteDesign() {
@@ -202,7 +252,7 @@
   }
 
   onMount(() => {
-    load();
+    load().then(loadPersistedRunConfig);
     window.addEventListener('keydown', handleKeydown);
     return () => window.removeEventListener('keydown', handleKeydown);
   });
@@ -228,12 +278,8 @@
       class:active={showValidation}
       title="Validation status"
     >{isValid ? '✓ Valid' : `⚠ ${validationErrors.length} issue(s)`}</button>
-    <label class="inline-label">
-      Interval (s)
-      <input type="number" bind:value={snapshotInterval} style="width:60px" min="5" max="300" />
-    </label>
     <button onclick={save} disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
-    <button class="primary" onclick={startRun} disabled={startingRun}>
+    <button class="primary" onclick={openRunModal} disabled={startingRun}>
       {startingRun ? 'Starting…' : '▶ Run'}
     </button>
     <button class="danger" onclick={deleteDesign}>Delete</button>
@@ -272,9 +318,45 @@
         <input id="design-db" bind:value={design.database} placeholder="benchmark_db" />
       </div>
     </div>
-    <div class="form-group">
-      <label for="design-desc">Description</label>
-      <input id="design-desc" bind:value={design.description} />
+    <div class="config-row">
+      <div class="form-group">
+        <label for="design-desc">Description</label>
+        <input id="design-desc" bind:value={design.description} />
+      </div>
+      <div class="form-group" style="flex:0 0 160px">
+        <label for="design-snap-interval" title="How often pg_stat_* snapshots are collected during a pgbench run">Snapshot interval (s)</label>
+        <input id="design-snap-interval" type="number" bind:value={snapshotInterval} min="5" max="300" />
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Run confirmation modal -->
+{#if showRunModal}
+  <div class="modal-backdrop" onclick={() => showRunModal = false}>
+    <div class="modal" onclick={(e) => e.stopPropagation()}>
+      <h3 style="margin:0 0 16px">Configure Run</h3>
+      <div class="form-group">
+        <label for="run-server">Server</label>
+        <select id="run-server" bind:value={runServer}>
+          <option value={null}>— select server —</option>
+          {#each servers as s}
+            <option value={s.id}>{s.name}</option>
+          {/each}
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="run-db">Database</label>
+        <input id="run-db" bind:value={runDatabase} placeholder="benchmark_db" />
+      </div>
+      <div class="form-group">
+        <label for="run-snap" title="How often pg_stat_* snapshots are collected">Snapshot interval (s)</label>
+        <input id="run-snap" type="number" bind:value={runSnapshotInterval} min="5" max="300" />
+      </div>
+      <div class="modal-actions">
+        <button onclick={() => showRunModal = false}>Cancel</button>
+        <button class="primary" onclick={startRun} disabled={!runServer || !runDatabase}>▶ Start Run</button>
+      </div>
     </div>
   </div>
 {/if}
@@ -339,13 +421,16 @@
       <div class="runs-section">
         <div class="steps-title" style="padding: 8px 12px 4px;">Run History</div>
         {#each runs.slice(0, 8) as r}
-          <a href="/designs/{id}/runs/{r.id}" class="run-item">
-            <span class="badge badge-{r.status}" style="font-size:10px">{r.status}</span>
-            <span class="run-item-id">#{r.id}</span>
-            {#if r.tps !== null}
-              <span class="run-item-tps">{r.tps.toFixed(1)} TPS</span>
-            {/if}
-          </a>
+          <div class="run-item-row">
+            <a href="/designs/{id}/runs/{r.id}" class="run-item">
+              <span class="badge badge-{r.status}" style="font-size:10px">{r.status}</span>
+              <span class="run-item-id">#{r.id}</span>
+              {#if r.tps !== null}
+                <span class="run-item-tps">{r.tps.toFixed(1)} TPS</span>
+              {/if}
+            </a>
+            <button class="run-delete-btn" title="Delete run" onclick={() => deleteRun(r.id)}>✕</button>
+          </div>
         {/each}
       </div>
     {/if}
@@ -479,6 +564,19 @@
 {/if}
 
 <style>
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+    display: flex; align-items: center; justify-content: center; z-index: 1000;
+  }
+  .modal {
+    background: #fff; border-radius: 8px; padding: 24px; width: 360px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+  }
+  .modal .form-group { margin-bottom: 14px; }
+  .modal .form-group label { display: block; font-size: 12px; font-weight: 600; color: #555; margin-bottom: 4px; }
+  .modal .form-group input, .modal .form-group select { width: 100%; box-sizing: border-box; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+
   /* Page root: fixed below the nav bar, fills remaining viewport */
   .page-root {
     position: fixed;
@@ -516,7 +614,6 @@
     font-weight: 600;
     white-space: nowrap;
   }
-  .inline-label input { width: 60px; }
 
   button.active { background: #e8f0fe; border-color: #0066cc; color: #0066cc; }
   button.warn { background: #fff3cd; border-color: #f0a500; color: #7a4f00; }
@@ -724,6 +821,8 @@
     max-height: 200px;
     overflow-y: auto;
   }
+  .run-item-row { display: flex; align-items: center; border-bottom: 1px solid #1e1e2e; }
+  .run-item-row:hover .run-delete-btn { opacity: 1; }
   .run-item {
     display: flex;
     align-items: center;
@@ -732,11 +831,16 @@
     text-decoration: none;
     font-size: 12px;
     color: #a6adc8;
-    border-bottom: 1px solid #1e1e2e;
+    flex: 1;
   }
   .run-item:hover { background: #2a2a3e; color: #cdd6f4; }
   .run-item-id { font-family: monospace; }
   .run-item-tps { margin-left: auto; color: #a6e3a1; font-size: 11px; }
+  .run-delete-btn {
+    opacity: 0; flex-shrink: 0; padding: 4px 8px;
+    background: none; border: none; color: #f38ba8; cursor: pointer; font-size: 12px;
+  }
+  .run-delete-btn:hover { opacity: 1 !important; background: #3d2028; }
 
   /* Editor panel */
   .editor-panel {

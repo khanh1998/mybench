@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { page } from '$app/stores';
+  import LineChart from '$lib/LineChart.svelte';
+  import CodeEditor from '$lib/CodeEditor.svelte';
 
   const decisionId = $derived(Number($page.params.id));
 
@@ -8,6 +10,12 @@
   interface Run { id: number; design_id: number; status: string; tps: number|null; latency_avg_ms: number|null; latency_stddev_ms: number|null; transactions: number|null; started_at: string; }
   interface SavedQuery { id: number; name: string; sql: string; decision_id: number|null; }
   interface QueryResult { columns: string[]; rows: Record<string,unknown>[]; error?: string; }
+  interface ChartPoint { t: number; v: number; }
+  interface ChartSeries { label: string; color: string; points: ChartPoint[]; }
+  interface SnapTable { name: string; columns: string[]; }
+  interface Chart { column: string; series: ChartSeries[]; }
+
+  const COLORS = ['#0066cc', '#e6531d', '#00996b', '#9b36b7', '#cc8800'];
 
   let designs: Design[] = $state([]);
   let runsPerDesign: Record<number, Run[]> = $state({});
@@ -20,6 +28,21 @@
   let newQueryName = $state('');
   let showSaveForm = $state(false);
   let loading = $state(true);
+
+  // Charts state
+  let snapTables: SnapTable[] = $state([]);
+  let chartTable = $state('');
+  let chartColumns: string[] = $state([]);
+  let charts: Chart[] = $state([]);
+  let chartsRunning = $state(false);
+  let chartMode = $state<'table' | 'sql'>('table');
+  let chartSql = $state('SELECT _collected_at, blks_read, blks_hit\nFROM snap_pg_stat_database\nWHERE _run_id = ?\nORDER BY _collected_at');
+  let sqlCharts: Chart[] = $state([]);
+  let sqlChartsRunning = $state(false);
+  let sqlChartError = $state('');
+
+  const currentSnapTable = $derived(snapTables.find(t => t.name === chartTable));
+  const snapSchema = $derived(Object.fromEntries(snapTables.map(t => [t.name, t.columns])));
 
   async function load() {
     const [dRes, sqRes] = await Promise.all([
@@ -37,24 +60,132 @@
       if (runs.length > 0) selectedRuns[d.id] = runs[0].id;
     }
     loading = false;
+    loadSnapTables();
+  }
+
+  async function loadSnapTables() {
+    const runIds = Object.values(selectedRuns).filter(Boolean).join(',');
+    if (!runIds) return;
+    const res = await fetch(`/api/snap-tables?run_ids=${runIds}`);
+    snapTables = await res.json();
+    if (snapTables.length > 0 && !chartTable) {
+      chartTable = snapTables[0].name;
+    }
+  }
+
+  function toggleChartColumn(col: string) {
+    if (chartColumns.includes(col)) {
+      chartColumns = chartColumns.filter(c => c !== col);
+    } else {
+      chartColumns = [...chartColumns, col];
+    }
+  }
+
+  async function drawCharts() {
+    if (!chartTable || chartColumns.length === 0) return;
+    chartsRunning = true;
+    charts = [];
+    try {
+      const colList = ['_collected_at', ...chartColumns].join(', ');
+      const sql = `SELECT ${colList} FROM ${chartTable} WHERE _run_id = ? ORDER BY _collected_at`;
+
+      // Fetch data for each design's selected run
+      const seriesData: { designId: number; designName: string; rows: Record<string, unknown>[] }[] = [];
+      for (const [didStr, runId] of Object.entries(selectedRuns)) {
+        if (!runId) continue;
+        const designId = Number(didStr);
+        const data = await queryApi(sql, [runId]);
+        if (data.error) { charts = [{ column: 'Error', series: [] }]; return; }
+        seriesData.push({ designId, designName: getDesignName(designId), rows: data.rows });
+      }
+
+      // Build one chart per column
+      charts = chartColumns.map(col => ({
+        column: col,
+        series: seriesData.map((sd, i) => ({
+          label: sd.designName,
+          color: COLORS[i % COLORS.length],
+          points: sd.rows
+            .filter(r => r['_collected_at'] != null && r[col] != null)
+            .map(r => ({
+              t: new Date(String(r['_collected_at'])).getTime(),
+              v: Number(r[col])
+            }))
+            .filter(p => !isNaN(p.t) && !isNaN(p.v))
+        }))
+      }));
+    } finally {
+      chartsRunning = false;
+    }
+  }
+
+  async function drawSqlCharts() {
+    if (!chartSql.trim()) return;
+    sqlChartsRunning = true;
+    sqlCharts = [];
+    sqlChartError = '';
+    try {
+      const seriesData: { designId: number; designName: string; columns: string[]; rows: Record<string, unknown>[] }[] = [];
+      for (const [didStr, runId] of Object.entries(selectedRuns)) {
+        if (!runId) continue;
+        const designId = Number(didStr);
+        const data = await queryApi(chartSql, [runId]);
+        if (data.error) { sqlChartError = data.error; return; }
+        if (!data.columns.includes('_collected_at')) {
+          sqlChartError = 'Query must return a _collected_at column for the time axis.';
+          return;
+        }
+        seriesData.push({ designId, designName: getDesignName(designId), columns: data.columns, rows: data.rows });
+      }
+
+      if (seriesData.length === 0) return;
+
+      // Use columns from first result, excluding _collected_at
+      const valueCols = seriesData[0].columns.filter(c => c !== '_collected_at');
+      sqlCharts = valueCols.map(col => ({
+        column: col,
+        series: seriesData.map((sd, i) => ({
+          label: sd.designName,
+          color: COLORS[i % COLORS.length],
+          points: sd.rows
+            .filter(r => r['_collected_at'] != null && r[col] != null)
+            .map(r => ({
+              t: new Date(String(r['_collected_at'])).getTime(),
+              v: Number(r[col])
+            }))
+            .filter(p => !isNaN(p.t) && !isNaN(p.v))
+        }))
+      }));
+    } finally {
+      sqlChartsRunning = false;
+    }
   }
 
   const selectedRunIds = $derived(Object.values(selectedRuns).filter(Boolean));
+
+  async function queryApi(sql: string, params: unknown[]): Promise<QueryResult> {
+    const res = await fetch('/api/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sql, params })
+    });
+    const data = await res.json();
+    if (!res.ok) return { columns: [], rows: [], error: data.message ?? `HTTP ${res.status}` };
+    return data as QueryResult;
+  }
+
+  async function runSavedQueryOnRunChange() {
+    await loadSnapTables();
+    charts = [];
+    sqlCharts = [];
+    runAllSavedQueries();
+  }
 
   async function runSavedQuery(q: SavedQuery) {
     queryResults[q.id] = {};
     for (const [designId, runId] of Object.entries(selectedRuns)) {
       if (!runId) continue;
-      try {
-        const res = await fetch('/api/query', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sql: q.sql, params: [runId] })
-        });
-        queryResults[q.id][Number(designId)] = await res.json();
-      } catch (e) {
-        queryResults[q.id][Number(designId)] = { columns: [], rows: [], error: String(e) };
-      }
+      queryResults[q.id][Number(designId)] = await queryApi(q.sql, [runId]);
     }
     queryResults = { ...queryResults };
   }
@@ -70,17 +201,7 @@
     adHocResults = {};
     for (const [designId, runId] of Object.entries(selectedRuns)) {
       if (!runId) continue;
-      try {
-        const res = await fetch('/api/query', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sql: adHocSql, params: [runId] })
-        });
-        const data = await res.json();
-        adHocResults[Number(designId)] = data;
-      } catch (e) {
-        adHocResults[Number(designId)] = { columns: [], rows: [], error: String(e) };
-      }
+      adHocResults[Number(designId)] = await queryApi(adHocSql, [runId]);
     }
     adHocRunning = false;
     adHocResults = { ...adHocResults };
@@ -128,7 +249,7 @@
     {#each designs as d}
       <div class="design-col">
         <strong>{d.name}</strong>
-        <select bind:value={selectedRuns[d.id]} onchange={runAllSavedQueries}>
+        <select bind:value={selectedRuns[d.id]} onchange={runSavedQueryOnRunChange}>
           <option value={0}>— none —</option>
           {#each runsPerDesign[d.id] ?? [] as r}
             <option value={r.id}>Run #{r.id} ({r.status}) — {r.started_at?.slice(0,16)}</option>
@@ -231,7 +352,9 @@
   <p style="color:#666; font-size:12px; margin-bottom:8px">
     Use <code>?</code> as placeholder for <code>_run_id</code>. Query any <code>snap_*</code> table.
   </p>
-  <textarea class="code" bind:value={adHocSql} rows="5" style="margin-bottom:8px"></textarea>
+  <div class="editor-wrap" style="margin-bottom:8px">
+    <CodeEditor bind:value={adHocSql} schema={snapSchema} />
+  </div>
   <div class="row">
     <button class="primary" onclick={runAdHoc} disabled={adHocRunning}>
       {adHocRunning ? 'Running…' : 'Run Query'}
@@ -276,6 +399,87 @@
   {/if}
 </div>
 
+<!-- Charts -->
+<div class="card">
+  <div class="row" style="margin-bottom:12px">
+    <h3>Charts</h3>
+    <span class="spacer"></span>
+    <button class={chartMode === 'table' ? 'primary' : ''} onclick={() => chartMode = 'table'}>Snap Table</button>
+    <button class={chartMode === 'sql' ? 'primary' : ''} onclick={() => chartMode = 'sql'}>Custom SQL</button>
+  </div>
+
+  {#if chartMode === 'table'}
+    <div class="chart-controls">
+      <div class="ctrl-row">
+        <span class="ctrl-label">Table</span>
+        <select bind:value={chartTable} onchange={() => { chartColumns = []; charts = []; }}>
+          {#each snapTables as t}
+            <option value={t.name}>{t.name}</option>
+          {/each}
+        </select>
+        {#if snapTables.length === 0}
+          <span style="color:#999; font-size:12px">No snap data for selected runs</span>
+        {/if}
+      </div>
+      {#if currentSnapTable && currentSnapTable.columns.length > 0}
+        <div class="ctrl-row" style="align-items:flex-start">
+          <span class="ctrl-label" style="padding-top:2px">Columns</span>
+          <div class="col-checks">
+            {#each currentSnapTable.columns as col}
+              <label class="col-check">
+                <input type="checkbox" checked={chartColumns.includes(col)}
+                  onchange={() => toggleChartColumn(col)} />
+                {col}
+              </label>
+            {/each}
+          </div>
+        </div>
+      {/if}
+      <div class="ctrl-row">
+        <button class="primary" onclick={drawCharts}
+          disabled={chartsRunning || chartColumns.length === 0}>
+          {chartsRunning ? 'Drawing…' : 'Draw Charts'}
+        </button>
+        {#if chartColumns.length > 0}
+          <span style="font-size:12px; color:#666">{chartColumns.length} column{chartColumns.length > 1 ? 's' : ''} selected</span>
+        {/if}
+      </div>
+    </div>
+
+    {#if charts.length > 0}
+      <div class="charts-grid">
+        {#each charts as chart}
+          <LineChart title={chart.column} series={chart.series} />
+        {/each}
+      </div>
+    {/if}
+
+  {:else}
+    <p style="color:#666; font-size:12px; margin-bottom:8px">
+      SQL must return <code>_collected_at</code> plus one or more numeric columns.
+      Use <code>?</code> as the <code>_run_id</code> placeholder.
+    </p>
+    <div class="editor-wrap" style="margin-bottom:8px">
+      <CodeEditor bind:value={chartSql} schema={snapSchema} />
+    </div>
+    <div class="row" style="margin-bottom:8px">
+      <button class="primary" onclick={drawSqlCharts} disabled={sqlChartsRunning}>
+        {sqlChartsRunning ? 'Running…' : 'Draw Charts'}
+      </button>
+    </div>
+    {#if sqlChartError}
+      <p class="error">{sqlChartError}</p>
+    {/if}
+    {#if sqlCharts.length > 0}
+      <div class="charts-grid">
+        {#each sqlCharts as chart}
+          <LineChart title={chart.column} series={chart.series} />
+        {/each}
+      </div>
+    {/if}
+  {/if}
+</div>
+
 {/if}
 
 <style>
@@ -288,4 +492,11 @@
   .result-col { flex: 1; min-width: 200px; }
   .result-col-header { font-weight: 600; font-size: 12px; color: #0066cc; margin-bottom: 6px; }
   .table-wrap { overflow-x: auto; }
+  .chart-controls { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
+  .ctrl-row { display: flex; align-items: center; gap: 10px; }
+  .ctrl-label { font-size: 12px; font-weight: 600; color: #555; min-width: 60px; }
+  .col-checks { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+  .col-check { display: flex; align-items: center; gap: 4px; font-size: 12px; font-family: monospace; color: #333; cursor: pointer; }
+  .charts-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(480px, 1fr)); gap: 12px; margin-top: 4px; }
+  .editor-wrap { position: relative; height: 160px; border-radius: 4px; overflow: hidden; }
 </style>
