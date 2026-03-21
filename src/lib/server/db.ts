@@ -389,6 +389,170 @@ function migrate(db: Database.Database) {
     `);
 	}
 
+	// Metrics table
+	db.exec(`
+    CREATE TABLE IF NOT EXISTS metrics (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      name        TEXT    NOT NULL,
+      category    TEXT    NOT NULL DEFAULT 'Custom',
+      description TEXT    NOT NULL DEFAULT '',
+      sql         TEXT    NOT NULL,
+      is_builtin  INTEGER NOT NULL DEFAULT 0,
+      higher_is_better INTEGER NOT NULL DEFAULT 1,
+      position    INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+
+	// Seed built-in metrics (idempotent)
+	const metricCount = (db.prepare('SELECT COUNT(*) as c FROM metrics WHERE is_builtin = 1').get() as { c: number }).c;
+	if (metricCount === 0) {
+		const ins = db.prepare(`INSERT INTO metrics (name, category, description, sql, is_builtin, higher_is_better, position) VALUES (?, ?, ?, ?, 1, ?, ?)`);
+		db.transaction(() => {
+			let p = 0;
+
+			// ── Cache & I/O ──────────────────────────────────────────────
+			ins.run('Buffer hit ratio', 'Cache & I/O',
+				'Fraction of block reads served from shared_buffers. Higher = fewer disk reads.',
+				`SELECT _collected_at, datname,
+  round(blks_hit * 1.0 / NULLIF(blks_hit + blks_read, 0), 4) AS hit_ratio
+FROM snap_pg_stat_database
+WHERE _run_id = ? AND _is_baseline = 0
+  AND datname NOT IN ('template0','template1','postgres')
+ORDER BY _collected_at`, 1, p++);
+
+			ins.run('Heap cache hit ratio (per table)', 'Cache & I/O',
+				'Fraction of heap block reads served from cache per table. Lower = more disk I/O.',
+				`SELECT _collected_at, schemaname, relname,
+  round(heap_blks_hit * 1.0 / NULLIF(heap_blks_hit + heap_blks_read, 0), 4) AS heap_hit_ratio
+FROM snap_pg_statio_user_tables
+WHERE _run_id = ? AND _is_baseline = 0
+ORDER BY _collected_at, relname`, 1, p++);
+
+			ins.run('Index cache hit ratio (per index)', 'Cache & I/O',
+				'Fraction of index block reads served from cache per index.',
+				`SELECT _collected_at, schemaname, relname, indexrelname,
+  round(idx_blks_hit * 1.0 / NULLIF(idx_blks_hit + idx_blks_read, 0), 4) AS idx_hit_ratio
+FROM snap_pg_statio_user_indexes
+WHERE _run_id = ? AND _is_baseline = 0
+ORDER BY _collected_at, indexrelname`, 1, p++);
+
+			ins.run('TOAST reads (per table)', 'Cache & I/O',
+				'TOAST heap block reads from disk per table. Non-zero means large values are hitting disk.',
+				`SELECT _collected_at, schemaname, relname, toast_blks_read, toast_blks_hit
+FROM snap_pg_statio_user_tables
+WHERE _run_id = ? AND _is_baseline = 0 AND (toast_blks_read > 0 OR toast_blks_hit > 0)
+ORDER BY _collected_at, relname`, 0, p++);
+
+			// ── Access Patterns ──────────────────────────────────────────
+			ins.run('Seq scan ratio (per table)', 'Access Patterns',
+				'Fraction of scans that are sequential. High ratio = missing or unused indexes.',
+				`SELECT _collected_at, schemaname, relname,
+  seq_scan, idx_scan,
+  round(seq_scan * 1.0 / NULLIF(seq_scan + idx_scan, 0), 4) AS seq_ratio
+FROM snap_pg_stat_user_tables
+WHERE _run_id = ? AND _is_baseline = 0
+ORDER BY _collected_at, relname`, 0, p++);
+
+			ins.run('Index usage (per index)', 'Access Patterns',
+				'Number of index scans per index. Zero = dead index, not being used.',
+				`SELECT _collected_at, schemaname, relname, indexrelname, idx_scan, idx_tup_read, idx_tup_fetch
+FROM snap_pg_stat_user_indexes
+WHERE _run_id = ? AND _is_baseline = 0
+ORDER BY _collected_at, indexrelname`, 1, p++);
+
+			ins.run('Index selectivity (per index)', 'Access Patterns',
+				'Ratio of rows fetched to rows read via index. Low = index scan reads many rows but discards most (low selectivity).',
+				`SELECT _collected_at, schemaname, relname, indexrelname,
+  round(idx_tup_fetch * 1.0 / NULLIF(idx_tup_read, 0), 4) AS selectivity
+FROM snap_pg_stat_user_indexes
+WHERE _run_id = ? AND _is_baseline = 0 AND idx_tup_read > 0
+ORDER BY _collected_at, indexrelname`, 1, p++);
+
+			// ── Write Efficiency ─────────────────────────────────────────
+			ins.run('HOT update ratio (per table)', 'Write Efficiency',
+				'Fraction of updates that are HOT (no index update needed). Higher = less write amplification.',
+				`SELECT _collected_at, schemaname, relname,
+  n_tup_upd, n_tup_hot_upd,
+  round(n_tup_hot_upd * 1.0 / NULLIF(n_tup_upd, 0), 4) AS hot_ratio
+FROM snap_pg_stat_user_tables
+WHERE _run_id = ? AND _is_baseline = 0 AND n_tup_upd > 0
+ORDER BY _collected_at, relname`, 1, p++);
+
+			ins.run('Dead tuple accumulation (per table)', 'Write Efficiency',
+				'Number of dead tuples over time. Fast growth means vacuum is struggling to keep up.',
+				`SELECT _collected_at, schemaname, relname, n_live_tup, n_dead_tup,
+  round(n_dead_tup * 1.0 / NULLIF(n_live_tup + n_dead_tup, 0), 4) AS dead_ratio
+FROM snap_pg_stat_user_tables
+WHERE _run_id = ? AND _is_baseline = 0
+ORDER BY _collected_at, relname`, 0, p++);
+
+			ins.run('WAL bytes generated', 'Write Efficiency',
+				'Cumulative WAL bytes written. Compare designs to measure write amplification.',
+				`SELECT _collected_at, wal_bytes, wal_records, wal_fpi
+FROM snap_pg_stat_wal
+WHERE _run_id = ? AND _is_baseline = 0
+ORDER BY _collected_at`, 0, p++);
+
+			// ── Checkpoint & BGWriter ────────────────────────────────────
+			ins.run('Checkpoint activity', 'Checkpoint & BGWriter',
+				'Forced (req) vs scheduled (timed) checkpoints. High req count = buffer pressure.',
+				`SELECT _collected_at, checkpoints_timed, checkpoints_req,
+  buffers_checkpoint, checkpoint_write_time, checkpoint_sync_time
+FROM snap_pg_stat_bgwriter
+WHERE _run_id = ? AND _is_baseline = 0
+ORDER BY _collected_at`, 0, p++);
+
+			ins.run('Buffer writes: bgwriter vs backends', 'Checkpoint & BGWriter',
+				'buffers_backend > 0 means backends are evicting dirty buffers themselves, stalling queries.',
+				`SELECT _collected_at, buffers_clean, buffers_backend, buffers_alloc, maxwritten_clean
+FROM snap_pg_stat_bgwriter
+WHERE _run_id = ? AND _is_baseline = 0
+ORDER BY _collected_at`, 0, p++);
+
+			// ── Vacuum Health ────────────────────────────────────────────
+			ins.run('Live vs dead tuple ratio (per table)', 'Vacuum Health',
+				'Table bloat indicator. Dead ratio above 20% means vacuum is not keeping up.',
+				`SELECT _collected_at, schemaname, relname,
+  n_live_tup, n_dead_tup,
+  round(n_live_tup * 1.0 / NULLIF(n_live_tup + n_dead_tup, 0), 4) AS live_ratio
+FROM snap_pg_stat_user_tables
+WHERE _run_id = ? AND _is_baseline = 0 AND (n_live_tup + n_dead_tup) > 0
+ORDER BY _collected_at, relname`, 1, p++);
+
+			ins.run('Autovacuum activity (per table)', 'Vacuum Health',
+				'Autovacuum and autoanalyze counts during the run. Non-zero means vacuum triggered mid-benchmark.',
+				`SELECT _collected_at, schemaname, relname,
+  autovacuum_count, autoanalyze_count, last_autovacuum, last_autoanalyze
+FROM snap_pg_stat_user_tables
+WHERE _run_id = ? AND _is_baseline = 0
+ORDER BY _collected_at, relname`, 0, p++);
+
+			// ── Concurrency ──────────────────────────────────────────────
+			ins.run('Deadlocks over time', 'Concurrency',
+				'Cumulative deadlock count. Any non-zero value during a benchmark is a red flag.',
+				`SELECT _collected_at, datname, deadlocks, conflicts
+FROM snap_pg_stat_database
+WHERE _run_id = ? AND _is_baseline = 0
+  AND datname NOT IN ('template0','template1','postgres')
+ORDER BY _collected_at`, 0, p++);
+
+			ins.run('Lock conflicts', 'Concurrency',
+				'Queries cancelled due to lock conflicts. Indicates contention between concurrent sessions.',
+				`SELECT _collected_at, datname, confl_lock, confl_snapshot, confl_deadlock
+FROM snap_pg_stat_database_conflicts
+WHERE _run_id = ? AND _is_baseline = 0
+ORDER BY _collected_at`, 0, p++);
+
+			ins.run('Backend states over time', 'Concurrency',
+				'Count of backends by state per snapshot. High idle-in-transaction count indicates connection/lock issues.',
+				`SELECT _collected_at, state, count(*) AS backend_count
+FROM snap_pg_stat_activity
+WHERE _run_id = ? AND _is_baseline = 0 AND state IS NOT NULL
+GROUP BY _collected_at, state
+ORDER BY _collected_at, state`, 1, p++);
+		})();
+	}
+
 	// Seed default saved queries
 	const count = (db.prepare('SELECT COUNT(*) as c FROM saved_queries WHERE decision_id IS NULL').get() as { c: number }).c;
 	if (count === 0) {

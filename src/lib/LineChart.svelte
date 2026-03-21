@@ -2,7 +2,8 @@
   interface ChartPoint { t: number; v: number; }
   interface ChartSeries { label: string; color: string; points: ChartPoint[]; }
 
-  let { series, title }: { series: ChartSeries[]; title: string } = $props();
+  interface Marker { t: number; label: string; color?: string; }
+  let { series, title, markers = [] }: { series: ChartSeries[]; title: string; markers?: Marker[] } = $props();
 
   const ML = 60, MR = 20, MT = 8, MB = 28;
   const W = 520, H = 190;
@@ -67,6 +68,12 @@
           {@const xp = f * IW}
           {@const relMs = f * tRange}
           <text x={xp} y={IH + 14} text-anchor="middle" font-size="10" fill="#999">{fmtTime(relMs)}</text>
+        {/each}
+        <!-- markers -->
+        {#each markers as m}
+          {@const xp = tx(m.t)}
+          <line x1={xp} y1="0" x2={xp} y2={IH} stroke={m.color ?? '#aaa'} stroke-width="1" stroke-dasharray="4,3" />
+          <text x={xp + 3} y="8" font-size="9" fill={m.color ?? '#999'}>{m.label}</text>
         {/each}
         <!-- series -->
         {#each series as s}
