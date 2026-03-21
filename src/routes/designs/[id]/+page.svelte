@@ -38,6 +38,7 @@
   interface Design {
     id: number; decision_id: number; name: string; description: string;
     server_id: number|null; database: string; steps: Step[]; params: Param[];
+    snapshot_interval_seconds: number;
   }
   interface Server { id: number; name: string; }
   interface Run { id: number; status: string; tps: number|null; latency_avg_ms: number|null; started_at: string; }
@@ -49,7 +50,6 @@
   let selectedScriptIdx = $state(0);
   let saving = $state(false);
   let startingRun = $state(false);
-  let snapshotInterval = $state(30);
   let msg = $state('');
   let showConfig = $state(false);
   let showValidation = $state(false);
@@ -61,48 +61,15 @@
   let runDatabase = $state('');
   let runSnapshotInterval = $state(30);
 
-  function loadPersistedRunConfig() {
-    if (typeof localStorage === 'undefined') return;
-    const raw = localStorage.getItem(`run-config-${id}`);
-    if (!raw) return;
-    try {
-      const cfg = JSON.parse(raw);
-      // Only restore snapshot interval — server/database come from the API,
-      // not localStorage (which was overwriting the saved design config).
-      if (cfg.snapshotInterval !== undefined) snapshotInterval = cfg.snapshotInterval;
-    } catch {}
-  }
-
-  function persistRunConfig() {
-    if (typeof localStorage === 'undefined') return;
-    localStorage.setItem(`run-config-${id}`, JSON.stringify({
-      server_id: runServer,
-      database: runDatabase,
-      snapshotInterval: runSnapshotInterval
-    }));
-  }
-
   function openRunModal() {
     if (!design) return;
     if (!isValid) {
       msg = `Cannot run: ${validationErrors.length} undefined placeholder(s). Check params.`;
       return;
     }
-    // Start from design's saved values, then apply any persisted run overrides
     runServer = design.server_id;
     runDatabase = design.database;
-    runSnapshotInterval = snapshotInterval;
-    if (typeof localStorage !== 'undefined') {
-      const raw = localStorage.getItem(`run-config-${id}`);
-      if (raw) {
-        try {
-          const cfg = JSON.parse(raw);
-          if (cfg.server_id != null) runServer = cfg.server_id;
-          if (cfg.database) runDatabase = cfg.database;
-          if (cfg.snapshotInterval) runSnapshotInterval = cfg.snapshotInterval;
-        } catch {}
-      }
-    }
+    runSnapshotInterval = design.snapshot_interval_seconds;
     showRunModal = true;
   }
 
@@ -160,8 +127,6 @@
     if (!design) return;
     showRunModal = false;
     startingRun = true;
-    // Persist chosen config for next time
-    persistRunConfig();
     const res = await fetch('/api/runs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -267,7 +232,7 @@
   }
 
   onMount(() => {
-    load().then(loadPersistedRunConfig);
+    load();
     window.addEventListener('keydown', handleKeydown);
     return () => window.removeEventListener('keydown', handleKeydown);
   });
@@ -340,7 +305,7 @@
       </div>
       <div class="form-group" style="flex:0 0 160px">
         <label for="design-snap-interval" title="How often pg_stat_* snapshots are collected during a pgbench run">Snapshot interval (s)</label>
-        <input id="design-snap-interval" type="number" bind:value={snapshotInterval} min="5" max="300" />
+        <input id="design-snap-interval" type="number" bind:value={design.snapshot_interval_seconds} min="5" max="300" />
       </div>
     </div>
   </div>

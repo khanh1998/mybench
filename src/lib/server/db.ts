@@ -52,7 +52,8 @@ function migrate(db: Database.Database) {
       server_id INTEGER REFERENCES pg_servers(id),
       database TEXT NOT NULL DEFAULT '',
       pre_collect_secs INTEGER NOT NULL DEFAULT 0,
-      post_collect_secs INTEGER NOT NULL DEFAULT 60
+      post_collect_secs INTEGER NOT NULL DEFAULT 60,
+      snapshot_interval_seconds INTEGER NOT NULL DEFAULT 30
     );
 
     CREATE TABLE IF NOT EXISTS design_steps (
@@ -588,6 +589,7 @@ function migrate(db: Database.Database) {
 	const designCols = (db.prepare(`PRAGMA table_info(designs)`).all() as { name: string }[]).map(c => c.name);
 	if (!designCols.includes('pre_collect_secs')) db.exec(`ALTER TABLE designs ADD COLUMN pre_collect_secs INTEGER NOT NULL DEFAULT 0`);
 	if (!designCols.includes('post_collect_secs')) db.exec(`ALTER TABLE designs ADD COLUMN post_collect_secs INTEGER NOT NULL DEFAULT 60`);
+	if (!designCols.includes('snapshot_interval_seconds')) db.exec(`ALTER TABLE designs ADD COLUMN snapshot_interval_seconds INTEGER NOT NULL DEFAULT 30`);
 
 	const runCols = (db.prepare(`PRAGMA table_info(benchmark_runs)`).all() as { name: string }[]).map(c => c.name);
 	if (!runCols.includes('pre_collect_secs')) db.exec(`ALTER TABLE benchmark_runs ADD COLUMN pre_collect_secs INTEGER NOT NULL DEFAULT 0`);
