@@ -3,7 +3,7 @@ import getDb from '$lib/server/db';
 import { createPool } from '$lib/server/pg-client';
 import { collectSnapshot, getEnabledTablesForRun } from '$lib/server/pg-stats';
 import { runPgbench, runSqlStep, type SqlStepOptions } from '$lib/server/pgbench';
-import { createRun, completeRun, setPool, setSnapshotTimer } from '$lib/server/run-manager';
+import { createRun, completeRun, setPool, setSnapshotTimer, setActivePhase } from '$lib/server/run-manager';
 import { substituteParams } from '$lib/server/params';
 import type { RequestHandler } from './$types';
 import type { PgServer, DesignStep, PgbenchScript, DesignParam } from '$lib/types';
@@ -99,8 +99,14 @@ export const POST: RequestHandler = async ({ request }) => {
 		try {
 			// ── Pre-benchmark collection ──────────────────────────────────
 			if (preCollectSecs > 0 && enabledTables.length > 0) {
+				const prePhase = { name: 'pre' as const, status: 'running' as const, duration_secs: preCollectSecs, started_ms: Date.now() };
+				setActivePhase(runId, prePhase);
+				activeRun.emitter.emit('phase', prePhase);
 				activeRun.emitter.emit('line', `[snapshot] Pre-benchmark collection (${preCollectSecs}s)...`);
 				await collectForDuration(pool, runId, enabledTables, 'pre', preCollectSecs, snapshot_interval_seconds);
+				const prePhoneDone = { ...prePhase, status: 'completed' as const };
+				setActivePhase(runId, prePhoneDone);
+				activeRun.emitter.emit('phase', prePhoneDone);
 			}
 
 			// ── Steps ─────────────────────────────────────────────────────
@@ -204,8 +210,14 @@ export const POST: RequestHandler = async ({ request }) => {
 			if (postCollectSecs > 0 && enabledTables.length > 0) {
 				const postStartedAt = new Date().toISOString();
 				db.prepare(`UPDATE benchmark_runs SET post_started_at=? WHERE id=?`).run(postStartedAt, runId);
+				const postPhase = { name: 'post' as const, status: 'running' as const, duration_secs: postCollectSecs, started_ms: Date.now() };
+				setActivePhase(runId, postPhase);
+				activeRun.emitter.emit('phase', postPhase);
 				activeRun.emitter.emit('line', `\n[snapshot] Post-benchmark collection (${postCollectSecs}s)...`);
 				await collectForDuration(pool, runId, enabledTables, 'post', postCollectSecs, snapshot_interval_seconds);
+				const postPhaseDone = { ...postPhase, status: 'completed' as const };
+				setActivePhase(runId, null);
+				activeRun.emitter.emit('phase', postPhaseDone);
 			}
 
 			db.prepare(`UPDATE benchmark_runs SET status='completed', finished_at=datetime('now') WHERE id=?`).run(runId);

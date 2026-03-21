@@ -15,7 +15,15 @@
     id: number; status: string; tps: number|null; latency_avg_ms: number|null;
     latency_stddev_ms: number|null; transactions: number|null;
     started_at: string; finished_at: string|null;
+    pre_collect_secs: number; post_collect_secs: number;
     steps: StepResult[];
+  }
+  interface PhaseState {
+    name: 'pre' | 'post';
+    status: 'running' | 'completed';
+    duration_secs: number;
+    started_ms: number;
+    elapsed_secs: number;
   }
 
   let run: Run | null = $state(null);
@@ -25,6 +33,8 @@
   let outputEl: HTMLPreElement | null = $state(null);
   let expandedStep = $state<number | null>(null);
   let scrollPending = false;
+  let phases: PhaseState[] = $state([]);
+  const phaseTimers = new Map<string, ReturnType<typeof setInterval>>();
 
   const pendingLines: string[] = [];
 
@@ -69,6 +79,25 @@
     outputEl.appendChild(frag);
   }
 
+  function applyPhaseEvent(data: { name: 'pre' | 'post'; status: 'running' | 'completed'; duration_secs: number; started_ms: number }) {
+    const idx = phases.findIndex(p => p.name === data.name);
+    if (data.status === 'running') {
+      const phase: PhaseState = { ...data, elapsed_secs: Math.floor((Date.now() - data.started_ms) / 1000) };
+      phases = idx >= 0 ? phases.map((p, i) => i === idx ? phase : p) : [...phases, phase];
+      if (!phaseTimers.has(data.name)) {
+        phaseTimers.set(data.name, setInterval(() => {
+          phases = phases.map(p => p.name === data.name ? { ...p, elapsed_secs: p.elapsed_secs + 1 } : p);
+        }, 1000));
+      }
+    } else {
+      clearInterval(phaseTimers.get(data.name));
+      phaseTimers.delete(data.name);
+      phases = idx >= 0
+        ? phases.map((p, i) => i === idx ? { ...p, status: 'completed' } : p)
+        : [...phases, { ...data, elapsed_secs: data.duration_secs }];
+    }
+  }
+
   function connectSSE() {
     eventSource = new EventSource(`/api/runs/${runId}/stream`);
     eventSource.onmessage = (e) => {
@@ -84,10 +113,17 @@
         }
       } catch {}
     });
+    eventSource.addEventListener('phase', (e) => {
+      try { applyPhaseEvent(JSON.parse((e as MessageEvent).data)); } catch {}
+    });
     eventSource.addEventListener('done', (e) => {
       finalStatus = (e as MessageEvent).data;
       done = true;
       eventSource?.close();
+      // Mark any still-running phase as completed
+      phases = phases.map(p => p.status === 'running' ? { ...p, status: 'completed' } : p);
+      for (const t of phaseTimers.values()) clearInterval(t);
+      phaseTimers.clear();
       loadRun();
     });
     eventSource.onerror = () => {
@@ -131,6 +167,7 @@
 
   onDestroy(() => {
     eventSource?.close();
+    for (const t of phaseTimers.values()) clearInterval(t);
   });
 </script>
 
@@ -180,6 +217,47 @@
       {/if}
     </div>
   </div>
+
+  <!-- Collection phases -->
+  {#if phases.length > 0 || (run.pre_collect_secs > 0 || run.post_collect_secs > 0)}
+    <div class="card" style="margin-bottom:12px">
+      <h3>Collection Phases</h3>
+      <div class="phases-list">
+        {#if run.pre_collect_secs > 0}
+          {@const ph = phases.find(p => p.name === 'pre')}
+          <div class="phase-row">
+            <span class="phase-tag pre">pre-collect</span>
+            <span class="phase-dur">{run.pre_collect_secs}s</span>
+            {#if !ph}
+              <span class="phase-status pending">pending</span>
+            {:else if ph.status === 'running'}
+              <span class="phase-status running">collecting…</span>
+              <div class="phase-bar"><div class="phase-fill" style="width:{Math.min(100, (ph.elapsed_secs / ph.duration_secs) * 100).toFixed(1)}%"></div></div>
+              <span class="phase-elapsed">{ph.elapsed_secs}s / {ph.duration_secs}s</span>
+            {:else}
+              <span class="phase-status done">✓ done</span>
+            {/if}
+          </div>
+        {/if}
+        {#if run.post_collect_secs > 0}
+          {@const ph = phases.find(p => p.name === 'post')}
+          <div class="phase-row">
+            <span class="phase-tag post">post-collect</span>
+            <span class="phase-dur">{run.post_collect_secs}s</span>
+            {#if !ph}
+              <span class="phase-status pending">pending</span>
+            {:else if ph.status === 'running'}
+              <span class="phase-status running">collecting…</span>
+              <div class="phase-bar"><div class="phase-fill" style="width:{Math.min(100, (ph.elapsed_secs / ph.duration_secs) * 100).toFixed(1)}%"></div></div>
+              <span class="phase-elapsed">{ph.elapsed_secs}s / {ph.duration_secs}s</span>
+            {:else}
+              <span class="phase-status done">✓ done</span>
+            {/if}
+          </div>
+        {/if}
+      </div>
+    </div>
+  {/if}
 
   {#if run.steps?.length > 0}
     <div class="card" style="margin-bottom:12px">
@@ -250,4 +328,20 @@
   .detail-pre { margin: 0; font-size: 12px; white-space: pre-wrap; word-break: break-all; background: #1e1e1e; color: #d4d4d4; padding: 8px; border-radius: 4px; max-height: 200px; overflow-y: auto; }
   .cursor { animation: blink 1s step-end infinite; }
   @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
+
+  /* Collection phases */
+  .phases-list { display: flex; flex-direction: column; gap: 8px; }
+  .phase-row { display: flex; align-items: center; gap: 10px; font-size: 12px; }
+  .phase-tag { padding: 2px 8px; border-radius: 10px; font-weight: 700; font-size: 11px; white-space: nowrap; }
+  .phase-tag.pre  { background: #e8f4ff; color: #0055aa; }
+  .phase-tag.post { background: #fff8e8; color: #885500; }
+  .phase-dur { color: #888; font-size: 11px; min-width: 28px; }
+  .phase-status { font-size: 11px; font-weight: 600; min-width: 80px; }
+  .phase-status.pending { color: #aaa; }
+  .phase-status.running { color: #0066cc; animation: pulse 1.5s ease-in-out infinite; }
+  .phase-status.done    { color: #00884d; }
+  .phase-bar { flex: 1; max-width: 200px; height: 6px; background: #eee; border-radius: 3px; overflow: hidden; }
+  .phase-fill { height: 100%; background: #0066cc; border-radius: 3px; transition: width 0.8s linear; }
+  .phase-elapsed { color: #666; font-size: 11px; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
 </style>

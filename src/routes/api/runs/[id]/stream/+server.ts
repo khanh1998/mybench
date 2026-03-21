@@ -50,6 +50,7 @@ export const GET: RequestHandler = ({ params }) => {
 
 	let onLine: (line: string) => void;
 	let onStep: (data: object) => void;
+	let onPhase: (data: object) => void;
 	let onDone: () => void;
 
 	const stream = new ReadableStream({
@@ -60,11 +61,19 @@ export const GET: RequestHandler = ({ params }) => {
 				return;
 			}
 
+			// Replay current phase for late connects (page refresh mid-phase)
+			if (activeRun.currentPhase) {
+				try { controller.enqueue(encoder.encode(`event: phase\ndata: ${JSON.stringify(activeRun.currentPhase)}\n\n`)); } catch {}
+			}
+
 			onLine = (line: string) => {
 				try { controller.enqueue(encoder.encode(`data: ${JSON.stringify(line)}\n\n`)); } catch {}
 			};
 			onStep = (data: object) => {
 				try { controller.enqueue(encoder.encode(`event: step\ndata: ${JSON.stringify(data)}\n\n`)); } catch {}
+			};
+			onPhase = (data: object) => {
+				try { controller.enqueue(encoder.encode(`event: phase\ndata: ${JSON.stringify(data)}\n\n`)); } catch {}
 			};
 			onDone = () => {
 				const r = db.prepare('SELECT status FROM benchmark_runs WHERE id = ?').get(runId) as { status: string } | undefined;
@@ -76,11 +85,13 @@ export const GET: RequestHandler = ({ params }) => {
 
 			activeRun.emitter.on('line', onLine);
 			activeRun.emitter.on('step', onStep);
+			activeRun.emitter.on('phase', onPhase);
 			activeRun.emitter.once('done', onDone);
 		},
 		cancel() {
 			activeRun?.emitter.off('line', onLine);
 			activeRun?.emitter.off('step', onStep);
+			activeRun?.emitter.off('phase', onPhase);
 			activeRun?.emitter.off('done', onDone);
 		}
 	});

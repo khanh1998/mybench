@@ -34,6 +34,7 @@
   let collapsedCategories: Record<string, boolean> = $state({});
   let deltaMode = $state(true);
   let runningMetricId = $state<number | null>(null);
+  let includedPhases = $state<string[]>(['bench']);
 
   // metric CRUD form
   let editingMetric = $state<Partial<Metric> & { isNew?: boolean } | null>(null);
@@ -189,13 +190,23 @@
     runAllMetrics();
   }
 
+  // ── Phase filter ──────────────────────────────────────────────────────────
+  function applyPhaseFilter(sql: string): string {
+    const phases = includedPhases;
+    if (phases.length === 0) return sql;
+    const filter = phases.length === 1
+      ? `_phase = '${phases[0]}'`
+      : `_phase IN (${phases.map(p => `'${p}'`).join(', ')})`;
+    return sql.replace(/_phase = 'bench'/g, filter);
+  }
+
   // ── Metrics ───────────────────────────────────────────────────────────────
   async function runMetric(m: Metric) {
     runningMetricId = m.id;
     metricResults[m.id] = {};
     for (const [did, runId] of Object.entries(selectedRuns)) {
       if (!runId) continue;
-      metricResults[m.id][Number(did)] = await queryApi(m.sql, [runId]);
+      metricResults[m.id][Number(did)] = await queryApi(applyPhaseFilter(m.sql), [runId]);
     }
     metricResults = { ...metricResults };
     // Auto-detect time/value columns
@@ -259,7 +270,7 @@
     metricTestResults = {};
     for (const [did, runId] of Object.entries(selectedRuns)) {
       if (!runId) continue;
-      metricTestResults[Number(did)] = await queryApi(editingMetric.sql, [runId]);
+      metricTestResults[Number(did)] = await queryApi(applyPhaseFilter(editingMetric.sql), [runId]);
     }
     metricTestResults = { ...metricTestResults };
     metricTestRunning = false;
@@ -321,9 +332,24 @@
 
 <!-- ── Metrics ────────────────────────────────────────────────────────── -->
 <div class="card">
-  <div class="row" style="margin-bottom:12px">
+  <div class="row" style="margin-bottom:12px;flex-wrap:wrap;gap:8px">
     <h3>Metrics</h3>
     <span class="spacer"></span>
+    <div class="phase-filter">
+      <span class="phase-filter-label">Phases:</span>
+      {#each ['pre', 'bench', 'post'] as ph}
+        <label class="phase-check phase-check-{ph}">
+          <input type="checkbox"
+            checked={includedPhases.includes(ph)}
+            onchange={(e) => {
+              const checked = (e.currentTarget as HTMLInputElement).checked;
+              includedPhases = checked ? [...includedPhases, ph] : includedPhases.filter(p => p !== ph);
+              if (includedPhases.length > 0) runAllMetrics();
+            }} />
+          {ph}
+        </label>
+      {/each}
+    </div>
     <label class="delta-toggle">
       <input type="checkbox" bind:checked={deltaMode} />
       Δ from baseline only
@@ -567,6 +593,14 @@
   /* metrics */
   .delta-toggle { display: flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; color: #555; }
   .delta-toggle input { width: auto; }
+
+  .phase-filter { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+  .phase-filter-label { font-weight: 600; color: #666; }
+  .phase-check { display: flex; align-items: center; gap: 3px; font-weight: 600; cursor: pointer; padding: 2px 6px; border-radius: 10px; }
+  .phase-check input { width: auto; }
+  .phase-check-pre  { background: #e8f4ff; color: #0055aa; }
+  .phase-check-bench { background: #e8fff2; color: #006633; }
+  .phase-check-post { background: #fff8e8; color: #885500; }
 
   .category-section { margin-bottom: 4px; }
   .category-header {
