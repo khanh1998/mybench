@@ -14,6 +14,7 @@
   interface ChartSeries { label: string; color: string; points: ChartPoint[]; }
   interface SnapTable { name: string; columns: string[]; }
 
+
   const COLORS = ['#0066cc', '#e6531d', '#00996b', '#9b36b7', '#cc8800'];
   const CATEGORIES = ['Cache & I/O', 'Access Patterns', 'Write Efficiency', 'Checkpoint & BGWriter', 'Vacuum Health', 'Concurrency', 'Custom'];
 
@@ -37,29 +38,12 @@
   // metric CRUD form
   let editingMetric = $state<Partial<Metric> & { isNew?: boolean } | null>(null);
   let metricFormError = $state('');
+  let metricTestResults: Record<number, QueryResult> = $state({});
+  let metricTestRunning = $state(false);
 
-  // pgbench summary
-  let savedQueries: { id: number; name: string; sql: string; decision_id: number|null }[] = $state([]);
-  let queryResults: Record<number, Record<number, QueryResult>> = $state({});
-  let adHocSql = $state('SELECT * FROM snap_pg_stat_database WHERE _run_id = ? LIMIT 5');
-  let adHocResults: Record<number, QueryResult> = $state({});
-  let adHocRunning = $state(false);
-  let newQueryName = $state('');
-  let showSaveForm = $state(false);
-
-  // charts (snap table picker + custom sql)
+  // snap tables (for metric form autocomplete)
   let snapTables: SnapTable[] = $state([]);
-  let chartTable = $state('');
-  let chartColumns: string[] = $state([]);
-  let charts: { column: string; series: ChartSeries[] }[] = $state([]);
-  let chartsRunning = $state(false);
-  let chartMode = $state<'table' | 'sql'>('table');
-  let chartSql = $state('SELECT _collected_at, blks_read, blks_hit\nFROM snap_pg_stat_database\nWHERE _run_id = ?\nORDER BY _collected_at');
-  let sqlCharts: { column: string; series: ChartSeries[] }[] = $state([]);
-  let sqlChartsRunning = $state(false);
-  let sqlChartError = $state('');
 
-  const currentSnapTable = $derived(snapTables.find(t => t.name === chartTable));
   const snapSchema = $derived(Object.fromEntries(snapTables.map(t => [t.name, t.columns])));
   const selectedRunIds = $derived(Object.values(selectedRuns).filter(Boolean));
   const metricsByCategory = $derived(() => {
@@ -183,13 +167,11 @@
 
   // ── Data loading ──────────────────────────────────────────────────────────
   async function load() {
-    const [dRes, sqRes, mRes] = await Promise.all([
+    const [dRes, mRes] = await Promise.all([
       fetch(`/api/designs?decision_id=${decisionId}`),
-      fetch(`/api/saved-queries?decision_id=${decisionId}`),
       fetch('/api/metrics')
     ]);
     designs = await dRes.json();
-    savedQueries = await sqRes.json();
     metrics = await mRes.json();
 
     for (const d of designs) {
@@ -201,7 +183,6 @@
     loading = false;
     loadSnapTables();
     runAllMetrics();
-    runAllSavedQueries();
   }
 
   async function loadSnapTables() {
@@ -209,14 +190,11 @@
     if (!runIds) return;
     const res = await fetch(`/api/snap-tables?run_ids=${runIds}`);
     snapTables = await res.json();
-    if (snapTables.length > 0 && !chartTable) chartTable = snapTables[0].name;
   }
 
   async function onRunChange() {
     await loadSnapTables();
-    charts = []; sqlCharts = [];
     runAllMetrics();
-    runAllSavedQueries();
   }
 
   // ── Metrics ───────────────────────────────────────────────────────────────
@@ -280,90 +258,19 @@
 
   function cloneMetric(m: Metric) {
     editingMetric = { ...m, id: undefined, name: m.name + ' (copy)', is_builtin: 0, isNew: true };
+    metricTestResults = {};
   }
 
-  // ── Saved queries ─────────────────────────────────────────────────────────
-  async function runSavedQuery(q: { id: number; sql: string }) {
-    queryResults[q.id] = {};
+  async function testMetric() {
+    if (!editingMetric?.sql?.trim()) return;
+    metricTestRunning = true;
+    metricTestResults = {};
     for (const [did, runId] of Object.entries(selectedRuns)) {
       if (!runId) continue;
-      queryResults[q.id][Number(did)] = await queryApi(q.sql, [runId]);
+      metricTestResults[Number(did)] = await queryApi(editingMetric.sql, [runId]);
     }
-    queryResults = { ...queryResults };
-  }
-  async function runAllSavedQueries() { for (const q of savedQueries) await runSavedQuery(q); }
-  async function deleteQuery(q: { id: number; decision_id: number|null }) {
-    if (q.decision_id === null) return;
-    await fetch(`/api/saved-queries/${q.id}`, { method: 'DELETE' });
-    savedQueries = savedQueries.filter(x => x.id !== q.id);
-  }
-  async function saveAdHoc() {
-    if (!newQueryName.trim()) return;
-    const res = await fetch('/api/saved-queries', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ decision_id: decisionId, name: newQueryName, sql: adHocSql })
-    });
-    savedQueries = [...savedQueries, await res.json()];
-    showSaveForm = false; newQueryName = '';
-  }
-  async function runAdHoc() {
-    adHocRunning = true; adHocResults = {};
-    for (const [did, runId] of Object.entries(selectedRuns)) {
-      if (!runId) continue;
-      adHocResults[Number(did)] = await queryApi(adHocSql, [runId]);
-    }
-    adHocRunning = false; adHocResults = { ...adHocResults };
-  }
-
-  // ── Snap table charts ─────────────────────────────────────────────────────
-  function toggleChartColumn(col: string) {
-    chartColumns = chartColumns.includes(col) ? chartColumns.filter(c => c !== col) : [...chartColumns, col];
-  }
-  async function drawCharts() {
-    chartsRunning = true; charts = [];
-    try {
-      const sql = `SELECT ${['_collected_at', ...chartColumns].join(', ')} FROM ${chartTable} WHERE _run_id = ? ORDER BY _collected_at`;
-      const seriesData: { designId: number; rows: Record<string, unknown>[] }[] = [];
-      for (const [did, runId] of Object.entries(selectedRuns)) {
-        if (!runId) continue;
-        const data = await queryApi(sql, [runId]);
-        if (data.error) { charts = [{ column: 'Error: ' + data.error, series: [] }]; return; }
-        seriesData.push({ designId: Number(did), rows: data.rows });
-      }
-      charts = chartColumns.map(col => ({
-        column: col,
-        series: seriesData.map((sd, i) => ({
-          label: getDesignName(sd.designId), color: COLORS[i % COLORS.length],
-          points: sd.rows.filter(r => r['_collected_at'] != null && r[col] != null)
-            .map(r => ({ t: new Date(String(r['_collected_at'])).getTime(), v: Number(r[col]) }))
-            .filter(p => !isNaN(p.t) && !isNaN(p.v))
-        }))
-      }));
-    } finally { chartsRunning = false; }
-  }
-  async function drawSqlCharts() {
-    sqlChartsRunning = true; sqlCharts = []; sqlChartError = '';
-    try {
-      const seriesData: { designId: number; columns: string[]; rows: Record<string, unknown>[] }[] = [];
-      for (const [did, runId] of Object.entries(selectedRuns)) {
-        if (!runId) continue;
-        const data = await queryApi(chartSql, [runId]);
-        if (data.error) { sqlChartError = data.error; return; }
-        if (!data.columns.includes('_collected_at')) { sqlChartError = 'Query must return a _collected_at column.'; return; }
-        seriesData.push({ designId: Number(did), columns: data.columns, rows: data.rows });
-      }
-      if (!seriesData.length) return;
-      const valueCols = seriesData[0].columns.filter(c => c !== '_collected_at');
-      sqlCharts = valueCols.map(col => ({
-        column: col,
-        series: seriesData.map((sd, i) => ({
-          label: getDesignName(sd.designId), color: COLORS[i % COLORS.length],
-          points: sd.rows.filter(r => r['_collected_at'] != null && r[col] != null)
-            .map(r => ({ t: new Date(String(r['_collected_at'])).getTime(), v: Number(r[col]) }))
-            .filter(p => !isNaN(p.t) && !isNaN(p.v))
-        }))
-      }));
-    } finally { sqlChartsRunning = false; }
+    metricTestResults = { ...metricTestResults };
+    metricTestRunning = false;
   }
 
   onMount(load);
@@ -429,7 +336,7 @@
       <input type="checkbox" bind:checked={deltaMode} />
       Δ from baseline only
     </label>
-    <button onclick={() => { editingMetric = { name:'', category:'Custom', description:'', sql:'SELECT _collected_at FROM snap_pg_stat_database WHERE _run_id = ?', higher_is_better: 1, isNew: true }; metricFormError = ''; }}>+ Add metric</button>
+    <button onclick={() => { editingMetric = { name:'', category:'Custom', description:'', sql:'SELECT _collected_at FROM snap_pg_stat_database WHERE _run_id = ?', higher_is_better: 1, isNew: true }; metricFormError = ''; metricTestResults = {}; }}>+ Add metric</button>
     <button onclick={runAllMetrics}>↺ Run all</button>
   </div>
 
@@ -466,10 +373,42 @@
         </div>
       </div>
       {#if metricFormError}<p class="error">{metricFormError}</p>{/if}
-      <div class="row">
+      <div class="row" style="margin-bottom: {Object.keys(metricTestResults).length ? '10px' : '0'}">
         <button class="primary" onclick={saveMetric}>Save</button>
-        <button onclick={() => editingMetric = null}>Cancel</button>
+        <button onclick={testMetric} disabled={metricTestRunning}>{metricTestRunning ? 'Testing…' : '▶ Test'}</button>
+        <button onclick={() => { editingMetric = null; metricTestResults = {}; }}>Cancel</button>
       </div>
+      {#if Object.keys(metricTestResults).length > 0}
+        <div class="test-results">
+          <div class="results-grid">
+            {#each designs as d}
+              {@const res = metricTestResults[d.id]}
+              {#if res}
+                <div class="result-col">
+                  <div class="result-col-header">{d.name}</div>
+                  {#if res.error}
+                    <p class="error">{res.error}</p>
+                  {:else if res.rows.length > 0}
+                    <div class="table-wrap">
+                      <table>
+                        <thead><tr>{#each res.columns as c}<th>{c}</th>{/each}</tr></thead>
+                        <tbody>
+                          {#each res.rows.slice(0, 5) as row}
+                            <tr>{#each res.columns as c}<td>{row[c] ?? 'NULL'}</td>{/each}</tr>
+                          {/each}
+                        </tbody>
+                      </table>
+                    </div>
+                    {#if res.rows.length > 5}<p style="font-size:11px;color:#999">Showing 5 of {res.rows.length} rows</p>{/if}
+                  {:else}
+                    <p style="color:#999;font-size:12px">No rows</p>
+                  {/if}
+                </div>
+              {/if}
+            {/each}
+          </div>
+        </div>
+      {/if}
     </div>
   {/if}
 
@@ -517,7 +456,7 @@
                     {#if m.is_builtin}
                       <button class="icon-btn" onclick={() => cloneMetric(m)} title="Clone to edit">⎘</button>
                     {:else}
-                      <button class="icon-btn" onclick={() => { editingMetric = { ...m }; metricFormError = ''; }} title="Edit">✎</button>
+                      <button class="icon-btn" onclick={() => { editingMetric = { ...m }; metricFormError = ''; metricTestResults = {}; }} title="Edit">✎</button>
                       <button class="icon-btn danger" onclick={() => deleteMetric(m)} title="Delete">✕</button>
                     {/if}
                     <button class="icon-btn" onclick={() => copyCSV(m.id)} title="Copy CSV">⎘ CSV</button>
@@ -626,147 +565,6 @@
   {/each}
 </div>
 
-<!-- ── Saved Queries ───────────────────────────────────────────────────── -->
-<div class="card">
-  <div class="row" style="margin-bottom:12px">
-    <h3>Saved Queries</h3>
-    <span class="spacer"></span>
-    <button onclick={runAllSavedQueries}>Run All</button>
-  </div>
-  {#each savedQueries as q}
-    <div class="query-block">
-      <div class="row" style="margin-bottom:6px">
-        <strong>{q.name}</strong>
-        {#if q.decision_id !== null}<span style="font-size:11px;color:#999">(custom)</span>{/if}
-        <span class="spacer"></span>
-        <button onclick={() => runSavedQuery(q)}>Run</button>
-        {#if q.decision_id !== null}
-          <button class="danger" onclick={() => deleteQuery(q)}>Delete</button>
-        {/if}
-      </div>
-      <details>
-        <summary style="font-size:11px;color:#666;cursor:pointer">SQL</summary>
-        <pre style="font-size:11px;color:#555;background:#f8f8f8;padding:8px;border-radius:3px;overflow:auto;margin:4px 0">{q.sql}</pre>
-      </details>
-      {#if queryResults[q.id]}
-        <div class="results-grid" style="margin-top:8px">
-          {#each designs as d}
-            {@const res = queryResults[q.id][d.id]}
-            <div class="result-col">
-              <div class="result-col-header">{d.name}</div>
-              {#if res?.error}<p class="error">{res.error}</p>
-              {:else if res?.rows?.length > 0}
-                <div class="table-wrap">
-                  <table>
-                    <thead><tr>{#each res.columns as c}<th>{c}</th>{/each}</tr></thead>
-                    <tbody>{#each res.rows.slice(0,10) as row}<tr>{#each res.columns as c}<td>{row[c] ?? 'NULL'}</td>{/each}</tr>{/each}</tbody>
-                  </table>
-                </div>
-              {:else if res}<p style="color:#999;font-size:12px">No rows</p>{/if}
-            </div>
-          {/each}
-        </div>
-      {/if}
-    </div>
-  {/each}
-</div>
-
-<!-- ── Ad-hoc SQL ──────────────────────────────────────────────────────── -->
-<div class="card">
-  <h3>Ad-hoc SQL</h3>
-  <p style="color:#666;font-size:12px;margin-bottom:8px">Use <code>?</code> as placeholder for <code>_run_id</code>. Query any <code>snap_*</code> table.</p>
-  <div class="editor-wrap" style="margin-bottom:8px"><CodeEditor bind:value={adHocSql} schema={snapSchema} /></div>
-  <div class="row">
-    <button class="primary" onclick={runAdHoc} disabled={adHocRunning}>{adHocRunning ? 'Running…' : 'Run Query'}</button>
-    <button onclick={() => showSaveForm = !showSaveForm}>Save as…</button>
-  </div>
-  {#if showSaveForm}
-    <div class="row" style="margin-top:8px">
-      <input bind:value={newQueryName} placeholder="Query name" style="max-width:300px" />
-      <button class="primary" onclick={saveAdHoc}>Save</button>
-      <button onclick={() => showSaveForm = false}>Cancel</button>
-    </div>
-  {/if}
-  {#if Object.keys(adHocResults).length > 0}
-    <div class="results-grid" style="margin-top:12px">
-      {#each designs as d}
-        {@const res = adHocResults[d.id]}
-        {#if res}
-          <div class="result-col">
-            <div class="result-col-header">{d.name}</div>
-            {#if res.error}<p class="error">{res.error}</p>
-            {:else if res.rows?.length > 0}
-              <div class="table-wrap">
-                <table>
-                  <thead><tr>{#each res.columns as c}<th>{c}</th>{/each}</tr></thead>
-                  <tbody>{#each res.rows.slice(0,20) as row}<tr>{#each res.columns as c}<td>{row[c] ?? 'NULL'}</td>{/each}</tr>{/each}</tbody>
-                </table>
-              </div>
-            {:else}<p style="color:#999;font-size:12px">No rows</p>{/if}
-          </div>
-        {/if}
-      {/each}
-    </div>
-  {/if}
-</div>
-
-<!-- ── Snap Table Charts ───────────────────────────────────────────────── -->
-<div class="card">
-  <div class="row" style="margin-bottom:12px">
-    <h3>Charts</h3>
-    <span class="spacer"></span>
-    <button class={chartMode === 'table' ? 'primary' : ''} onclick={() => chartMode = 'table'}>Snap Table</button>
-    <button class={chartMode === 'sql' ? 'primary' : ''} onclick={() => chartMode = 'sql'}>Custom SQL</button>
-  </div>
-
-  {#if chartMode === 'table'}
-    <div class="chart-controls">
-      <div class="ctrl-row">
-        <span class="ctrl-label">Table</span>
-        <select bind:value={chartTable} onchange={() => { chartColumns = []; charts = []; }}>
-          {#each snapTables as t}<option value={t.name}>{t.name}</option>{/each}
-        </select>
-        {#if snapTables.length === 0}<span style="color:#999;font-size:12px">No snap data for selected runs</span>{/if}
-      </div>
-      {#if currentSnapTable?.columns.length}
-        <div class="ctrl-row" style="align-items:flex-start">
-          <span class="ctrl-label" style="padding-top:2px">Columns</span>
-          <div class="col-checks">
-            {#each currentSnapTable.columns as col}
-              <label class="col-check">
-                <input type="checkbox" checked={chartColumns.includes(col)} onchange={() => toggleChartColumn(col)} />{col}
-              </label>
-            {/each}
-          </div>
-        </div>
-      {/if}
-      <div class="ctrl-row">
-        <button class="primary" onclick={drawCharts} disabled={chartsRunning || chartColumns.length === 0}>
-          {chartsRunning ? 'Drawing…' : 'Draw Charts'}
-        </button>
-        {#if chartColumns.length > 0}<span style="font-size:12px;color:#666">{chartColumns.length} column{chartColumns.length > 1 ? 's' : ''} selected</span>{/if}
-      </div>
-    </div>
-    {#if charts.length > 0}
-      <div class="charts-grid">
-        {#each charts as chart}<LineChart title={chart.column} series={chart.series} />{/each}
-      </div>
-    {/if}
-  {:else}
-    <p style="color:#666;font-size:12px;margin-bottom:8px">SQL must return <code>_collected_at</code> plus numeric columns. Use <code>?</code> for <code>_run_id</code>.</p>
-    <div class="editor-wrap" style="margin-bottom:8px"><CodeEditor bind:value={chartSql} schema={snapSchema} /></div>
-    <div class="row" style="margin-bottom:8px">
-      <button class="primary" onclick={drawSqlCharts} disabled={sqlChartsRunning}>{sqlChartsRunning ? 'Running…' : 'Draw Charts'}</button>
-    </div>
-    {#if sqlChartError}<p class="error">{sqlChartError}</p>{/if}
-    {#if sqlCharts.length > 0}
-      <div class="charts-grid">
-        {#each sqlCharts as chart}<LineChart title={chart.column} series={chart.series} />{/each}
-      </div>
-    {/if}
-  {/if}
-</div>
-
 {/if}
 
 <style>
@@ -823,20 +621,9 @@
   .result-col-header { font-weight: 600; font-size: 12px; color: #0066cc; margin-bottom: 6px; }
   .table-wrap { overflow-x: auto; }
 
-  /* saved queries */
-  .query-block { border-bottom: 1px solid #eee; padding: 12px 0; }
-  .query-block:last-child { border-bottom: none; }
-
-  /* charts */
-  .chart-controls { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
-  .ctrl-row { display: flex; align-items: center; gap: 10px; }
-  .ctrl-label { font-size: 12px; font-weight: 600; color: #555; min-width: 60px; }
-  .col-checks { display: flex; flex-wrap: wrap; gap: 6px 14px; }
-  .col-check { display: flex; align-items: center; gap: 4px; font-size: 12px; font-family: monospace; color: #333; cursor: pointer; }
-  .charts-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(480px, 1fr)); gap: 12px; margin-top: 4px; }
-
   /* metric form */
   .metric-form { border: 1px solid #c8d4ff; background: #f8f9ff !important; }
   .metric-form h4 { margin: 0 0 10px; font-size: 13px; }
   .editor-wrap { position: relative; height: 160px; border-radius: 4px; overflow: hidden; }
+  .test-results { border-top: 1px solid #d8e0ff; margin-top: 10px; padding-top: 10px; }
 </style>
