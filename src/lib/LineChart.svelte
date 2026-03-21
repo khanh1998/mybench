@@ -11,8 +11,9 @@
   const IH = H - MT - MB;
 
   const allPts = $derived(series.flatMap(s => s.points));
-  const tMin = $derived(allPts.length ? Math.min(...allPts.map(p => p.t)) : 0);
-  const tMax = $derived(allPts.length ? Math.max(...allPts.map(p => p.t)) : 1);
+  const markerTs = $derived(markers.map(m => m.t).filter(t => !isNaN(t)));
+  const tMin = $derived(allPts.length ? Math.min(...allPts.map(p => p.t), ...markerTs) : 0);
+  const tMax = $derived(allPts.length ? Math.max(...allPts.map(p => p.t), ...markerTs) : 1);
   const vMin = $derived(allPts.length ? Math.min(...allPts.map(p => p.v)) : 0);
   const vMax = $derived(allPts.length ? Math.max(...allPts.map(p => p.v)) : 1);
   const tRange = $derived(tMax - tMin || 1);

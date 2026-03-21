@@ -51,9 +51,10 @@ export interface DesignStep {
 	design_id: number;
 	position: number;
 	name: string;
-	type: 'sql' | 'pgbench';
+	type: 'sql' | 'pgbench' | 'collect';
 	script: string;
 	pgbench_options: string;
+	duration_secs: number;
 	enabled: number; // 0 or 1
 	pgbench_scripts?: PgbenchScript[];
 }
@@ -79,7 +80,7 @@ export interface RunStepResult {
 	step_id: number;
 	position: number;
 	name: string;
-	type: 'sql' | 'pgbench';
+	type: 'sql' | 'pgbench' | 'collect';
 	status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
 	stdout: string;
 	stderr: string;

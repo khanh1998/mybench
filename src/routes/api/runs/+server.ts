@@ -53,8 +53,19 @@ export const POST: RequestHandler = async ({ request }) => {
 		'SELECT * FROM design_params WHERE design_id = ? ORDER BY position'
 	).all(design.id) as DesignParam[];
 
-	const preCollectSecs = design.pre_collect_secs ?? 0;
-	const postCollectSecs = design.post_collect_secs ?? 60;
+	// Compute pre/post collect secs: from collect steps if present, else design defaults
+	const hasCollectSteps = steps.some(s => s.type === 'collect');
+	let preCollectSecs: number;
+	let postCollectSecs: number;
+	if (hasCollectSteps) {
+		const firstPgbenchPos = steps.find(s => s.type === 'pgbench')?.position ?? Infinity;
+		const lastPgbenchPos = [...steps].reverse().find(s => s.type === 'pgbench')?.position ?? -Infinity;
+		preCollectSecs = steps.filter(s => s.type === 'collect' && s.position < firstPgbenchPos).reduce((sum, s) => sum + (s.duration_secs ?? 0), 0);
+		postCollectSecs = steps.filter(s => s.type === 'collect' && s.position > lastPgbenchPos).reduce((sum, s) => sum + (s.duration_secs ?? 0), 0);
+	} else {
+		preCollectSecs = design.pre_collect_secs ?? 0;
+		postCollectSecs = design.post_collect_secs ?? 0;
+	}
 
 	// Create run record
 	const runResult = db.prepare(
@@ -97,8 +108,8 @@ export const POST: RequestHandler = async ({ request }) => {
 		const enabledTables = getEnabledTablesForRun(server.id);
 
 		try {
-			// ── Pre-benchmark collection ──────────────────────────────────
-			if (preCollectSecs > 0 && enabledTables.length > 0) {
+			// ── Legacy pre-collect (designs without collect steps) ─────────
+			if (!hasCollectSteps && preCollectSecs > 0 && enabledTables.length > 0) {
 				const prePhase = { name: 'pre' as const, status: 'running' as const, duration_secs: preCollectSecs, started_ms: Date.now() };
 				setActivePhase(runId, prePhase);
 				activeRun.emitter.emit('phase', prePhase);
@@ -109,7 +120,8 @@ export const POST: RequestHandler = async ({ request }) => {
 				activeRun.emitter.emit('phase', prePhoneDone);
 			}
 
-			// ── Steps ─────────────────────────────────────────────────────
+			// ── Steps (collect / sql / pgbench inline) ────────────────────
+			let seenPgbench = false;
 			for (const step of steps) {
 				const startedAt = new Date().toISOString().replace('T', ' ').slice(0, 19);
 				db.prepare(`UPDATE run_step_results SET status='running', started_at=? WHERE run_id=? AND step_id=?`).run(startedAt, runId, step.id);
@@ -125,11 +137,33 @@ export const POST: RequestHandler = async ({ request }) => {
 					else stderr += line + '\n';
 				};
 
-				if (step.type === 'pgbench') {
+				if (step.type === 'collect') {
+					// ── Collect step ──────────────────────────────────────
+					const phase = seenPgbench ? 'post' : 'pre';
+					const durationSecs = step.duration_secs ?? 0;
+					if (durationSecs > 0 && enabledTables.length > 0) {
+						const phaseObj = { name: phase as 'pre' | 'post', status: 'running' as const, duration_secs: durationSecs, started_ms: Date.now() };
+						setActivePhase(runId, phaseObj);
+						activeRun.emitter.emit('phase', phaseObj);
+						activeRun.emitter.emit('line', `[snapshot] Collecting pg_stat_* for ${durationSecs}s...`);
+						if (phase === 'post') {
+							db.prepare(`UPDATE benchmark_runs SET post_started_at=? WHERE id=?`).run(new Date().toISOString(), runId);
+						}
+						await collectForDuration(pool, runId, enabledTables, phase, durationSecs, snapshot_interval_seconds);
+						const phaseDone = { ...phaseObj, status: 'completed' as const };
+						setActivePhase(runId, phase === 'post' ? null : phaseDone);
+						activeRun.emitter.emit('phase', phaseDone);
+					} else {
+						activeRun.emitter.emit('line', durationSecs <= 0 ? '[snapshot] Duration is 0, skipping.' : '[snapshot] No tables enabled, skipping.');
+					}
+					exitCode = 0;
+				} else if (step.type === 'pgbench') {
+					// ── pgbench step ──────────────────────────────────────
 					// Record bench_started_at on first pgbench step
 					const benchStartedAt = new Date().toISOString();
 					db.prepare(`UPDATE benchmark_runs SET bench_started_at=? WHERE id=? AND bench_started_at IS NULL`)
 						.run(benchStartedAt, runId);
+					seenPgbench = true;
 
 					// Start periodic bench snapshots
 					const timer = setInterval(async () => {
@@ -178,6 +212,7 @@ export const POST: RequestHandler = async ({ request }) => {
 						).run(result.tps, result.latencyAvgMs, result.latencyStddevMs, result.transactions, runId);
 					}
 				} else {
+					// ── SQL step ──────────────────────────────────────────
 					const sqlOpts: SqlStepOptions = {
 						host: server.host,
 						port: server.port,
@@ -206,8 +241,8 @@ export const POST: RequestHandler = async ({ request }) => {
 				}
 			}
 
-			// ── Post-benchmark collection ─────────────────────────────────
-			if (postCollectSecs > 0 && enabledTables.length > 0) {
+			// ── Legacy post-collect (designs without collect steps) ────────
+			if (!hasCollectSteps && postCollectSecs > 0 && enabledTables.length > 0) {
 				const postStartedAt = new Date().toISOString();
 				db.prepare(`UPDATE benchmark_runs SET post_started_at=? WHERE id=?`).run(postStartedAt, runId);
 				const postPhase = { name: 'post' as const, status: 'running' as const, duration_secs: postCollectSecs, started_ms: Date.now() };

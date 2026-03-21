@@ -69,6 +69,7 @@
   }
   :global(.badge-sql) { background: #e8f4fd; color: #0066cc; }
   :global(.badge-pgbench) { background: #fef3e8; color: #cc6600; }
+  :global(.badge-collect) { background: #f0e8ff; color: #6600cc; }
   :global(.badge-running) { background: #fff3cd; color: #856404; }
   :global(.badge-completed) { background: #d4edda; color: #155724; }
   :global(.badge-failed) { background: #f8d7da; color: #721c24; }

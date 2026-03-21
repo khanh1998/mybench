@@ -27,16 +27,16 @@
     design_id: number;
     position: number;
     name: string;
-    type: 'sql' | 'pgbench';
+    type: 'sql' | 'pgbench' | 'collect';
     script: string;
     pgbench_options: string;
+    duration_secs: number;
     enabled: number;
     pgbench_scripts?: PgbenchScript[];
   }
   interface Design {
     id: number; decision_id: number; name: string; description: string;
     server_id: number|null; database: string; steps: Step[]; params: Param[];
-    pre_collect_secs: number; post_collect_secs: number;
   }
   interface Server { id: number; name: string; }
   interface Run { id: number; status: string; tps: number|null; latency_avg_ms: number|null; started_at: string; }
@@ -199,6 +199,7 @@
       type: 'sql',
       script: '',
       pgbench_options: '',
+      duration_secs: 0,
       enabled: 1,
       pgbench_scripts: []
     };
@@ -329,25 +330,6 @@
         <input id="design-snap-interval" type="number" bind:value={snapshotInterval} min="5" max="300" />
       </div>
     </div>
-    <div class="config-row">
-      <div class="form-group" style="flex:0 0 200px">
-        <label for="design-pre" title="Collect pg_stat_* data for this many seconds before starting the benchmark">Pre-collect (s)</label>
-        <input id="design-pre" type="number" bind:value={design.pre_collect_secs} min="0" max="600" />
-      </div>
-      <div class="form-group" style="flex:0 0 200px">
-        <label for="design-post" title="Continue collecting pg_stat_* data for this many seconds after the benchmark finishes">Post-collect (s)</label>
-        <input id="design-post" type="number" bind:value={design.post_collect_secs} min="0" max="600" />
-      </div>
-      <div class="phase-timeline">
-        <span class="phase pre">pre {design.pre_collect_secs}s</span>
-        <span class="phase-arrow">→</span>
-        {#each design.steps.filter(s => s.enabled) as s}
-          <span class="phase bench">{s.name}</span>
-          <span class="phase-arrow">→</span>
-        {/each}
-        <span class="phase post">post {design.post_collect_secs}s</span>
-      </div>
-    </div>
   </div>
 {/if}
 
@@ -390,16 +372,15 @@
         </div>
       {/if}
 
-      <!-- Collection timeline -->
-      <div class="run-timeline">
-        <span class="phase pre">pre {design.pre_collect_secs}s</span>
-        <span class="phase-arrow">→</span>
-        {#each design.steps.filter(s => s.enabled) as s}
-          <span class="phase {s.type}">{s.name}</span>
-          <span class="phase-arrow">→</span>
-        {/each}
-        <span class="phase post">post {design.post_collect_secs}s</span>
-      </div>
+      <!-- Benchmark plan timeline -->
+      {#if design.steps.filter(s => s.enabled).length > 0}
+        <div class="run-timeline">
+          {#each design.steps.filter(s => s.enabled) as s, i}
+            {#if i > 0}<span class="phase-arrow">→</span>{/if}
+            <span class="phase {s.type}">{s.name}{s.type === 'collect' ? ` ${s.duration_secs}s` : ''}</span>
+          {/each}
+        </div>
+      {/if}
 
       <div class="modal-actions">
         <button onclick={() => showRunModal = false}>Cancel</button>
@@ -496,6 +477,7 @@
         <select bind:value={selectedStep.type} class="type-select">
           <option value="sql">SQL</option>
           <option value="pgbench">pgbench</option>
+          <option value="collect">collect</option>
         </select>
         {#if selectedStep.type === 'pgbench'}
           <input
@@ -504,9 +486,24 @@
             class="options-input"
             title="pgbench options"
           />
+        {:else if selectedStep.type === 'collect'}
+          <label class="collect-duration-label">
+            Duration
+            <input type="number" bind:value={selectedStep.duration_secs} min="0" max="3600" class="collect-duration-input" />
+            s
+          </label>
         {/if}
       </div>
-      {#if selectedStep.type === 'pgbench'}
+      {#if selectedStep.type === 'collect'}
+        <div class="collect-info">
+          <div class="collect-icon">📊</div>
+          <div class="collect-desc">
+            Collects pg_stat_* snapshots for <strong>{selectedStep.duration_secs}s</strong>.
+            <br>Steps before pgbench → <span class="phase-pill pre">pre</span> phase.
+            Steps after pgbench → <span class="phase-pill post">post</span> phase.
+          </div>
+        </div>
+      {:else if selectedStep.type === 'pgbench'}
         {@const scripts = selectedStep.pgbench_scripts ?? []}
         {@const totalWeight = scripts.reduce((s, ps) => s + (ps.weight || 0), 0)}
         <div class="pgbench-split">
@@ -636,6 +633,7 @@
   .phase.bench, .phase.pgbench { background: #e8fff2; color: #006633; }
   .phase.sql  { background: #f5f5f5; color: #555; }
   .phase.post { background: #fff8e8; color: #885500; }
+  .phase.collect { background: #f0e8ff; color: #6600cc; }
 
   /* Run modal steps summary */
   .run-steps-summary { border: 1px solid #eee; border-radius: 6px; padding: 8px 10px; margin-bottom: 14px; background: #fafafa; }
@@ -1077,4 +1075,16 @@
     color: #555;
     font-size: 14px;
   }
+
+  /* Collect step */
+  .collect-duration-label { display: flex; align-items: center; gap: 6px; color: #d4d4d4; font-size: 12px; white-space: nowrap; }
+  .collect-duration-input { width: 72px; background: #3c3c3c; border: 1px solid #555; color: #d4d4d4; padding: 4px 6px; border-radius: 4px; font-size: 12px; text-align: center; }
+  .collect-duration-input:focus { outline: none; border-color: #a78bfa; }
+  .collect-info { flex: 1; display: flex; align-items: center; gap: 16px; padding: 32px 24px; background: #1e1e1e; }
+  .collect-icon { font-size: 32px; }
+  .collect-desc { color: #888; font-size: 13px; line-height: 1.6; }
+  .collect-desc strong { color: #a78bfa; }
+  .phase-pill { display: inline-block; padding: 1px 7px; border-radius: 8px; font-size: 11px; font-weight: 700; }
+  .phase-pill.pre  { background: #e8f4ff; color: #0055aa; }
+  .phase-pill.post { background: #fff8e8; color: #885500; }
 </style>

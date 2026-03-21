@@ -63,7 +63,8 @@ function migrate(db: Database.Database) {
       type TEXT NOT NULL DEFAULT 'sql',
       script TEXT NOT NULL DEFAULT '',
       pgbench_options TEXT NOT NULL DEFAULT '',
-      enabled INTEGER NOT NULL DEFAULT 1
+      enabled INTEGER NOT NULL DEFAULT 1,
+      duration_secs INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS benchmark_runs (
@@ -578,6 +579,10 @@ function migrate(db: Database.Database) {
 	}
 
 	// Idempotent column additions for existing DBs
+	// Add duration_secs to design_steps (idempotent)
+	const stepCols = (db.prepare(`PRAGMA table_info(design_steps)`).all() as { name: string }[]).map(c => c.name);
+	if (!stepCols.includes('duration_secs')) db.exec(`ALTER TABLE design_steps ADD COLUMN duration_secs INTEGER NOT NULL DEFAULT 0`);
+
 	const designCols = (db.prepare(`PRAGMA table_info(designs)`).all() as { name: string }[]).map(c => c.name);
 	if (!designCols.includes('pre_collect_secs')) db.exec(`ALTER TABLE designs ADD COLUMN pre_collect_secs INTEGER NOT NULL DEFAULT 0`);
 	if (!designCols.includes('post_collect_secs')) db.exec(`ALTER TABLE designs ADD COLUMN post_collect_secs INTEGER NOT NULL DEFAULT 60`);
