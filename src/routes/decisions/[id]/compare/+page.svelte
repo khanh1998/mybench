@@ -32,7 +32,6 @@
   let metricValueCol: Record<number, string> = $state({});
   let metricTableFilter: Record<number, string[]> = $state({});
   let collapsedCategories: Record<string, boolean> = $state({});
-  let deltaMode = $state(true);
   let runningMetricId = $state<number | null>(null);
   let includedPhases = $state<string[]>(['bench']);
 
@@ -350,85 +349,9 @@
         </label>
       {/each}
     </div>
-    <label class="delta-toggle">
-      <input type="checkbox" bind:checked={deltaMode} />
-      Δ from baseline only
-    </label>
     <button onclick={() => { editingMetric = { name:'', category:'Custom', description:'', sql:'SELECT _collected_at FROM snap_pg_stat_database WHERE _run_id = ?', higher_is_better: 1, isNew: true }; metricFormError = ''; metricTestResults = {}; }}>+ Add metric</button>
     <button onclick={runAllMetrics}>↺ Run all</button>
   </div>
-
-  {#if editingMetric}
-    <div class="metric-form card" style="margin-bottom:12px">
-      <h4>{editingMetric.isNew ? 'New Metric' : 'Edit Metric'}</h4>
-      <div class="row" style="gap:8px;flex-wrap:wrap;margin-bottom:8px">
-        <div class="form-group" style="flex:2;min-width:160px">
-          <label for="m-name">Name</label>
-          <input id="m-name" bind:value={editingMetric.name} placeholder="Buffer hit ratio" />
-        </div>
-        <div class="form-group" style="flex:1;min-width:130px">
-          <label for="m-cat">Category</label>
-          <select id="m-cat" bind:value={editingMetric.category}>
-            {#each CATEGORIES as c}<option>{c}</option>{/each}
-          </select>
-        </div>
-        <div class="form-group" style="flex:0;min-width:130px">
-          <label for="m-hib">Direction</label>
-          <select id="m-hib" bind:value={editingMetric.higher_is_better}>
-            <option value={1}>Higher is better</option>
-            <option value={0}>Lower is better</option>
-          </select>
-        </div>
-      </div>
-      <div class="form-group" style="margin-bottom:8px">
-        <label for="m-desc">Description</label>
-        <input id="m-desc" bind:value={editingMetric.description} placeholder="What this metric shows…" />
-      </div>
-      <div class="form-group" style="margin-bottom:8px">
-        <span class="form-label">SQL <span style="color:#999;font-size:11px">(use ? for _run_id, returns rows from snap_* tables)</span></span>
-        <div class="editor-wrap">
-          <CodeEditor bind:value={editingMetric.sql!} schema={snapSchema} />
-        </div>
-      </div>
-      {#if metricFormError}<p class="error">{metricFormError}</p>{/if}
-      <div class="row" style="margin-bottom: {Object.keys(metricTestResults).length ? '10px' : '0'}">
-        <button class="primary" onclick={saveMetric}>Save</button>
-        <button onclick={testMetric} disabled={metricTestRunning}>{metricTestRunning ? 'Testing…' : '▶ Test'}</button>
-        <button onclick={() => { editingMetric = null; metricTestResults = {}; }}>Cancel</button>
-      </div>
-      {#if Object.keys(metricTestResults).length > 0}
-        <div class="test-results">
-          <div class="results-grid">
-            {#each designs as d}
-              {@const res = metricTestResults[d.id]}
-              {#if res}
-                <div class="result-col">
-                  <div class="result-col-header">{d.name}</div>
-                  {#if res.error}
-                    <p class="error">{res.error}</p>
-                  {:else if res.rows.length > 0}
-                    <div class="table-wrap">
-                      <table>
-                        <thead><tr>{#each res.columns as c}<th>{c}</th>{/each}</tr></thead>
-                        <tbody>
-                          {#each res.rows.slice(0, 5) as row}
-                            <tr>{#each res.columns as c}<td>{row[c] ?? 'NULL'}</td>{/each}</tr>
-                          {/each}
-                        </tbody>
-                      </table>
-                    </div>
-                    {#if res.rows.length > 5}<p style="font-size:11px;color:#999">Showing 5 of {res.rows.length} rows</p>{/if}
-                  {:else}
-                    <p style="color:#999;font-size:12px">No rows</p>
-                  {/if}
-                </div>
-              {/if}
-            {/each}
-          </div>
-        </div>
-      {/if}
-    </div>
-  {/if}
 
   {#each CATEGORIES as category}
     {@const catMetrics = metricsByCategory()[category] ?? []}
@@ -555,15 +478,12 @@
                               <table>
                                 <thead><tr>{#each r.columns as c}<th>{c}</th>{/each}</tr></thead>
                                 <tbody>
-                                  {#each rows.slice(0, deltaMode ? rows.length : 5) as row}
+                                  {#each rows as row}
                                     <tr>{#each r.columns as c}<td>{row[c] ?? 'NULL'}</td>{/each}</tr>
                                   {/each}
                                 </tbody>
                               </table>
                             </div>
-                            {#if !deltaMode && rows.length > 5}
-                              <p style="font-size:11px;color:#999">Showing 5 of {rows.length} rows</p>
-                            {/if}
                           {:else if r}
                             <p style="color:#999;font-size:12px">No rows</p>
                           {/if}
@@ -583,6 +503,87 @@
   {/each}
 </div>
 
+<!-- ── Metric form modal ──────────────────────────────────────────────── -->
+{#if editingMetric}
+  <div class="modal-backdrop" role="dialog" aria-modal="true" tabindex="-1"
+    onclick={(e) => { if (e.target === e.currentTarget) { editingMetric = null; metricTestResults = {}; } }}
+    onkeydown={(e) => { if (e.key === 'Escape') { editingMetric = null; metricTestResults = {}; } }}>
+    <div class="metric-modal">
+      <div class="metric-modal-header">
+        <h3>{editingMetric.isNew ? 'New Metric' : 'Edit Metric'}</h3>
+        <button class="modal-close" onclick={() => { editingMetric = null; metricTestResults = {}; }}>✕</button>
+      </div>
+
+      <div class="row" style="gap:8px;flex-wrap:wrap;margin-bottom:10px">
+        <div class="form-group" style="flex:2;min-width:160px">
+          <label for="m-name">Name</label>
+          <input id="m-name" bind:value={editingMetric.name} placeholder="Buffer hit ratio" />
+        </div>
+        <div class="form-group" style="flex:1;min-width:130px">
+          <label for="m-cat">Category</label>
+          <select id="m-cat" bind:value={editingMetric.category}>
+            {#each CATEGORIES as c}<option>{c}</option>{/each}
+          </select>
+        </div>
+        <div class="form-group" style="flex:0;min-width:140px">
+          <label for="m-hib">Direction</label>
+          <select id="m-hib" bind:value={editingMetric.higher_is_better}>
+            <option value={1}>Higher is better</option>
+            <option value={0}>Lower is better</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group" style="margin-bottom:10px">
+        <label for="m-desc">Description</label>
+        <input id="m-desc" bind:value={editingMetric.description} placeholder="What this metric shows…" />
+      </div>
+      <div class="form-group" style="margin-bottom:10px">
+        <span class="form-label">SQL <span style="color:#999;font-size:11px">(use ? for _run_id, returns rows from snap_* tables)</span></span>
+        <div class="editor-wrap">
+          <CodeEditor bind:value={editingMetric.sql!} schema={snapSchema} />
+        </div>
+      </div>
+      {#if metricFormError}<p class="error" style="margin-bottom:8px">{metricFormError}</p>{/if}
+      <div class="row" style="gap:8px;margin-bottom:{Object.keys(metricTestResults).length ? '12px' : '0'}">
+        <button class="primary" onclick={saveMetric}>Save</button>
+        <button onclick={testMetric} disabled={metricTestRunning}>{metricTestRunning ? 'Testing…' : '▶ Test'}</button>
+        <button onclick={() => { editingMetric = null; metricTestResults = {}; }}>Cancel</button>
+      </div>
+      {#if Object.keys(metricTestResults).length > 0}
+        <div class="test-results">
+          <div class="results-grid">
+            {#each designs as d}
+              {@const res = metricTestResults[d.id]}
+              {#if res}
+                <div class="result-col">
+                  <div class="result-col-header">{d.name}</div>
+                  {#if res.error}
+                    <p class="error">{res.error}</p>
+                  {:else if res.rows.length > 0}
+                    <div class="table-wrap">
+                      <table>
+                        <thead><tr>{#each res.columns as c}<th>{c}</th>{/each}</tr></thead>
+                        <tbody>
+                          {#each res.rows.slice(0, 5) as row}
+                            <tr>{#each res.columns as c}<td>{row[c] ?? 'NULL'}</td>{/each}</tr>
+                          {/each}
+                        </tbody>
+                      </table>
+                    </div>
+                    {#if res.rows.length > 5}<p style="font-size:11px;color:#999;margin-top:4px">Showing 5 of {res.rows.length} rows</p>{/if}
+                  {:else}
+                    <p style="color:#999;font-size:12px">No rows</p>
+                  {/if}
+                </div>
+              {/if}
+            {/each}
+          </div>
+        </div>
+      {/if}
+    </div>
+  </div>
+{/if}
+
 {/if}
 
 <style>
@@ -591,8 +592,6 @@
   .design-col strong { display: block; margin-bottom: 4px; font-size: 13px; }
 
   /* metrics */
-  .delta-toggle { display: flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; color: #555; }
-  .delta-toggle input { width: auto; }
 
   .phase-filter { display: flex; align-items: center; gap: 6px; font-size: 12px; }
   .phase-filter-label { font-weight: 600; color: #666; }
@@ -645,11 +644,22 @@
   .results-grid { display: flex; gap: 12px; overflow-x: auto; }
   .result-col { flex: 1; min-width: 200px; }
   .result-col-header { font-weight: 600; font-size: 12px; color: #0066cc; margin-bottom: 6px; }
-  .table-wrap { overflow-x: auto; }
+  .table-wrap { overflow-x: auto; max-height: 300px; overflow-y: auto; }
 
-  /* metric form */
-  .metric-form { border: 1px solid #c8d4ff; background: #f8f9ff !important; }
-  .metric-form h4 { margin: 0 0 10px; font-size: 13px; }
-  .editor-wrap { position: relative; height: 160px; border-radius: 4px; overflow: hidden; }
-  .test-results { border-top: 1px solid #d8e0ff; margin-top: 10px; padding-top: 10px; }
+  /* metric modal */
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.45);
+    display: flex; align-items: center; justify-content: center; z-index: 1000;
+  }
+  .metric-modal {
+    background: #fff; border-radius: 8px; padding: 24px; width: 700px; max-width: 95vw;
+    max-height: 92vh; overflow-y: auto;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.22);
+  }
+  .metric-modal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  .metric-modal-header h3 { margin: 0; font-size: 15px; }
+  .modal-close { background: none; border: none; font-size: 16px; cursor: pointer; color: #888; padding: 2px 6px; border-radius: 4px; }
+  .modal-close:hover { background: #f0f0f0; color: #333; }
+  .editor-wrap { position: relative; height: 180px; border-radius: 4px; overflow: hidden; }
+  .test-results { border-top: 1px solid #eee; margin-top: 12px; padding-top: 12px; }
 </style>
