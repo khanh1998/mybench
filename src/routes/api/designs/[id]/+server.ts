@@ -37,8 +37,8 @@ export const PUT: RequestHandler = async ({ params: routeParams, request }) => {
 	const designId = Number(routeParams.id);
 	const body = await request.json();
 	db.prepare(
-		'UPDATE designs SET name=?, description=?, server_id=?, database=? WHERE id=?'
-	).run(body.name, body.description ?? '', body.server_id ?? null, body.database ?? '', designId);
+		'UPDATE designs SET name=?, description=?, server_id=?, database=?, pre_collect_secs=?, post_collect_secs=? WHERE id=?'
+	).run(body.name, body.description ?? '', body.server_id ?? null, body.database ?? '', body.pre_collect_secs ?? 0, body.post_collect_secs ?? 60, designId);
 
 	const deleteScripts = db.prepare('DELETE FROM pgbench_scripts WHERE step_id = ?');
 	const insertScript = db.prepare(

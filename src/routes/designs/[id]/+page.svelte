@@ -36,6 +36,7 @@
   interface Design {
     id: number; decision_id: number; name: string; description: string;
     server_id: number|null; database: string; steps: Step[]; params: Param[];
+    pre_collect_secs: number; post_collect_secs: number;
   }
   interface Server { id: number; name: string; }
   interface Run { id: number; status: string; tps: number|null; latency_avg_ms: number|null; started_at: string; }
@@ -328,14 +329,34 @@
         <input id="design-snap-interval" type="number" bind:value={snapshotInterval} min="5" max="300" />
       </div>
     </div>
+    <div class="config-row">
+      <div class="form-group" style="flex:0 0 200px">
+        <label for="design-pre" title="Collect pg_stat_* data for this many seconds before starting the benchmark">Pre-collect (s)</label>
+        <input id="design-pre" type="number" bind:value={design.pre_collect_secs} min="0" max="600" />
+      </div>
+      <div class="form-group" style="flex:0 0 200px">
+        <label for="design-post" title="Continue collecting pg_stat_* data for this many seconds after the benchmark finishes">Post-collect (s)</label>
+        <input id="design-post" type="number" bind:value={design.post_collect_secs} min="0" max="600" />
+      </div>
+      <div class="phase-timeline">
+        <span class="phase pre">pre {design.pre_collect_secs}s</span>
+        <span class="phase-arrow">→</span>
+        {#each design.steps.filter(s => s.enabled) as s}
+          <span class="phase bench">{s.name}</span>
+          <span class="phase-arrow">→</span>
+        {/each}
+        <span class="phase post">post {design.post_collect_secs}s</span>
+      </div>
+    </div>
   </div>
 {/if}
 
 <!-- Run confirmation modal -->
-{#if showRunModal}
+{#if showRunModal && design}
   <div class="modal-backdrop" onclick={() => showRunModal = false}>
     <div class="modal" onclick={(e) => e.stopPropagation()}>
       <h3 style="margin:0 0 16px">Configure Run</h3>
+
       <div class="form-group">
         <label for="run-server">Server</label>
         <select id="run-server" bind:value={runServer}>
@@ -353,6 +374,33 @@
         <label for="run-snap" title="How often pg_stat_* snapshots are collected">Snapshot interval (s)</label>
         <input id="run-snap" type="number" bind:value={runSnapshotInterval} min="5" max="300" />
       </div>
+
+      <!-- pgbench steps summary -->
+      {#if design.steps.filter(s => s.enabled && s.type === 'pgbench').length > 0}
+        <div class="run-steps-summary">
+          <div class="run-steps-label">pgbench steps</div>
+          {#each design.steps.filter(s => s.enabled && s.type === 'pgbench') as s}
+            <div class="run-step-row">
+              <span class="run-step-name">{s.name}</span>
+              {#if s.pgbench_options}
+                <code class="run-step-opts">{s.pgbench_options}</code>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      {/if}
+
+      <!-- Collection timeline -->
+      <div class="run-timeline">
+        <span class="phase pre">pre {design.pre_collect_secs}s</span>
+        <span class="phase-arrow">→</span>
+        {#each design.steps.filter(s => s.enabled) as s}
+          <span class="phase {s.type}">{s.name}</span>
+          <span class="phase-arrow">→</span>
+        {/each}
+        <span class="phase post">post {design.post_collect_secs}s</span>
+      </div>
+
       <div class="modal-actions">
         <button onclick={() => showRunModal = false}>Cancel</button>
         <button class="primary" onclick={startRun} disabled={!runServer || !runDatabase}>▶ Start Run</button>
@@ -569,13 +617,33 @@
     display: flex; align-items: center; justify-content: center; z-index: 1000;
   }
   .modal {
-    background: #fff; border-radius: 8px; padding: 24px; width: 360px;
-    box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+    background: #fff; border-radius: 8px; padding: 24px; width: 460px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.2); max-height: 90vh; overflow-y: auto;
   }
   .modal .form-group { margin-bottom: 14px; }
   .modal .form-group label { display: block; font-size: 12px; font-weight: 600; color: #555; margin-bottom: 4px; }
   .modal .form-group input, .modal .form-group select { width: 100%; box-sizing: border-box; }
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+
+  /* Phase timeline (config + modal) */
+  .phase-timeline, .run-timeline {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 4px;
+    font-size: 11px; margin-top: 8px;
+  }
+  .phase-arrow { color: #bbb; }
+  .phase { padding: 2px 8px; border-radius: 10px; font-weight: 600; white-space: nowrap; }
+  .phase.pre  { background: #e8f4ff; color: #0055aa; }
+  .phase.bench, .phase.pgbench { background: #e8fff2; color: #006633; }
+  .phase.sql  { background: #f5f5f5; color: #555; }
+  .phase.post { background: #fff8e8; color: #885500; }
+
+  /* Run modal steps summary */
+  .run-steps-summary { border: 1px solid #eee; border-radius: 6px; padding: 8px 10px; margin-bottom: 14px; background: #fafafa; }
+  .run-steps-label { font-size: 11px; font-weight: 700; color: #888; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .run-step-row { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; flex-wrap: wrap; }
+  .run-step-name { font-size: 12px; font-weight: 600; color: #333; }
+  .run-step-opts { font-size: 11px; color: #666; background: #f0f0f0; padding: 1px 5px; border-radius: 3px; word-break: break-all; }
+  .run-timeline { border: 1px solid #eee; border-radius: 6px; padding: 8px 10px; margin-bottom: 14px; background: #fafafa; }
 
   /* Page root: fixed below the nav bar, fills remaining viewport */
   .page-root {

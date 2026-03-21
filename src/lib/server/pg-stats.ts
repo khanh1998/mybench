@@ -29,11 +29,10 @@ export async function collectSnapshot(
 	pgPool: pg.Pool,
 	runId: number,
 	enabledTables: string[],
-	isBaseline: boolean
+	phase: 'pre' | 'bench' | 'post'
 ): Promise<void> {
 	const db = getDb();
 	const collectedAt = new Date().toISOString();
-	const isBaselineInt = isBaseline ? 1 : 0;
 
 	for (const tableName of enabledTables) {
 		const snapTable = SNAP_TABLE_MAP[tableName];
@@ -50,7 +49,7 @@ export async function collectSnapshot(
 				_id INTEGER PRIMARY KEY AUTOINCREMENT,
 				_run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
 				_collected_at TEXT NOT NULL,
-				_is_baseline INTEGER NOT NULL DEFAULT 0
+				_phase TEXT NOT NULL DEFAULT 'bench'
 			)`);
 			const existingCols = new Set(
 				(db.prepare(`PRAGMA table_info(${snapTable})`).all() as { name: string }[]).map(r => r.name)
@@ -61,7 +60,7 @@ export async function collectSnapshot(
 				}
 			}
 
-			const insertCols = ['_run_id', '_collected_at', '_is_baseline', ...cols];
+			const insertCols = ['_run_id', '_collected_at', '_phase', ...cols];
 			const placeholders = insertCols.map((_, i) => `@p${i}`).join(', ');
 			const stmt = db.prepare(
 				`INSERT INTO ${snapTable} (${insertCols.join(', ')}) VALUES (${placeholders})`
@@ -72,7 +71,7 @@ export async function collectSnapshot(
 					const params: Record<string, unknown> = {
 						p0: runId,
 						p1: collectedAt,
-						p2: isBaselineInt
+						p2: phase
 					};
 					cols.forEach((col: string, i: number) => {
 						const val = row[col];

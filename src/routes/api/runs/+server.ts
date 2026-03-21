@@ -24,6 +24,7 @@ export const POST: RequestHandler = async ({ request }) => {
 
 	const design = db.prepare('SELECT * FROM designs WHERE id = ?').get(Number(design_id)) as {
 		id: number; decision_id: number; name: string; server_id: number; database: string;
+		pre_collect_secs: number; post_collect_secs: number;
 	} | undefined;
 	if (!design) throw error(404, 'Design not found');
 
@@ -52,10 +53,13 @@ export const POST: RequestHandler = async ({ request }) => {
 		'SELECT * FROM design_params WHERE design_id = ? ORDER BY position'
 	).all(design.id) as DesignParam[];
 
+	const preCollectSecs = design.pre_collect_secs ?? 0;
+	const postCollectSecs = design.post_collect_secs ?? 60;
+
 	// Create run record
 	const runResult = db.prepare(
-		'INSERT INTO benchmark_runs (design_id, status, snapshot_interval_seconds) VALUES (?, ?, ?)'
-	).run(design.id, 'running', snapshot_interval_seconds);
+		'INSERT INTO benchmark_runs (design_id, status, snapshot_interval_seconds, pre_collect_secs, post_collect_secs) VALUES (?, ?, ?, ?, ?)'
+	).run(design.id, 'running', snapshot_interval_seconds, preCollectSecs, postCollectSecs);
 	const runId = runResult.lastInsertRowid as number;
 
 	// Create step result records
@@ -68,6 +72,24 @@ export const POST: RequestHandler = async ({ request }) => {
 
 	const activeRun = createRun(runId);
 
+	// Helper: collect snapshots for a fixed duration
+	async function collectForDuration(
+		pool: import('pg').Pool,
+		runId: number,
+		tables: string[],
+		phase: 'pre' | 'bench' | 'post',
+		durationSecs: number,
+		intervalSecs: number
+	) {
+		if (!tables.length) return;
+		const end = Date.now() + durationSecs * 1000;
+		do {
+			await collectSnapshot(pool, runId, tables, phase);
+			const wait = Math.min(intervalSecs * 1000, end - Date.now());
+			if (wait > 0) await new Promise(r => setTimeout(r, wait));
+		} while (Date.now() < end);
+	}
+
 	// Run asynchronously
 	(async () => {
 		const pool = createPool(server, resolvedDatabase);
@@ -75,8 +97,14 @@ export const POST: RequestHandler = async ({ request }) => {
 		const enabledTables = getEnabledTablesForRun(server.id);
 
 		try {
+			// ── Pre-benchmark collection ──────────────────────────────────
+			if (preCollectSecs > 0 && enabledTables.length > 0) {
+				activeRun.emitter.emit('line', `[snapshot] Pre-benchmark collection (${preCollectSecs}s)...`);
+				await collectForDuration(pool, runId, enabledTables, 'pre', preCollectSecs, snapshot_interval_seconds);
+			}
+
+			// ── Steps ─────────────────────────────────────────────────────
 			for (const step of steps) {
-				// Mark step as running
 				const startedAt = new Date().toISOString().replace('T', ' ').slice(0, 19);
 				db.prepare(`UPDATE run_step_results SET status='running', started_at=? WHERE run_id=? AND step_id=?`).run(startedAt, runId, step.id);
 				activeRun.emitter.emit('step', { step_id: step.id, status: 'running', started_at: startedAt });
@@ -92,29 +120,26 @@ export const POST: RequestHandler = async ({ request }) => {
 				};
 
 				if (step.type === 'pgbench') {
-					// Take baseline snapshot
-					activeRun.emitter.emit('line', '[snapshot] Taking baseline snapshot...');
-					await collectSnapshot(pool, runId, enabledTables, true);
+					// Record bench_started_at on first pgbench step
+					const benchStartedAt = new Date().toISOString();
+					db.prepare(`UPDATE benchmark_runs SET bench_started_at=? WHERE id=? AND bench_started_at IS NULL`)
+						.run(benchStartedAt, runId);
 
-					// Start periodic snapshots
+					// Start periodic bench snapshots
 					const timer = setInterval(async () => {
-						await collectSnapshot(pool, runId, enabledTables, false);
+						await collectSnapshot(pool, runId, enabledTables, 'bench');
 					}, snapshot_interval_seconds * 1000);
 					setSnapshotTimer(runId, timer);
 
-					// Load scripts for this step (fallback for unmigrated steps)
 					let scripts = scriptsByStep.get(step.id) ?? [];
 					if (scripts.length === 0 && step.script) {
 						scripts = [{ id: step.id, name: 'script', weight: 1, script: step.script, step_id: step.id, position: 0 }];
 					}
-
-					// Apply param substitution to all scripts
 					const substitutedScripts = scripts.map(ps => ({
 						...ps,
 						script: substituteParams(ps.script, designParams)
 					}));
 
-					// Run pgbench
 					const result = await runPgbench(
 						{
 							host: server.host,
@@ -134,23 +159,19 @@ export const POST: RequestHandler = async ({ request }) => {
 					clearInterval(timer);
 					exitCode = result.exitCode;
 
-					// Save command + processed script
 					const pgbenchScript = substitutedScripts.map(ps => `-- [${ps.name} @${ps.weight}]\n${ps.script}`).join('\n\n');
 					db.prepare(`UPDATE run_step_results SET command=?, processed_script=? WHERE run_id=? AND step_id=?`)
 						.run(result.command, pgbenchScript, runId, step.id);
 
-					// Final snapshot
-					activeRun.emitter.emit('line', '[snapshot] Taking final snapshot...');
-					await collectSnapshot(pool, runId, enabledTables, false);
+					// Final bench snapshot
+					await collectSnapshot(pool, runId, enabledTables, 'bench');
 
-					// Update run stats
 					if (result.tps !== null) {
 						db.prepare(
 							`UPDATE benchmark_runs SET tps=?, latency_avg_ms=?, latency_stddev_ms=?, transactions=? WHERE id=?`
 						).run(result.tps, result.latencyAvgMs, result.latencyStddevMs, result.transactions, runId);
 					}
 				} else {
-					// SQL step — run via psql CLI so \echo, \set, \if etc. all work
 					const sqlOpts: SqlStepOptions = {
 						host: server.host,
 						port: server.port,
@@ -177,6 +198,14 @@ export const POST: RequestHandler = async ({ request }) => {
 					db.prepare(`UPDATE benchmark_runs SET status='failed', finished_at=datetime('now') WHERE id=?`).run(runId);
 					return;
 				}
+			}
+
+			// ── Post-benchmark collection ─────────────────────────────────
+			if (postCollectSecs > 0 && enabledTables.length > 0) {
+				const postStartedAt = new Date().toISOString();
+				db.prepare(`UPDATE benchmark_runs SET post_started_at=? WHERE id=?`).run(postStartedAt, runId);
+				activeRun.emitter.emit('line', `\n[snapshot] Post-benchmark collection (${postCollectSecs}s)...`);
+				await collectForDuration(pool, runId, enabledTables, 'post', postCollectSecs, snapshot_interval_seconds);
 			}
 
 			db.prepare(`UPDATE benchmark_runs SET status='completed', finished_at=datetime('now') WHERE id=?`).run(runId);

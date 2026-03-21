@@ -50,7 +50,9 @@ function migrate(db: Database.Database) {
       name TEXT NOT NULL,
       description TEXT NOT NULL DEFAULT '',
       server_id INTEGER REFERENCES pg_servers(id),
-      database TEXT NOT NULL DEFAULT ''
+      database TEXT NOT NULL DEFAULT '',
+      pre_collect_secs INTEGER NOT NULL DEFAULT 0,
+      post_collect_secs INTEGER NOT NULL DEFAULT 60
     );
 
     CREATE TABLE IF NOT EXISTS design_steps (
@@ -71,6 +73,10 @@ function migrate(db: Database.Database) {
       started_at TEXT NOT NULL DEFAULT (datetime('now')),
       finished_at TEXT,
       snapshot_interval_seconds INTEGER NOT NULL DEFAULT 30,
+      pre_collect_secs INTEGER NOT NULL DEFAULT 0,
+      post_collect_secs INTEGER NOT NULL DEFAULT 60,
+      bench_started_at TEXT,
+      post_started_at TEXT,
       tps REAL,
       latency_avg_ms REAL,
       latency_stddev_ms REAL,
@@ -389,6 +395,199 @@ function migrate(db: Database.Database) {
     `);
 	}
 
+	// Migration: replace _is_baseline with _phase on all snap tables; re-seed metrics
+	const snapPhaseMigrated = db.prepare(`SELECT id FROM schema_migrations WHERE id = 'snap_phase_v1'`).get();
+	if (!snapPhaseMigrated) {
+		db.exec(`
+      DROP TABLE IF EXISTS snap_pg_stat_database;
+      DROP TABLE IF EXISTS snap_pg_stat_bgwriter;
+      DROP TABLE IF EXISTS snap_pg_stat_user_tables;
+      DROP TABLE IF EXISTS snap_pg_stat_user_indexes;
+      DROP TABLE IF EXISTS snap_pg_statio_user_tables;
+      DROP TABLE IF EXISTS snap_pg_statio_user_indexes;
+      DROP TABLE IF EXISTS snap_pg_statio_user_sequences;
+      DROP TABLE IF EXISTS snap_pg_stat_database_conflicts;
+      DROP TABLE IF EXISTS snap_pg_stat_archiver;
+      DROP TABLE IF EXISTS snap_pg_stat_slru;
+      DROP TABLE IF EXISTS snap_pg_stat_user_functions;
+      DROP TABLE IF EXISTS snap_pg_stat_wal;
+      DROP TABLE IF EXISTS snap_pg_stat_replication_slots;
+      DROP TABLE IF EXISTS snap_pg_stat_io;
+      DROP TABLE IF EXISTS snap_pg_stat_activity;
+      DROP TABLE IF EXISTS snap_pg_stat_replication;
+      DROP TABLE IF EXISTS snap_pg_stat_subscription;
+      DROP TABLE IF EXISTS snap_pg_stat_subscription_stats;
+
+      CREATE TABLE snap_pg_stat_database (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
+        datid INTEGER, datname TEXT, numbackends INTEGER,
+        xact_commit INTEGER, xact_rollback INTEGER, blks_read INTEGER, blks_hit INTEGER,
+        tup_returned INTEGER, tup_fetched INTEGER, tup_inserted INTEGER, tup_updated INTEGER, tup_deleted INTEGER,
+        conflicts INTEGER, temp_files INTEGER, temp_bytes INTEGER,
+        deadlocks INTEGER, checksum_failures INTEGER, checksum_last_failure TEXT,
+        blk_read_time REAL, blk_write_time REAL,
+        session_time REAL, active_time REAL, idle_in_transaction_time REAL,
+        sessions INTEGER, sessions_abandoned INTEGER, sessions_fatal INTEGER, sessions_killed INTEGER, stats_reset TEXT
+      );
+      CREATE TABLE snap_pg_stat_bgwriter (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
+        checkpoints_timed INTEGER, checkpoints_req INTEGER,
+        checkpoint_write_time REAL, checkpoint_sync_time REAL,
+        buffers_checkpoint INTEGER, buffers_clean INTEGER, maxwritten_clean INTEGER,
+        buffers_backend INTEGER, buffers_backend_fsync INTEGER, buffers_alloc INTEGER, stats_reset TEXT
+      );
+      CREATE TABLE snap_pg_stat_user_tables (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
+        relid INTEGER, schemaname TEXT, relname TEXT,
+        seq_scan INTEGER, last_seq_scan TEXT, seq_tup_read INTEGER,
+        idx_scan INTEGER, last_idx_scan TEXT, idx_tup_fetch INTEGER,
+        n_tup_ins INTEGER, n_tup_upd INTEGER, n_tup_del INTEGER,
+        n_tup_hot_upd INTEGER, n_tup_newpage_upd INTEGER,
+        n_live_tup INTEGER, n_dead_tup INTEGER, n_mod_since_analyze INTEGER, n_ins_since_vacuum INTEGER,
+        last_vacuum TEXT, last_autovacuum TEXT, last_analyze TEXT, last_autoanalyze TEXT,
+        vacuum_count INTEGER, autovacuum_count INTEGER, analyze_count INTEGER, autoanalyze_count INTEGER
+      );
+      CREATE TABLE snap_pg_stat_user_indexes (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
+        relid INTEGER, indexrelid INTEGER, schemaname TEXT, relname TEXT, indexrelname TEXT,
+        idx_scan INTEGER, last_idx_scan TEXT, idx_tup_read INTEGER, idx_tup_fetch INTEGER
+      );
+      CREATE TABLE snap_pg_statio_user_tables (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
+        relid INTEGER, schemaname TEXT, relname TEXT,
+        heap_blks_read INTEGER, heap_blks_hit INTEGER, idx_blks_read INTEGER, idx_blks_hit INTEGER,
+        toast_blks_read INTEGER, toast_blks_hit INTEGER, tidx_blks_read INTEGER, tidx_blks_hit INTEGER
+      );
+      CREATE TABLE snap_pg_statio_user_indexes (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
+        relid INTEGER, indexrelid INTEGER, schemaname TEXT, relname TEXT, indexrelname TEXT,
+        idx_blks_read INTEGER, idx_blks_hit INTEGER
+      );
+      CREATE TABLE snap_pg_statio_user_sequences (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
+        relid INTEGER, schemaname TEXT, relname TEXT, blks_read INTEGER, blks_hit INTEGER
+      );
+      CREATE TABLE snap_pg_stat_database_conflicts (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
+        datid INTEGER, datname TEXT,
+        confl_tablespace INTEGER, confl_lock INTEGER, confl_snapshot INTEGER,
+        confl_bufferpin INTEGER, confl_deadlock INTEGER, confl_active_logicalslot INTEGER
+      );
+      CREATE TABLE snap_pg_stat_archiver (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
+        archived_count INTEGER, last_archived_wal TEXT, last_archived_time TEXT,
+        failed_count INTEGER, last_failed_wal TEXT, last_failed_time TEXT, stats_reset TEXT
+      );
+      CREATE TABLE snap_pg_stat_slru (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
+        name TEXT, blks_zeroed INTEGER, blks_hit INTEGER, blks_read INTEGER,
+        blks_written INTEGER, blks_exists INTEGER, flushes INTEGER, truncates INTEGER, stats_reset TEXT
+      );
+      CREATE TABLE snap_pg_stat_user_functions (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
+        funcid INTEGER, schemaname TEXT, funcname TEXT, calls INTEGER, total_time REAL, self_time REAL
+      );
+      CREATE TABLE snap_pg_stat_wal (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
+        wal_records INTEGER, wal_fpi INTEGER, wal_bytes REAL,
+        wal_buffers_full INTEGER, wal_write INTEGER, wal_sync INTEGER,
+        wal_write_time REAL, wal_sync_time REAL, stats_reset TEXT
+      );
+      CREATE TABLE snap_pg_stat_replication_slots (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
+        slot_name TEXT, spill_txns INTEGER, spill_count INTEGER, spill_bytes INTEGER,
+        stream_txns INTEGER, stream_count INTEGER, stream_bytes INTEGER,
+        total_txns INTEGER, total_bytes INTEGER, stats_reset TEXT
+      );
+      CREATE TABLE snap_pg_stat_io (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
+        backend_type TEXT, object TEXT, context TEXT,
+        reads INTEGER, read_time REAL, writes INTEGER, write_time REAL,
+        writebacks INTEGER, writeback_time REAL, extends INTEGER, extend_time REAL,
+        op_bytes INTEGER, hits INTEGER, evictions INTEGER, reuses INTEGER, fsyncs INTEGER, fsync_time REAL,
+        stats_reset TEXT
+      );
+      CREATE TABLE snap_pg_stat_activity (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
+        datid INTEGER, datname TEXT, pid INTEGER, leader_pid INTEGER,
+        usesysid INTEGER, usename TEXT, application_name TEXT,
+        client_addr TEXT, client_hostname TEXT, client_port INTEGER,
+        backend_start TEXT, xact_start TEXT, query_start TEXT, state_change TEXT,
+        wait_event_type TEXT, wait_event TEXT, state TEXT,
+        backend_xid TEXT, backend_xmin TEXT, query_id INTEGER, query TEXT, backend_type TEXT
+      );
+      CREATE TABLE snap_pg_stat_replication (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
+        pid INTEGER, usesysid INTEGER, usename TEXT, application_name TEXT,
+        client_addr TEXT, client_hostname TEXT, client_port INTEGER,
+        backend_start TEXT, backend_xmin TEXT, state TEXT,
+        sent_lsn TEXT, write_lsn TEXT, flush_lsn TEXT, replay_lsn TEXT,
+        write_lag TEXT, flush_lag TEXT, replay_lag TEXT,
+        sync_priority INTEGER, sync_state TEXT, reply_time TEXT
+      );
+      CREATE TABLE snap_pg_stat_subscription (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
+        subid INTEGER, subname TEXT, pid INTEGER, leader_pid INTEGER, relid INTEGER,
+        received_lsn TEXT, last_msg_send_time TEXT, last_msg_receipt_time TEXT,
+        latest_end_lsn TEXT, latest_end_time TEXT
+      );
+      CREATE TABLE snap_pg_stat_subscription_stats (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
+        subid INTEGER, subname TEXT, apply_error_count INTEGER, sync_error_count INTEGER, stats_reset TEXT
+      );
+
+      DELETE FROM metrics WHERE is_builtin = 1;
+      INSERT INTO schema_migrations (id) VALUES ('snap_phase_v1');
+    `);
+	}
+
+	// Idempotent column additions for existing DBs
+	const designCols = (db.prepare(`PRAGMA table_info(designs)`).all() as { name: string }[]).map(c => c.name);
+	if (!designCols.includes('pre_collect_secs')) db.exec(`ALTER TABLE designs ADD COLUMN pre_collect_secs INTEGER NOT NULL DEFAULT 0`);
+	if (!designCols.includes('post_collect_secs')) db.exec(`ALTER TABLE designs ADD COLUMN post_collect_secs INTEGER NOT NULL DEFAULT 60`);
+
+	const runCols = (db.prepare(`PRAGMA table_info(benchmark_runs)`).all() as { name: string }[]).map(c => c.name);
+	if (!runCols.includes('pre_collect_secs')) db.exec(`ALTER TABLE benchmark_runs ADD COLUMN pre_collect_secs INTEGER NOT NULL DEFAULT 0`);
+	if (!runCols.includes('post_collect_secs')) db.exec(`ALTER TABLE benchmark_runs ADD COLUMN post_collect_secs INTEGER NOT NULL DEFAULT 60`);
+	if (!runCols.includes('bench_started_at')) db.exec(`ALTER TABLE benchmark_runs ADD COLUMN bench_started_at TEXT`);
+	if (!runCols.includes('post_started_at')) db.exec(`ALTER TABLE benchmark_runs ADD COLUMN post_started_at TEXT`);
+
 	// Metrics table
 	db.exec(`
     CREATE TABLE IF NOT EXISTS metrics (
@@ -416,7 +615,7 @@ function migrate(db: Database.Database) {
 				`SELECT _collected_at, datname,
   round(blks_hit * 1.0 / NULLIF(blks_hit + blks_read, 0), 4) AS hit_ratio
 FROM snap_pg_stat_database
-WHERE _run_id = ? AND _is_baseline = 0
+WHERE _run_id = ? AND _phase = 'bench'
   AND datname NOT IN ('template0','template1','postgres')
 ORDER BY _collected_at`, 1, p++);
 
@@ -425,7 +624,7 @@ ORDER BY _collected_at`, 1, p++);
 				`SELECT _collected_at, schemaname, relname,
   round(heap_blks_hit * 1.0 / NULLIF(heap_blks_hit + heap_blks_read, 0), 4) AS heap_hit_ratio
 FROM snap_pg_statio_user_tables
-WHERE _run_id = ? AND _is_baseline = 0
+WHERE _run_id = ? AND _phase = 'bench'
 ORDER BY _collected_at, relname`, 1, p++);
 
 			ins.run('Index cache hit ratio (per index)', 'Cache & I/O',
@@ -433,14 +632,14 @@ ORDER BY _collected_at, relname`, 1, p++);
 				`SELECT _collected_at, schemaname, relname, indexrelname,
   round(idx_blks_hit * 1.0 / NULLIF(idx_blks_hit + idx_blks_read, 0), 4) AS idx_hit_ratio
 FROM snap_pg_statio_user_indexes
-WHERE _run_id = ? AND _is_baseline = 0
+WHERE _run_id = ? AND _phase = 'bench'
 ORDER BY _collected_at, indexrelname`, 1, p++);
 
 			ins.run('TOAST reads (per table)', 'Cache & I/O',
 				'TOAST heap block reads from disk per table. Non-zero means large values are hitting disk.',
 				`SELECT _collected_at, schemaname, relname, toast_blks_read, toast_blks_hit
 FROM snap_pg_statio_user_tables
-WHERE _run_id = ? AND _is_baseline = 0 AND (toast_blks_read > 0 OR toast_blks_hit > 0)
+WHERE _run_id = ? AND _phase = 'bench' AND (toast_blks_read > 0 OR toast_blks_hit > 0)
 ORDER BY _collected_at, relname`, 0, p++);
 
 			// ── Access Patterns ──────────────────────────────────────────
@@ -450,14 +649,14 @@ ORDER BY _collected_at, relname`, 0, p++);
   seq_scan, idx_scan,
   round(seq_scan * 1.0 / NULLIF(seq_scan + idx_scan, 0), 4) AS seq_ratio
 FROM snap_pg_stat_user_tables
-WHERE _run_id = ? AND _is_baseline = 0
+WHERE _run_id = ? AND _phase = 'bench'
 ORDER BY _collected_at, relname`, 0, p++);
 
 			ins.run('Index usage (per index)', 'Access Patterns',
 				'Number of index scans per index. Zero = dead index, not being used.',
 				`SELECT _collected_at, schemaname, relname, indexrelname, idx_scan, idx_tup_read, idx_tup_fetch
 FROM snap_pg_stat_user_indexes
-WHERE _run_id = ? AND _is_baseline = 0
+WHERE _run_id = ? AND _phase = 'bench'
 ORDER BY _collected_at, indexrelname`, 1, p++);
 
 			ins.run('Index selectivity (per index)', 'Access Patterns',
@@ -465,7 +664,7 @@ ORDER BY _collected_at, indexrelname`, 1, p++);
 				`SELECT _collected_at, schemaname, relname, indexrelname,
   round(idx_tup_fetch * 1.0 / NULLIF(idx_tup_read, 0), 4) AS selectivity
 FROM snap_pg_stat_user_indexes
-WHERE _run_id = ? AND _is_baseline = 0 AND idx_tup_read > 0
+WHERE _run_id = ? AND _phase = 'bench' AND idx_tup_read > 0
 ORDER BY _collected_at, indexrelname`, 1, p++);
 
 			// ── Write Efficiency ─────────────────────────────────────────
@@ -475,7 +674,7 @@ ORDER BY _collected_at, indexrelname`, 1, p++);
   n_tup_upd, n_tup_hot_upd,
   round(n_tup_hot_upd * 1.0 / NULLIF(n_tup_upd, 0), 4) AS hot_ratio
 FROM snap_pg_stat_user_tables
-WHERE _run_id = ? AND _is_baseline = 0 AND n_tup_upd > 0
+WHERE _run_id = ? AND _phase = 'bench' AND n_tup_upd > 0
 ORDER BY _collected_at, relname`, 1, p++);
 
 			ins.run('Dead tuple accumulation (per table)', 'Write Efficiency',
@@ -483,14 +682,14 @@ ORDER BY _collected_at, relname`, 1, p++);
 				`SELECT _collected_at, schemaname, relname, n_live_tup, n_dead_tup,
   round(n_dead_tup * 1.0 / NULLIF(n_live_tup + n_dead_tup, 0), 4) AS dead_ratio
 FROM snap_pg_stat_user_tables
-WHERE _run_id = ? AND _is_baseline = 0
+WHERE _run_id = ? AND _phase = 'bench'
 ORDER BY _collected_at, relname`, 0, p++);
 
 			ins.run('WAL bytes generated', 'Write Efficiency',
 				'Cumulative WAL bytes written. Compare designs to measure write amplification.',
 				`SELECT _collected_at, wal_bytes, wal_records, wal_fpi
 FROM snap_pg_stat_wal
-WHERE _run_id = ? AND _is_baseline = 0
+WHERE _run_id = ? AND _phase = 'bench'
 ORDER BY _collected_at`, 0, p++);
 
 			// ── Checkpoint & BGWriter ────────────────────────────────────
@@ -499,14 +698,14 @@ ORDER BY _collected_at`, 0, p++);
 				`SELECT _collected_at, checkpoints_timed, checkpoints_req,
   buffers_checkpoint, checkpoint_write_time, checkpoint_sync_time
 FROM snap_pg_stat_bgwriter
-WHERE _run_id = ? AND _is_baseline = 0
+WHERE _run_id = ? AND _phase = 'bench'
 ORDER BY _collected_at`, 0, p++);
 
 			ins.run('Buffer writes: bgwriter vs backends', 'Checkpoint & BGWriter',
 				'buffers_backend > 0 means backends are evicting dirty buffers themselves, stalling queries.',
 				`SELECT _collected_at, buffers_clean, buffers_backend, buffers_alloc, maxwritten_clean
 FROM snap_pg_stat_bgwriter
-WHERE _run_id = ? AND _is_baseline = 0
+WHERE _run_id = ? AND _phase = 'bench'
 ORDER BY _collected_at`, 0, p++);
 
 			// ── Vacuum Health ────────────────────────────────────────────
@@ -516,7 +715,7 @@ ORDER BY _collected_at`, 0, p++);
   n_live_tup, n_dead_tup,
   round(n_live_tup * 1.0 / NULLIF(n_live_tup + n_dead_tup, 0), 4) AS live_ratio
 FROM snap_pg_stat_user_tables
-WHERE _run_id = ? AND _is_baseline = 0 AND (n_live_tup + n_dead_tup) > 0
+WHERE _run_id = ? AND _phase = 'bench' AND (n_live_tup + n_dead_tup) > 0
 ORDER BY _collected_at, relname`, 1, p++);
 
 			ins.run('Autovacuum activity (per table)', 'Vacuum Health',
@@ -524,7 +723,7 @@ ORDER BY _collected_at, relname`, 1, p++);
 				`SELECT _collected_at, schemaname, relname,
   autovacuum_count, autoanalyze_count, last_autovacuum, last_autoanalyze
 FROM snap_pg_stat_user_tables
-WHERE _run_id = ? AND _is_baseline = 0
+WHERE _run_id = ? AND _phase = 'bench'
 ORDER BY _collected_at, relname`, 0, p++);
 
 			// ── Concurrency ──────────────────────────────────────────────
@@ -532,7 +731,7 @@ ORDER BY _collected_at, relname`, 0, p++);
 				'Cumulative deadlock count. Any non-zero value during a benchmark is a red flag.',
 				`SELECT _collected_at, datname, deadlocks, conflicts
 FROM snap_pg_stat_database
-WHERE _run_id = ? AND _is_baseline = 0
+WHERE _run_id = ? AND _phase = 'bench'
   AND datname NOT IN ('template0','template1','postgres')
 ORDER BY _collected_at`, 0, p++);
 
@@ -540,14 +739,14 @@ ORDER BY _collected_at`, 0, p++);
 				'Queries cancelled due to lock conflicts. Indicates contention between concurrent sessions.',
 				`SELECT _collected_at, datname, confl_lock, confl_snapshot, confl_deadlock
 FROM snap_pg_stat_database_conflicts
-WHERE _run_id = ? AND _is_baseline = 0
+WHERE _run_id = ? AND _phase = 'bench'
 ORDER BY _collected_at`, 0, p++);
 
 			ins.run('Backend states over time', 'Concurrency',
 				'Count of backends by state per snapshot. High idle-in-transaction count indicates connection/lock issues.',
 				`SELECT _collected_at, state, count(*) AS backend_count
 FROM snap_pg_stat_activity
-WHERE _run_id = ? AND _is_baseline = 0 AND state IS NOT NULL
+WHERE _run_id = ? AND _phase = 'bench' AND state IS NOT NULL
 GROUP BY _collected_at, state
 ORDER BY _collected_at, state`, 1, p++);
 		})();

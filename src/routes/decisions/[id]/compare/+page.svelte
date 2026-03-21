@@ -7,7 +7,7 @@
   const decisionId = $derived(Number($page.params.id));
 
   interface Design { id: number; name: string; }
-  interface Run { id: number; design_id: number; status: string; tps: number|null; latency_avg_ms: number|null; latency_stddev_ms: number|null; transactions: number|null; started_at: string; }
+  interface Run { id: number; design_id: number; status: string; tps: number|null; latency_avg_ms: number|null; latency_stddev_ms: number|null; transactions: number|null; started_at: string; bench_started_at: string|null; post_started_at: string|null; }
   interface Metric { id: number; name: string; category: string; description: string; sql: string; is_builtin: number; higher_is_better: number; }
   interface QueryResult { columns: string[]; rows: Record<string, unknown>[]; error?: string; }
   interface ChartPoint { t: number; v: number; }
@@ -104,24 +104,11 @@
       : (a.avg < b.avg ? a.designId : b.designId);
   }
 
-  function getBaselineMarkers(): Record<number, number> {
-    // returns designId -> baseline timestamp (ms)
-    const out: Record<number, number> = {};
-    for (const [did, runId] of Object.entries(selectedRuns)) {
-      if (!runId) continue;
-      // We'll approximate baseline as the run's started_at
-      const run = runsPerDesign[Number(did)]?.find(r => r.id === runId);
-      if (run?.started_at) out[Number(did)] = new Date(run.started_at).getTime();
-    }
-    return out;
-  }
-
   function buildChartSeriesFromResult(
     metricId: number, timeCol: string, valueCol: string
   ): { series: ChartSeries[]; markers: { t: number; label: string; color: string }[] } {
     const results = metricResults[metricId];
     const filter = metricTableFilter[metricId] ?? [];
-    const baselineMs = getBaselineMarkers();
     const series: ChartSeries[] = [];
     const markers: { t: number; label: string; color: string }[] = [];
 
@@ -158,8 +145,13 @@
           points: rows.map(r => ({ t: new Date(String(r[timeCol])).getTime(), v: Number(r[valueCol]) })).filter(p => !isNaN(p.t) && !isNaN(p.v))
         });
       }
-      if (baselineMs[designId]) {
-        markers.push({ t: baselineMs[designId], label: `${getDesignName(designId)} baseline`, color });
+      // Phase markers
+      const run = runsPerDesign[designId]?.find(r => r.id === selectedRuns[designId]);
+      if (run?.bench_started_at) {
+        markers.push({ t: new Date(run.bench_started_at).getTime(), label: 'bench', color });
+      }
+      if (run?.post_started_at) {
+        markers.push({ t: new Date(run.post_started_at).getTime(), label: 'post', color });
       }
     });
     return { series, markers };
