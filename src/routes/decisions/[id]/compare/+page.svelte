@@ -119,6 +119,13 @@
       if (filter.length > 0 && res.columns.includes('relname')) {
         rows = rows.filter(r => filter.includes(String(r['relname'])));
       }
+
+      // Use bench_started_at (or started_at) as t=0 so runs align for comparison
+      const run = runsPerDesign[designId]?.find(r => r.id === selectedRuns[designId]);
+      const originMs = run
+        ? new Date(run.bench_started_at ?? run.started_at).getTime()
+        : 0;
+
       // Group by a secondary key if present (relname, indexrelname, state, datname)
       const groupCols = ['relname', 'indexrelname', 'state', 'datname'].filter(c => res.columns.includes(c) && c !== timeCol && c !== valueCol);
       if (groupCols.length > 0) {
@@ -134,7 +141,7 @@
           series.push({
             label: `${getDesignName(designId)} · ${gk}`,
             color: subColor,
-            points: grows.map(r => ({ t: new Date(String(r[timeCol])).getTime(), v: Number(r[valueCol]) })).filter(p => !isNaN(p.t) && !isNaN(p.v))
+            points: grows.map(r => ({ t: new Date(String(r[timeCol])).getTime() - originMs, v: Number(r[valueCol]) })).filter(p => !isNaN(p.t) && !isNaN(p.v))
           });
           gi++;
         }
@@ -142,16 +149,15 @@
         series.push({
           label: getDesignName(designId),
           color,
-          points: rows.map(r => ({ t: new Date(String(r[timeCol])).getTime(), v: Number(r[valueCol]) })).filter(p => !isNaN(p.t) && !isNaN(p.v))
+          points: rows.map(r => ({ t: new Date(String(r[timeCol])).getTime() - originMs, v: Number(r[valueCol]) })).filter(p => !isNaN(p.t) && !isNaN(p.v))
         });
       }
-      // Phase markers
-      const run = runsPerDesign[designId]?.find(r => r.id === selectedRuns[designId]);
+      // Phase markers (also relative to originMs)
       if (run?.bench_started_at) {
-        markers.push({ t: new Date(run.bench_started_at).getTime(), label: 'bench', color });
+        markers.push({ t: new Date(run.bench_started_at).getTime() - originMs, label: 'bench', color });
       }
       if (run?.post_started_at) {
-        markers.push({ t: new Date(run.post_started_at).getTime(), label: 'post', color });
+        markers.push({ t: new Date(run.post_started_at).getTime() - originMs, label: 'post', color });
       }
     });
     return { series, markers };

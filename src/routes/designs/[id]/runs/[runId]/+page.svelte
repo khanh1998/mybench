@@ -2,6 +2,9 @@
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import { onMount, onDestroy } from 'svelte';
+  import type { PageData } from './$types';
+
+  let { data }: { data: PageData } = $props();
 
   const designId = $derived(Number($page.params.id));
   const runId = $derived(Number($page.params.runId));
@@ -26,7 +29,7 @@
     elapsed_secs: number;
   }
 
-  let run: Run | null = $state(null);
+  let run: Run | null = $state(data.run as Run | null);
   let done = $state(false);
   let finalStatus = $state('');
   let eventSource: EventSource | null = null;
@@ -153,8 +156,7 @@
     expandedStep = expandedStep === stepId ? null : stepId;
   }
 
-  onMount(async () => {
-    await loadRun();
+  onMount(() => {
     if (run?.status === 'running') {
       connectSSE();
       setTimeout(flushPending, 0);

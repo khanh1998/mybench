@@ -4,6 +4,9 @@
   import { goto } from '$app/navigation';
   import CodeEditor from '$lib/CodeEditor.svelte';
   import { validateDesignParams, type ValidationError } from '$lib/params';
+  import type { PageData } from './$types';
+
+  let { data }: { data: PageData } = $props();
 
   const id = $derived(Number($page.params.id));
 
@@ -43,10 +46,11 @@
   interface Server { id: number; name: string; }
   interface Run { id: number; status: string; tps: number|null; latency_avg_ms: number|null; started_at: string; }
 
-  let design: Design | null = $state(null);
-  let servers: Server[] = $state([]);
-  let runs: Run[] = $state([]);
-  let selectedStepId = $state<number|null>(null);
+  let design: Design | null = $state(data.design as Design | null);
+  let servers: Server[] = $state((data.servers ?? []) as Server[]);
+  let runs: Run[] = $state((data.runs ?? []) as Run[]);
+  const initialStep = design?.steps?.find(s => s.enabled) ?? design?.steps?.[0] ?? null;
+  let selectedStepId = $state<number|null>(initialStep?.id ?? null);
   let selectedScriptIdx = $state(0);
   let saving = $state(false);
   let startingRun = $state(false);
@@ -85,22 +89,6 @@
     design ? validateDesignParams(design) : []
   );
   const isValid = $derived(validationErrors.length === 0);
-
-  async function load() {
-    const [dRes, sRes, rRes] = await Promise.all([
-      fetch(`/api/designs/${id}`),
-      fetch('/api/connections'),
-      fetch(`/api/runs?design_id=${id}`)
-    ]);
-    design = await dRes.json();
-    if (design && !design.params) design.params = [];
-    servers = await sRes.json();
-    runs = await rRes.json();
-    // Select first enabled step by default
-    if (design?.steps?.length && selectedStepId === null) {
-      selectedStepId = design.steps.find(s => s.enabled) ?.id ?? design.steps[0].id;
-    }
-  }
 
   async function save() {
     if (!design) return;
@@ -232,7 +220,6 @@
   }
 
   onMount(() => {
-    load();
     window.addEventListener('keydown', handleKeydown);
     return () => window.removeEventListener('keydown', handleKeydown);
   });
