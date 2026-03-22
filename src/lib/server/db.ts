@@ -607,9 +607,14 @@ function migrate(db: Database.Database) {
       description TEXT    NOT NULL DEFAULT '',
       sql         TEXT    NOT NULL,
       higher_is_better INTEGER NOT NULL DEFAULT 1,
-      position    INTEGER NOT NULL DEFAULT 0
+      position    INTEGER NOT NULL DEFAULT 0,
+      time_col    TEXT    NOT NULL DEFAULT '',
+      value_col   TEXT    NOT NULL DEFAULT ''
     );
   `);
+  const dmCols = (db.prepare(`PRAGMA table_info(decision_metrics)`).all() as { name: string }[]).map(c => c.name);
+  if (!dmCols.includes('time_col')) db.exec(`ALTER TABLE decision_metrics ADD COLUMN time_col TEXT NOT NULL DEFAULT ''`);
+  if (!dmCols.includes('value_col')) db.exec(`ALTER TABLE decision_metrics ADD COLUMN value_col TEXT NOT NULL DEFAULT ''`);
 
 	// Metrics table (library / templates)
 	db.exec(`

@@ -8,7 +8,7 @@
 
   interface Design { id: number; name: string; }
   interface Run { id: number; design_id: number; status: string; tps: number|null; latency_avg_ms: number|null; latency_stddev_ms: number|null; transactions: number|null; started_at: string; bench_started_at: string|null; post_started_at: string|null; }
-  interface DecisionMetric { id: number; decision_id: number; name: string; category: string; description: string; sql: string; higher_is_better: number; position: number; }
+  interface DecisionMetric { id: number; decision_id: number; name: string; category: string; description: string; sql: string; higher_is_better: number; position: number; time_col: string; value_col: string; }
   interface LibraryMetric { id: number; name: string; category: string; description: string; sql: string; is_builtin: number; higher_is_better: number; }
   interface QueryResult { columns: string[]; rows: Record<string, unknown>[]; error?: string; }
   interface ChartPoint { t: number; v: number; }
@@ -183,6 +183,11 @@
     ]);
     designs = await dRes.json();
     decisionMetrics = await mRes.json();
+    // Restore persisted col preferences
+    for (const m of decisionMetrics) {
+      if (m.time_col) metricTimeCol[m.id] = m.time_col;
+      if (m.value_col) metricValueCol[m.id] = m.value_col;
+    }
 
     for (const d of designs) {
       const rRes = await fetch(`/api/runs?design_id=${d.id}`);
@@ -226,15 +231,31 @@
       metricResults[m.id][Number(did)] = await queryApi(applyPhaseFilter(m.sql), [runId]);
     }
     metricResults = { ...metricResults };
-    // Auto-detect time/value columns
+    // Auto-detect time/value columns (only if not already set)
     const firstRes = Object.values(metricResults[m.id])[0];
     if (firstRes && !metricTimeCol[m.id]) {
       const timeCandidates = firstRes.columns.filter(c => c.includes('at') || c.includes('time'));
       const valueCandidates = firstRes.columns.filter(c => !c.includes('name') && !c.includes('schema') && !c.includes('at') && !c.includes('type') && !timeCandidates.includes(c));
       if (timeCandidates.length) metricTimeCol[m.id] = timeCandidates[0];
       if (valueCandidates.length) metricValueCol[m.id] = valueCandidates[0];
+      // Persist auto-detected cols
+      if (metricTimeCol[m.id] || metricValueCol[m.id]) {
+        persistColPrefs(m, metricTimeCol[m.id] ?? '', metricValueCol[m.id] ?? '');
+      }
     }
     runningMetricId = null;
+  }
+
+  const colSaveTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  function persistColPrefs(m: DecisionMetric, tc: string, vc: string) {
+    clearTimeout(colSaveTimers.get(m.id));
+    colSaveTimers.set(m.id, setTimeout(() => {
+      fetch(`/api/decisions/${decisionId}/metrics/${m.id}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...m, time_col: tc, value_col: vc })
+      });
+      decisionMetrics = decisionMetrics.map(x => x.id === m.id ? { ...x, time_col: tc, value_col: vc } : x);
+    }, 600));
   }
 
   async function runAllMetrics() {
@@ -411,7 +432,7 @@
             {#each catMetrics as m}
               {@const res = metricResults[m.id]}
               {@const firstRes = res ? Object.values(res)[0] : null}
-              {@const view = metricView[m.id] ?? 'table'}
+              {@const view = metricView[m.id] ?? 'chart'}
               {@const timeCol = metricTimeCol[m.id] ?? ''}
               {@const valueCol = metricValueCol[m.id] ?? ''}
               {@const winner = valueCol ? getWinner(m.id, valueCol) : null}
@@ -470,13 +491,13 @@
                     <!-- column picker -->
                     <div class="col-picker">
                       <label>Time col:
-                        <select bind:value={metricTimeCol[m.id]}>
-                          {#each firstRes?.columns ?? [] as c}<option>{c}</option>{/each}
+                        <select value={metricTimeCol[m.id]} onchange={(e) => { metricTimeCol[m.id] = e.currentTarget.value; persistColPrefs(m, e.currentTarget.value, metricValueCol[m.id] ?? ''); }}>
+                          {#each firstRes?.columns ?? [] as c}<option selected={c === metricTimeCol[m.id]}>{c}</option>{/each}
                         </select>
                       </label>
                       <label>Value col:
-                        <select bind:value={metricValueCol[m.id]}>
-                          {#each firstRes?.columns ?? [] as c}<option>{c}</option>{/each}
+                        <select value={metricValueCol[m.id]} onchange={(e) => { metricValueCol[m.id] = e.currentTarget.value; persistColPrefs(m, metricTimeCol[m.id] ?? '', e.currentTarget.value); }}>
+                          {#each firstRes?.columns ?? [] as c}<option selected={c === metricValueCol[m.id]}>{c}</option>{/each}
                         </select>
                       </label>
                     </div>
