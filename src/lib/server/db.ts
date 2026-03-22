@@ -597,7 +597,21 @@ function migrate(db: Database.Database) {
 	if (!runCols.includes('bench_started_at')) db.exec(`ALTER TABLE benchmark_runs ADD COLUMN bench_started_at TEXT`);
 	if (!runCols.includes('post_started_at')) db.exec(`ALTER TABLE benchmark_runs ADD COLUMN post_started_at TEXT`);
 
-	// Metrics table
+	// Per-decision metrics (compare screen, persisted)
+	db.exec(`
+    CREATE TABLE IF NOT EXISTS decision_metrics (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      decision_id INTEGER NOT NULL REFERENCES decisions(id) ON DELETE CASCADE,
+      name        TEXT    NOT NULL,
+      category    TEXT    NOT NULL DEFAULT 'Custom',
+      description TEXT    NOT NULL DEFAULT '',
+      sql         TEXT    NOT NULL,
+      higher_is_better INTEGER NOT NULL DEFAULT 1,
+      position    INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+
+	// Metrics table (library / templates)
 	db.exec(`
     CREATE TABLE IF NOT EXISTS metrics (
       id          INTEGER PRIMARY KEY AUTOINCREMENT,

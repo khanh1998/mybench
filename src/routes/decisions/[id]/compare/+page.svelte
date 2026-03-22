@@ -8,7 +8,8 @@
 
   interface Design { id: number; name: string; }
   interface Run { id: number; design_id: number; status: string; tps: number|null; latency_avg_ms: number|null; latency_stddev_ms: number|null; transactions: number|null; started_at: string; bench_started_at: string|null; post_started_at: string|null; }
-  interface Metric { id: number; name: string; category: string; description: string; sql: string; is_builtin: number; higher_is_better: number; }
+  interface DecisionMetric { id: number; decision_id: number; name: string; category: string; description: string; sql: string; higher_is_better: number; position: number; }
+  interface LibraryMetric { id: number; name: string; category: string; description: string; sql: string; is_builtin: number; higher_is_better: number; }
   interface QueryResult { columns: string[]; rows: Record<string, unknown>[]; error?: string; }
   interface ChartPoint { t: number; v: number; }
   interface ChartSeries { label: string; color: string; points: ChartPoint[]; }
@@ -24,7 +25,7 @@
   let selectedRuns: Record<number, number> = $state({});
   let loading = $state(true);
 
-  let metrics: Metric[] = $state([]);
+  let decisionMetrics: DecisionMetric[] = $state([]);
   // per-metric: results per design, view mode, chart columns, table filter, collapsed
   let metricResults: Record<number, Record<number, QueryResult>> = $state({});
   let metricView: Record<number, 'table' | 'chart'> = $state({});
@@ -35,8 +36,14 @@
   let runningMetricId = $state<number | null>(null);
   let includedPhases = $state<string[]>(['bench']);
 
-  // metric CRUD form
-  let editingMetric = $state<Partial<Metric> & { isNew?: boolean } | null>(null);
+  // library picker
+  let libraryTemplates: LibraryMetric[] = $state([]);
+  let libraryLoaded = false;
+  let showLibraryPicker = $state(false);
+  let librarySearch = $state('');
+
+  // metric add/edit form
+  let editingMetric = $state<Partial<DecisionMetric> & { isNew?: boolean } | null>(null);
   let metricFormError = $state('');
   let metricTestResults: Record<number, QueryResult> = $state({});
   let metricTestRunning = $state(false);
@@ -47,12 +54,17 @@
   const snapSchema = $derived(Object.fromEntries(snapTables.map(t => [t.name, t.columns])));
   const selectedRunIds = $derived(Object.values(selectedRuns).filter(Boolean));
   const metricsByCategory = $derived(() => {
-    const map: Record<string, Metric[]> = {};
-    for (const m of metrics) {
-      (map[m.category] ??= []).push(m);
-    }
+    const map: Record<string, DecisionMetric[]> = {};
+    for (const m of decisionMetrics) (map[m.category] ??= []).push(m);
     return map;
   });
+  const filteredLibrary = $derived(
+    librarySearch.trim()
+      ? libraryTemplates.filter(t =>
+          t.name.toLowerCase().includes(librarySearch.toLowerCase()) ||
+          t.category.toLowerCase().includes(librarySearch.toLowerCase()))
+      : libraryTemplates
+  );
 
   // ── Helpers ──────────────────────────────────────────────────────────────
   function getDesignName(did: number) { return designs.find(d => d.id === did)?.name ?? `Design ${did}`; }
@@ -93,7 +105,7 @@
   }
 
   function getWinner(metricId: number, valueCol: string): number | null {
-    const metric = metrics.find(m => m.id === metricId);
+    const metric = decisionMetrics.find((m: DecisionMetric) => m.id === metricId);
     if (!metric) return null;
     const summary = getSummary(metricId, valueCol);
     if (summary.length < 2) return null;
@@ -167,10 +179,10 @@
   async function load() {
     const [dRes, mRes] = await Promise.all([
       fetch(`/api/designs?decision_id=${decisionId}`),
-      fetch('/api/metrics')
+      fetch(`/api/decisions/${decisionId}/metrics`)
     ]);
     designs = await dRes.json();
-    metrics = await mRes.json();
+    decisionMetrics = await mRes.json();
 
     for (const d of designs) {
       const rRes = await fetch(`/api/runs?design_id=${d.id}`);
@@ -206,7 +218,7 @@
   }
 
   // ── Metrics ───────────────────────────────────────────────────────────────
-  async function runMetric(m: Metric) {
+  async function runMetric(m: DecisionMetric) {
     runningMetricId = m.id;
     metricResults[m.id] = {};
     for (const [did, runId] of Object.entries(selectedRuns)) {
@@ -226,7 +238,31 @@
   }
 
   async function runAllMetrics() {
-    for (const m of metrics) await runMetric(m);
+    for (const m of decisionMetrics) await runMetric(m);
+  }
+
+  async function openAddMetric() {
+    if (!libraryLoaded) {
+      const res = await fetch('/api/metrics');
+      libraryTemplates = await res.json();
+      libraryLoaded = true;
+    }
+    librarySearch = '';
+    showLibraryPicker = true;
+  }
+
+  function pickFromLibrary(t: LibraryMetric) {
+    editingMetric = { name: t.name, category: t.category, description: t.description, sql: t.sql, higher_is_better: t.higher_is_better, isNew: true };
+    metricFormError = '';
+    metricTestResults = {};
+    showLibraryPicker = false;
+  }
+
+  function pickFromScratch() {
+    editingMetric = { name: '', category: 'Custom', description: '', sql: `SELECT _collected_at FROM snap_pg_stat_database WHERE _run_id = ?`, higher_is_better: 1, isNew: true };
+    metricFormError = '';
+    metricTestResults = {};
+    showLibraryPicker = false;
   }
 
   async function saveMetric() {
@@ -236,37 +272,32 @@
       metricFormError = 'Name and SQL are required.'; return;
     }
     if (editingMetric.isNew) {
-      const res = await fetch('/api/metrics', {
+      const res = await fetch(`/api/decisions/${decisionId}/metrics`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(editingMetric)
       });
       if (!res.ok) { metricFormError = (await res.json()).message; return; }
-      const m = await res.json();
-      metrics = [...metrics, m];
+      const m = await res.json() as DecisionMetric;
+      decisionMetrics = [...decisionMetrics, m];
       await runMetric(m);
     } else {
-      const res = await fetch(`/api/metrics/${editingMetric.id}`, {
+      const res = await fetch(`/api/decisions/${decisionId}/metrics/${editingMetric.id}`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(editingMetric)
       });
       if (!res.ok) { metricFormError = (await res.json()).message; return; }
-      const m = await res.json();
-      metrics = metrics.map(x => x.id === m.id ? m : x);
+      const m = await res.json() as DecisionMetric;
+      decisionMetrics = decisionMetrics.map(x => x.id === m.id ? m : x);
       await runMetric(m);
     }
     editingMetric = null;
   }
 
-  async function deleteMetric(m: Metric) {
-    await fetch(`/api/metrics/${m.id}`, { method: 'DELETE' });
-    metrics = metrics.filter(x => x.id !== m.id);
+  async function deleteMetric(m: DecisionMetric) {
+    await fetch(`/api/decisions/${decisionId}/metrics/${m.id}`, { method: 'DELETE' });
+    decisionMetrics = decisionMetrics.filter(x => x.id !== m.id);
     delete metricResults[m.id];
     metricResults = { ...metricResults };
-  }
-
-  function cloneMetric(m: Metric) {
-    editingMetric = { ...m, id: undefined, name: m.name + ' (copy)', is_builtin: 0, isNew: true };
-    metricTestResults = {};
   }
 
   async function testMetric() {
@@ -355,9 +386,15 @@
         </label>
       {/each}
     </div>
-    <button onclick={() => { editingMetric = { name:'', category:'Custom', description:'', sql:'SELECT _collected_at FROM snap_pg_stat_database WHERE _run_id = ?', higher_is_better: 1, isNew: true }; metricFormError = ''; metricTestResults = {}; }}>+ Add metric</button>
-    <button onclick={runAllMetrics}>↺ Run all</button>
+    <button onclick={openAddMetric}>+ Add metric</button>
+    {#if decisionMetrics.length > 0}<button onclick={runAllMetrics}>↺ Run all</button>{/if}
   </div>
+
+  {#if decisionMetrics.length === 0}
+    <div style="text-align:center;padding:32px;color:#999;font-size:13px">
+      No metrics added yet. Click <strong>+ Add metric</strong> to start comparing.
+    </div>
+  {/if}
 
   {#each CATEGORIES as category}
     {@const catMetrics = metricsByCategory()[category] ?? []}
@@ -389,7 +426,6 @@
                 <div class="mc-header">
                   <div class="mc-title-row">
                     <span class="mc-name">{m.name}</span>
-                    {#if m.is_builtin}<span class="builtin-badge">built-in</span>{/if}
                     {#if winner !== null}
                       {@const wname = getDesignName(winner)}
                       {@const wcolor = COLORS[designs.findIndex(d => d.id === winner) % COLORS.length]}
@@ -400,12 +436,8 @@
                   <div class="mc-actions">
                     <button class="icon-btn" onclick={() => runMetric(m)} disabled={runningMetricId === m.id}
                       title="Run">{runningMetricId === m.id ? '…' : '↺'}</button>
-                    {#if m.is_builtin}
-                      <button class="icon-btn" onclick={() => cloneMetric(m)} title="Clone to edit">⎘</button>
-                    {:else}
-                      <button class="icon-btn" onclick={() => { editingMetric = { ...m }; metricFormError = ''; metricTestResults = {}; }} title="Edit">✎</button>
-                      <button class="icon-btn danger" onclick={() => deleteMetric(m)} title="Delete">✕</button>
-                    {/if}
+                    <button class="icon-btn" onclick={() => { editingMetric = { ...m }; metricFormError = ''; metricTestResults = {}; }} title="Edit">✎</button>
+                    <button class="icon-btn danger" onclick={() => deleteMetric(m)} title="Remove">✕</button>
                     <button class="icon-btn" onclick={() => copyCSV(m.id)} title="Copy CSV">⎘ CSV</button>
                     <div class="view-toggle">
                       <button class:active={view === 'table'} onclick={() => metricView[m.id] = 'table'}>Table</button>
@@ -509,6 +541,43 @@
   {/each}
 </div>
 
+<!-- ── Library picker modal ───────────────────────────────────────────── -->
+{#if showLibraryPicker}
+  <div class="modal-backdrop" role="dialog" aria-modal="true" tabindex="-1"
+    onclick={(e) => { if (e.target === e.currentTarget) showLibraryPicker = false; }}
+    onkeydown={(e) => { if (e.key === 'Escape') showLibraryPicker = false; }}>
+    <div class="metric-modal library-modal">
+      <div class="metric-modal-header">
+        <h3>Add Metric</h3>
+        <button class="modal-close" onclick={() => showLibraryPicker = false}>✕</button>
+      </div>
+      <div class="lib-toolbar">
+        <input class="lib-search" placeholder="Search library…" bind:value={librarySearch} />
+        <button class="primary" onclick={pickFromScratch}>Start from scratch</button>
+      </div>
+      {#if filteredLibrary.length === 0}
+        <p style="color:#999;font-size:13px;text-align:center;padding:24px 0">No templates match.</p>
+      {:else}
+        {#each CATEGORIES as category}
+          {@const catItems = filteredLibrary.filter(t => t.category === category)}
+          {#if catItems.length > 0}
+            <div class="lib-cat-header">{category}</div>
+            <div class="lib-items">
+              {#each catItems as t}
+                <button class="lib-item" onclick={() => pickFromLibrary(t)}>
+                  <span class="lib-item-name">{t.name}</span>
+                  {#if t.description}<span class="lib-item-desc">{t.description}</span>{/if}
+                  <span class="lib-item-hint">{t.higher_is_better ? '↑ higher better' : '↓ lower better'}</span>
+                </button>
+              {/each}
+            </div>
+          {/if}
+        {/each}
+      {/if}
+    </div>
+  </div>
+{/if}
+
 <!-- ── Metric form modal ──────────────────────────────────────────────── -->
 {#if editingMetric}
   <div class="modal-backdrop" role="dialog" aria-modal="true" tabindex="-1"
@@ -516,7 +585,7 @@
     onkeydown={(e) => { if (e.key === 'Escape') { editingMetric = null; metricTestResults = {}; } }}>
     <div class="metric-modal">
       <div class="metric-modal-header">
-        <h3>{editingMetric.isNew ? 'New Metric' : 'Edit Metric'}</h3>
+        <h3>{editingMetric.isNew ? 'Add Metric' : 'Edit Metric'}</h3>
         <button class="modal-close" onclick={() => { editingMetric = null; metricTestResults = {}; }}>✕</button>
       </div>
 
@@ -624,8 +693,7 @@
   .mc-name { font-size: 13px; font-weight: 700; color: #222; }
   .mc-desc { font-size: 11px; color: #777; margin: 0 0 6px; }
   .mc-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-  .builtin-badge { font-size: 10px; background: #f0f4ff; color: #4466cc; padding: 1px 6px; border-radius: 10px; border: 1px solid #c8d4ff; }
-  .winner-badge { font-size: 11px; font-weight: 700; padding: 1px 8px; border-radius: 10px; border: 1.5px solid; }
+.winner-badge { font-size: 11px; font-weight: 700; padding: 1px 8px; border-radius: 10px; border: 1.5px solid; }
   .icon-btn { font-size: 12px; padding: 2px 7px; background: none; border: 1px solid #ddd; border-radius: 3px; cursor: pointer; color: #555; }
   .icon-btn:hover { background: #f5f5f5; }
   .icon-btn.danger:hover { background: #fff0f0; color: #cc3333; border-color: #ffcccc; }
@@ -651,6 +719,22 @@
   .result-col { flex: 1; min-width: 200px; }
   .result-col-header { font-weight: 600; font-size: 12px; color: #0066cc; margin-bottom: 6px; }
   .table-wrap { overflow-x: auto; max-height: 300px; overflow-y: auto; }
+
+  /* library picker */
+  .library-modal { max-height: 80vh; }
+  .lib-toolbar { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; }
+  .lib-search { flex: 1; }
+  .lib-cat-header { font-size: 11px; font-weight: 700; color: #888; text-transform: uppercase; letter-spacing: 0.05em; margin: 12px 0 4px; }
+  .lib-items { display: flex; flex-direction: column; gap: 4px; }
+  .lib-item {
+    display: flex; flex-direction: column; gap: 2px; text-align: left;
+    padding: 8px 10px; border: 1px solid #e8e8e8; border-radius: 5px;
+    background: #fff; cursor: pointer; width: 100%;
+  }
+  .lib-item:hover { background: #f0f6ff; border-color: #0066cc; }
+  .lib-item-name { font-size: 13px; font-weight: 600; color: #222; }
+  .lib-item-desc { font-size: 11px; color: #777; }
+  .lib-item-hint { font-size: 11px; color: #aaa; }
 
   /* metric modal */
   .modal-backdrop {
