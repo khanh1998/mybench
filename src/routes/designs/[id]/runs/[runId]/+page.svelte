@@ -19,6 +19,7 @@
     latency_stddev_ms: number|null; transactions: number|null;
     started_at: string; finished_at: string|null;
     pre_collect_secs: number; post_collect_secs: number;
+    is_imported?: number;
     steps: StepResult[];
   }
   interface PhaseState {
@@ -314,7 +315,11 @@
       <span style="font-size:12px; color:#155724">✓ {finalStatus || 'Done'}</span>
     {/if}
   </div>
-  <pre class="output" bind:this={outputEl}>{#if !done}<span class="cursor">▋</span>{/if}</pre>
+  {#if run?.is_imported}
+    <div style="padding:16px; color:#666; font-style:italic; font-size:13px">Logs not available for imported runs</div>
+  {:else}
+    <pre class="output" bind:this={outputEl}>{#if !done}<span class="cursor">▋</span>{/if}</pre>
+  {/if}
 </div>
 
 <style>
