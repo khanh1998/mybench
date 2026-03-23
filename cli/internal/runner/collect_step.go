@@ -1,0 +1,63 @@
+package runner
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/khanh1998/mybench/cli/internal/plan"
+	"github.com/khanh1998/mybench/cli/internal/result"
+)
+
+// collectOnce queries all enabled pg_stat views once and appends snapshot rows
+// to the provided snapshots map. The phase string is embedded in each row.
+func collectOnce(ctx context.Context, pool *pgxpool.Pool, snapTables []plan.SnapTableSpec, phase string, snapshots map[string][]result.SnapshotRow) error {
+	collectedAt := time.Now().UTC().Format(time.RFC3339)
+
+	for _, spec := range snapTables {
+		if len(spec.Columns) == 0 {
+			continue
+		}
+
+		quotedCols := make([]string, len(spec.Columns))
+		for i, col := range spec.Columns {
+			quotedCols[i] = fmt.Sprintf("%q", col)
+		}
+		query := fmt.Sprintf(
+			"SELECT %s FROM pg_catalog.%s",
+			strings.Join(quotedCols, ", "),
+			spec.PgViewName,
+		)
+
+		rows, err := pool.Query(ctx, query)
+		if err != nil {
+			return fmt.Errorf("querying %s: %w", spec.PgViewName, err)
+		}
+
+		fieldDescs := rows.FieldDescriptions()
+		for rows.Next() {
+			vals, err := rows.Values()
+			if err != nil {
+				rows.Close()
+				return fmt.Errorf("scanning row from %s: %w", spec.PgViewName, err)
+			}
+
+			row := make(result.SnapshotRow, len(vals)+2)
+			row["_collected_at"] = collectedAt
+			row["_phase"] = phase
+			for i, fd := range fieldDescs {
+				row[string(fd.Name)] = vals[i]
+			}
+			snapshots[spec.SnapTableName] = append(snapshots[spec.SnapTableName], row)
+		}
+		rows.Close()
+
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("iterating rows from %s: %w", spec.PgViewName, err)
+		}
+	}
+
+	return nil
+}
