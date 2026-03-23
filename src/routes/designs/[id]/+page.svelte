@@ -59,6 +59,10 @@
   let showValidation = $state(false);
   let showParams = $state(false);
   let showRunModal = $state(false);
+  let showImportModal = $state(false);
+  let importFile = $state<File | null>(null);
+  let importError = $state('');
+  let importing = $state(false);
 
   // Run modal ephemeral state (editable, not persisted)
   let runServer = $state<number|null>(null);
@@ -212,6 +216,34 @@
     design.steps = steps.map((s, i) => ({ ...s, position: i }));
   }
 
+  async function importRun() {
+    if (!importFile || !design) return;
+    importError = '';
+    importing = true;
+    try {
+      const text = await importFile.text();
+      const parsed = JSON.parse(text);
+      const res = await fetch('/api/runs/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ design_id: design.id, result: parsed })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Import failed' }));
+        importError = err.error ?? 'Import failed';
+        importing = false;
+        return;
+      }
+      const { run_id } = await res.json();
+      importing = false;
+      showImportModal = false;
+      goto(`/designs/${id}/runs/${run_id}`);
+    } catch (e) {
+      importError = e instanceof Error ? e.message : 'Import failed';
+      importing = false;
+    }
+  }
+
   function handleKeydown(e: KeyboardEvent) {
     if ((e.metaKey || e.ctrlKey) && e.key === 's') {
       e.preventDefault();
@@ -246,6 +278,8 @@
       title="Validation status"
     >{isValid ? '✓ Valid' : `⚠ ${validationErrors.length} issue(s)`}</button>
     <button onclick={save} disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
+    <a href="/api/designs/{design.id}/export" download class="btn">Export Plan</a>
+    <button onclick={() => { importError = ''; importFile = null; showImportModal = true; }}>Import Run</button>
     <button class="primary" onclick={openRunModal} disabled={startingRun}>
       {startingRun ? 'Starting…' : '▶ Run'}
     </button>
@@ -350,6 +384,33 @@
       <div class="modal-actions">
         <button onclick={() => showRunModal = false}>Cancel</button>
         <button class="primary" onclick={startRun} disabled={!runServer || !runDatabase}>▶ Start Run</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Import Run modal -->
+{#if showImportModal}
+  <div class="modal-backdrop" onclick={() => showImportModal = false}>
+    <div class="modal" onclick={(e) => e.stopPropagation()}>
+      <h3 style="margin:0 0 16px">Import Run Result</h3>
+      <div class="form-group">
+        <label for="import-file">Result JSON file</label>
+        <input
+          id="import-file"
+          type="file"
+          accept=".json"
+          onchange={(e) => { importFile = (e.currentTarget as HTMLInputElement).files?.[0] ?? null; }}
+        />
+      </div>
+      {#if importError}
+        <div style="color:#dc3545; font-size:13px; margin-bottom:8px">{importError}</div>
+      {/if}
+      <div class="modal-actions">
+        <button onclick={() => showImportModal = false}>Cancel</button>
+        <button class="primary" onclick={importRun} disabled={!importFile || importing}>
+          {importing ? 'Importing…' : 'Import'}
+        </button>
       </div>
     </div>
   </div>
@@ -658,6 +719,15 @@
   button.active { background: #e8f0fe; border-color: #0066cc; color: #0066cc; }
   button.warn { background: #fff3cd; border-color: #f0a500; color: #7a4f00; }
   button.warn.active { background: #ffe08a; }
+  a.btn {
+    display: inline-flex; align-items: center;
+    padding: 4px 10px; font-size: 13px; font-weight: 500;
+    border: 1px solid #ccc; border-radius: 4px;
+    background: #fff; color: #333;
+    text-decoration: none; cursor: pointer;
+    white-space: nowrap;
+  }
+  a.btn:hover { background: #f0f0f0; }
 
   .validation-panel {
     background: #fff8e1;
