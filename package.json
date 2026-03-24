@@ -38,6 +38,7 @@
 		"@lezer/common": "^1.5.1",
 		"@lezer/highlight": "^1.2.3",
 		"@lezer/lr": "^1.4.8",
+		"@modelcontextprotocol/sdk": "^1.27.1",
 		"@replit/codemirror-vim": "^6.3.0",
 		"@sveltejs/adapter-node": "^5.5.4",
 		"better-sqlite3": "^12.8.0",
