@@ -86,7 +86,7 @@ and the recommended workflow for creating and running a benchmark plan.`
 					'6. set_params(design_id, [{name, value}]) — define {{PARAM}} values',
 					'7. upsert_step (repeat) — add sql setup, collect, pgbench, collect, sql teardown steps',
 					'8. run_design(design_id) — start a test run, get run_id',
-					'9. get_run(run_id) — poll until status is "completed" or "failed"',
+					'9. get_run(run_id) — wait ~(pgbench -T seconds + collect durations) before first poll, then every ~30s',
 					'10. export_plan(design_id) — get plan.json for production mybench-runner CLI'
 				],
 				example_steps: {
@@ -343,7 +343,14 @@ Tip: use descriptive names like NUM_USERS, NUM_ROWS, NUM_CLIENTS, DURATION_SECS.
 		{
 			description: `Starts a benchmark run for a design. Returns run_id immediately — poll get_run(run_id) until status is "completed" or "failed".
 Executes all enabled steps in order: sql setup → pre-collect → pgbench → post-collect → sql teardown.
-This is a validation/test run. For production benchmarking, use export_plan + mybench-runner on EC2.`,
+This is a validation/test run. For production benchmarking, use export_plan + mybench-runner on EC2.
+
+Polling strategy: before polling, estimate total run duration from the design steps:
+- For each pgbench step: parse the -T <seconds> flag from pgbench_options (e.g. "-T 60" → 60s)
+- For each collect step: add duration_secs
+- Sum all steps, then wait that long before the first get_run call
+- If still "running", poll every ~30s thereafter
+Example: pgbench -T 120 + two 15s collect steps → wait ~150s before first poll.`,
 			inputSchema: { design_id: z.number().int() }
 		},
 		async ({ design_id }) => {
@@ -360,7 +367,10 @@ This is a validation/test run. For production benchmarking, use export_plan + my
 		{
 			description: `Returns the current status and results of a benchmark run. Poll this after run_design.
 status: "running" | "completed" | "failed" | "stopped"
-When completed: tps, latency_avg_ms, latency_stddev_ms, and transactions are populated.`,
+When completed: tps, latency_avg_ms, latency_stddev_ms, and transactions are populated.
+
+Do NOT poll rapidly. Estimate the run duration first (see run_design description), wait that long,
+then poll every ~30s if still running. Rapid polling wastes resources and does not speed up the run.`,
 			inputSchema: { run_id: z.number().int() }
 		},
 		async ({ run_id }) => {
