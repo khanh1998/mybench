@@ -63,6 +63,23 @@ export const POST: RequestHandler = async ({ request }) => {
 
 	const runId = insertResult.lastInsertRowid as number;
 
+	// Insert step results
+	const steps = result.steps as {
+		step_id: number; position: number; name: string; type: string;
+		status: string; command?: string; started_at: string; finished_at: string;
+	}[] | undefined;
+	if (steps?.length) {
+		const insStep = db.prepare(`
+			INSERT INTO run_step_results (run_id, step_id, position, name, type, status, command, started_at, finished_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`);
+		db.transaction(() => {
+			for (const s of steps) {
+				insStep.run(runId, s.step_id, s.position, s.name, s.type, s.status, s.command ?? '', s.started_at, s.finished_at);
+			}
+		})();
+	}
+
 	// Insert snapshots
 	const snapshots = result.snapshots as Record<string, Record<string, unknown>[]> | undefined;
 	if (snapshots) {

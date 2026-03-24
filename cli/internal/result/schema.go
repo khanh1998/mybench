@@ -6,7 +6,20 @@ type Result struct {
 	DesignID      int                        `json:"design_id"`
 	RunnerVersion string                     `json:"runner_version"`
 	Run           RunSummary                 `json:"run"`
+	Steps         []StepResult               `json:"steps"`
 	Snapshots     map[string][]SnapshotRow   `json:"snapshots"`
+}
+
+// StepResult records execution metadata for a single step.
+type StepResult struct {
+	StepID     int    `json:"step_id"`
+	Position   int    `json:"position"`
+	Name       string `json:"name"`
+	Type       string `json:"type"`
+	Status     string `json:"status"` // "completed" or "failed"
+	Command    string `json:"command,omitempty"`
+	StartedAt  string `json:"started_at"`
+	FinishedAt string `json:"finished_at"`
 }
 
 // RunSummary contains the benchmark run metadata and pgbench parsed output.

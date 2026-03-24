@@ -29,6 +29,7 @@ type pgbenchResult struct {
 	LatencyAvgMs    float64
 	LatencyStddevMs float64
 	Transactions    int64
+	Command         string
 }
 
 // parsePgbenchOutput scans pgbench stdout lines and extracts metrics.
@@ -82,6 +83,9 @@ func runPgbenchStep(
 		args = append(args, "-f", sf)
 	}
 
+	var res pgbenchResult
+	res.Command = "pgbench " + strings.Join(args, " ")
+
 	cmd := exec.CommandContext(ctx, "pgbench", args...)
 	cmd.Env = append(os.Environ(), "PGPASSWORD="+server.Password)
 
@@ -112,10 +116,8 @@ func runPgbenchStep(
 
 	if err := cmd.Start(); err != nil {
 		ticker.Stop()
-		return pgbenchResult{}, fmt.Errorf("starting pgbench: %w", err)
+		return res, fmt.Errorf("starting pgbench: %w", err)
 	}
-
-	var res pgbenchResult
 
 	// Read stdout in a goroutine, parsing metrics as we go.
 	stdoutDone := make(chan struct{})

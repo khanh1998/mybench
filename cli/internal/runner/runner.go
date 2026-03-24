@@ -66,22 +66,37 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 			phase = "bench"
 		}
 
+		stepRes := result.StepResult{
+			StepID:    step.ID,
+			Position:  step.Position,
+			Name:      step.Name,
+			Type:      step.Type,
+			StartedAt: time.Now().UTC().Format(time.RFC3339),
+		}
+
+		var stepErr error
+
 		switch step.Type {
 		case "sql":
 			script := plan.SubstituteParams(step.Script, opts.Plan.Params)
 			if opts.Progress {
 				fmt.Printf("[sql] %s\n", step.Name)
 			}
-			if err := runSQLStep(opts, step.Name, script, step.NoTransaction); err != nil {
+			stepRes.Command, stepErr = runSQLStep(opts, step.Name, script, step.NoTransaction)
+			if stepErr != nil {
+				stepRes.Status = "failed"
+				stepRes.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+				res.Steps = append(res.Steps, stepRes)
 				res.Run.Status = "failed"
-				res.Run.FinishedAt = time.Now().UTC().Format(time.RFC3339)
-				return res, fmt.Errorf("sql step %q: %w", step.Name, err)
+				res.Run.FinishedAt = stepRes.FinishedAt
+				return res, fmt.Errorf("sql step %q: %w", step.Name, stepErr)
 			}
 
 		case "collect":
 			if opts.Progress {
 				fmt.Printf("[collect] %s (phase=%s, duration=%ds)\n", step.Name, phase, step.DurationSecs)
 			}
+			stepRes.Command = fmt.Sprintf("collect phase=%s duration=%ds interval=%ds", phase, step.DurationSecs, opts.Plan.RunSettings.SnapshotIntervalSeconds)
 			if err := runCollectStep(ctx, opts, step, pool, res.Snapshots, phase); err != nil {
 				// Collect errors are non-fatal (warn and continue).
 				fmt.Fprintf(os.Stderr, "warning: collect step %q: %v\n", step.Name, err)
@@ -94,6 +109,7 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 			res.Run.BenchStartedAt = time.Now().UTC().Format(time.RFC3339)
 			pbRes, err := runPgbenchStep(ctx, opts, step, pool, res.Snapshots, opts.Plan.RunSettings.SnapshotIntervalSeconds)
 			seenPgbench = true
+			stepRes.Command = pbRes.Command
 
 			// Capture metrics even on error (partial results).
 			res.Run.TPS = pbRes.TPS
@@ -102,14 +118,22 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 			res.Run.Transactions = pbRes.Transactions
 
 			if err != nil {
+				stepErr = err
+				stepRes.Status = "failed"
+				stepRes.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+				res.Steps = append(res.Steps, stepRes)
 				res.Run.Status = "failed"
-				res.Run.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+				res.Run.FinishedAt = stepRes.FinishedAt
 				return res, fmt.Errorf("pgbench step %q: %w", step.Name, err)
 			}
 
 		default:
 			fmt.Fprintf(os.Stderr, "warning: unknown step type %q for step %q, skipping\n", step.Type, step.Name)
 		}
+
+		stepRes.Status = "completed"
+		stepRes.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+		res.Steps = append(res.Steps, stepRes)
 
 		// Update phase for next step if we just ran pgbench.
 		if step.Type == "pgbench" {
