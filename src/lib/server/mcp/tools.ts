@@ -25,14 +25,14 @@ and the recommended workflow for creating and running a benchmark plan.`
 		},
 		async () => {
 			const db = getDb();
-			const servers = db.prepare('SELECT id, name, host, port, username, database, ssl FROM pg_servers ORDER BY id').all() as {
-				id: number; name: string; host: string; port: number; username: string; database: string; ssl: number;
+			const servers = db.prepare('SELECT id, name, host, port, username, ssl FROM pg_servers ORDER BY id').all() as {
+				id: number; name: string; host: string; port: number; username: string; ssl: number;
 			}[];
 
 			const guide = {
 				overview: 'mybench helps you design and run PostgreSQL benchmarks. Use these tools to create plans, run tests, and export results.',
 				database_servers: servers.length > 0
-					? servers.map(s => ({ id: s.id, name: s.name, host: s.host, port: s.port, username: s.username, default_database: s.database, ssl: !!s.ssl }))
+					? servers.map(s => ({ id: s.id, name: s.name, host: s.host, port: s.port, username: s.username, ssl: !!s.ssl }))
 					: 'No servers configured yet. Add one in Settings (http://localhost:5173/settings) before running benchmarks.',
 				data_model: {
 					decisions: 'Top-level question you are answering (e.g. "Which table design is faster?"). Contains one or more designs.',
