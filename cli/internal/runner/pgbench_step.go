@@ -63,7 +63,8 @@ func runPgbenchStep(
 	scriptFiles := make([]string, 0, len(step.PgbenchScripts))
 	for i, ps := range step.PgbenchScripts {
 		fname := fmt.Sprintf("%s/mybench-%s-%d-%d.pgbench", opts.LogDir, opts.Timestamp, step.ID, i)
-		if err := os.WriteFile(fname, []byte(ps.Script), 0644); err != nil {
+		script := plan.SubstituteParams(ps.Script, opts.Plan.Params)
+		if err := os.WriteFile(fname, []byte(script), 0644); err != nil {
 			return pgbenchResult{}, fmt.Errorf("writing pgbench script: %w", err)
 		}
 		scriptFiles = append(scriptFiles, fmt.Sprintf("%s@%d", fname, ps.Weight))

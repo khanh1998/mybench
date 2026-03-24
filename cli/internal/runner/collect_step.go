@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -33,7 +34,8 @@ func collectOnce(ctx context.Context, pool *pgxpool.Pool, snapTables []plan.Snap
 
 		rows, err := pool.Query(ctx, query)
 		if err != nil {
-			return fmt.Errorf("querying %s: %w", spec.PgViewName, err)
+			fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", spec.PgViewName, err)
+			continue
 		}
 
 		fieldDescs := rows.FieldDescriptions()
@@ -41,7 +43,8 @@ func collectOnce(ctx context.Context, pool *pgxpool.Pool, snapTables []plan.Snap
 			vals, err := rows.Values()
 			if err != nil {
 				rows.Close()
-				return fmt.Errorf("scanning row from %s: %w", spec.PgViewName, err)
+				fmt.Fprintf(os.Stderr, "warning: scanning row from %s: %v\n", spec.PgViewName, err)
+				break
 			}
 
 			row := make(result.SnapshotRow, len(vals)+2)
@@ -55,7 +58,7 @@ func collectOnce(ctx context.Context, pool *pgxpool.Pool, snapTables []plan.Snap
 		rows.Close()
 
 		if err := rows.Err(); err != nil {
-			return fmt.Errorf("iterating rows from %s: %w", spec.PgViewName, err)
+			fmt.Fprintf(os.Stderr, "warning: iterating rows from %s: %v\n", spec.PgViewName, err)
 		}
 	}
 
