@@ -81,7 +81,7 @@ and the recommended workflow for creating and running a benchmark plan.`
 					'1. get_context (this tool) — understand conventions and see available servers',
 					'2. list_decisions — find existing decisions, or create_decision for a new one',
 					'3. create_design(decision_id, name) — create a design candidate',
-					'4. [assign server in web UI if needed, or reuse an existing design\'s server]',
+					'4. configure_design(design_id, {server_id, database}) — assign a server from the database_servers list',
 					'5. get_db_schema(design_id) — see real table/column names from the live DB',
 					'6. set_params(design_id, [{name, value}]) — define {{PARAM}} values',
 					'7. upsert_step (repeat) — add sql setup, collect, pgbench, collect, sql teardown steps',
@@ -183,7 +183,7 @@ and the recommended workflow for creating and running a benchmark plan.`
 	server.registerTool(
 		'create_design',
 		{
-			description: 'Creates a new design under a decision. A design is one candidate to benchmark. After creating, use upsert_step to add steps and set_params to define parameters. Assign a database server via the web UI or by copying one from an existing design.',
+			description: 'Creates a new design under a decision. A design is one candidate to benchmark. After creating, use configure_design to set the server and database, then upsert_step and set_params.',
 			inputSchema: {
 				decision_id: z.number().int().describe('Decision ID from list_decisions'),
 				name: z.string().describe('Short name, e.g. "plain table" or "partitioned"'),
@@ -194,6 +194,48 @@ and the recommended workflow for creating and running a benchmark plan.`
 			const db = getDb();
 			const result = db.prepare('INSERT INTO designs (decision_id, name, description) VALUES (?, ?, ?)').run(decision_id, name, description ?? '');
 			return text({ design_id: result.lastInsertRowid });
+		}
+	);
+
+	// ─────────────────────────────────────────────────────────────────────────
+	// configure_design
+	// ─────────────────────────────────────────────────────────────────────────
+	server.registerTool(
+		'configure_design',
+		{
+			description: `Updates the configuration of an existing design: server, database, description, and snapshot settings.
+Use get_context to see available server IDs. All fields are optional — only provided fields are updated.
+Call this after create_design to assign a server before running the design.`,
+			inputSchema: {
+				design_id: z.number().int(),
+				server_id: z.number().int().optional().describe('PG server ID from get_context database_servers list'),
+				database: z.string().optional().describe('Database name on the server to benchmark against'),
+				description: z.string().optional().describe('Human-readable description of this design'),
+				snapshot_interval_seconds: z.number().int().optional().describe('How often to take pg_stat_* snapshots during benchmarks (default 30)'),
+				pre_collect_secs: z.number().int().optional().describe('Seconds of pg_stat collection before pgbench (legacy, prefer collect steps)'),
+				post_collect_secs: z.number().int().optional().describe('Seconds of pg_stat collection after pgbench (legacy, prefer collect steps)')
+			}
+		},
+		async ({ design_id, server_id, database, description, snapshot_interval_seconds, pre_collect_secs, post_collect_secs }) => {
+			const db = getDb();
+			const design = db.prepare('SELECT * FROM designs WHERE id = ?').get(design_id);
+			if (!design) return text({ error: `Design ${design_id} not found` });
+
+			const fields: string[] = [];
+			const values: unknown[] = [];
+			if (server_id !== undefined)              { fields.push('server_id = ?');              values.push(server_id); }
+			if (database !== undefined)               { fields.push('database = ?');               values.push(database); }
+			if (description !== undefined)            { fields.push('description = ?');            values.push(description); }
+			if (snapshot_interval_seconds !== undefined) { fields.push('snapshot_interval_seconds = ?'); values.push(snapshot_interval_seconds); }
+			if (pre_collect_secs !== undefined)       { fields.push('pre_collect_secs = ?');       values.push(pre_collect_secs); }
+			if (post_collect_secs !== undefined)      { fields.push('post_collect_secs = ?');      values.push(post_collect_secs); }
+
+			if (fields.length === 0) return text({ message: 'Nothing to update — no fields provided.' });
+
+			values.push(design_id);
+			db.prepare(`UPDATE designs SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+
+			return text({ updated: true, design_id, fields: fields.map(f => f.split(' ')[0]) });
 		}
 	);
 
