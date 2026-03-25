@@ -7,7 +7,7 @@ import { env } from '$env/dynamic/private';
 getDb();
 recoverStaleRuns();
 
-const PUBLIC_PATHS = ['/login'];
+const PUBLIC_PATHS = ['/login', '/favicon.ico'];
 
 export const handle = async ({ event, resolve }: { event: import('@sveltejs/kit').RequestEvent; resolve: (event: import('@sveltejs/kit').RequestEvent) => Promise<Response> }) => {
 	const secret = env.AUTH_SECRET;
