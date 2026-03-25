@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { enhance } from '$app/forms';
   import type { ActionData } from './$types';
 
   let { form }: { form: ActionData } = $props();
@@ -8,7 +7,7 @@
 <div class="login-wrap">
   <div class="login-box">
     <h1>mybench</h1>
-    <form method="POST" use:enhance>
+    <form method="POST">
       <input
         type="password"
         name="password"
