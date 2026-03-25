@@ -575,6 +575,16 @@ function migrate(db: Database.Database) {
         subid INTEGER, subname TEXT, apply_error_count INTEGER, sync_error_count INTEGER, stats_reset TEXT
       );
 
+      CREATE TABLE IF NOT EXISTS metrics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        category TEXT NOT NULL DEFAULT 'Custom',
+        description TEXT NOT NULL DEFAULT '',
+        sql TEXT NOT NULL,
+        is_builtin INTEGER NOT NULL DEFAULT 0,
+        higher_is_better INTEGER NOT NULL DEFAULT 1,
+        position INTEGER NOT NULL DEFAULT 0
+      );
       DELETE FROM metrics WHERE is_builtin = 1;
       INSERT INTO schema_migrations (id) VALUES ('snap_phase_v1');
     `);
