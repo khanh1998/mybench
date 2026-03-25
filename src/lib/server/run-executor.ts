@@ -123,10 +123,16 @@ export function startRun(designId: number, opts: StartRunOptions = {}): number {
 				let stdout = '';
 				let stderr = '';
 				let exitCode: number | null = null;
+				const LOG_CAP = 500_000; // 500KB per stream
 
 				const onLine = (line: string, stream: 'stdout' | 'stderr') => {
-					if (stream === 'stdout') stdout += line + '\n';
-					else stderr += line + '\n';
+					if (stream === 'stdout') {
+						if (stdout.length < LOG_CAP) stdout += line + '\n';
+						else if (!stdout.endsWith('[truncated]\n')) stdout += '[truncated]\n';
+					} else {
+						if (stderr.length < LOG_CAP) stderr += line + '\n';
+						else if (!stderr.endsWith('[truncated]\n')) stderr += '[truncated]\n';
+					}
 				};
 
 				if (step.type === 'collect') {
