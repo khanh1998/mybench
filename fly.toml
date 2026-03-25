@@ -1,0 +1,39 @@
+app = "mybench"
+primary_region = "sin" # Singapore — closest to ap-southeast-2 RDS
+
+[build]
+
+[env]
+  DATA_DIR = "/data"
+  PORT = "3000"
+
+[mounts]
+  source = "mybench_data"
+  destination = "/data"
+
+[[services]]
+  internal_port = 3000
+  protocol = "tcp"
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[services.ports]]
+    handlers = ["tls", "http"]
+    port = 443
+
+  [[services.ports]]
+    handlers = ["http"]
+    port = 80
+    [services.ports.force_https]
+      enabled = true
+
+  [services.concurrency]
+    type = "requests"
+    hard_limit = 25
+    soft_limit = 20
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1
