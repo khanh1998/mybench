@@ -92,6 +92,78 @@ and the recommended workflow for creating and running a benchmark plan.`
 					'11. get_run(run_id) — wait ~(pgbench -T seconds + collect durations) before first poll, then every ~30s',
 					'12. export_plan(design_id) — get plan.json for production mybench-runner CLI'
 				],
+				recommended_step_structure: {
+					description: 'Always follow this 10-step order when building a benchmark design. Each step has a specific purpose — do not skip or merge steps.',
+					steps: [
+						{
+							position: 0, type: 'sql',
+							name: '1 — Init schema (no indexes/constraints)',
+							purpose: 'Create tables in their bare form: no indexes, no CHECK, no FOREIGN KEY, no UNIQUE (except PK). Maximises INSERT throughput during seeding.',
+							tip: 'Use UNLOGGED tables if crash-safety is not needed during setup — convert to LOGGED in step 3.',
+							example: 'DROP TABLE IF EXISTS orders CASCADE;\nCREATE UNLOGGED TABLE orders (\n  id BIGSERIAL PRIMARY KEY,\n  user_id BIGINT,\n  total NUMERIC\n);'
+						},
+						{
+							position: 1, type: 'sql',
+							name: '2 — Seed data',
+							purpose: 'Bulk-insert the realistic dataset using generate_series or COPY. Insert without constraint overhead from step 1.',
+							tip: 'Use {{NUM_ROWS}}, {{NUM_USERS}} params so profiles can scale the dataset. Emit RAISE NOTICE every 100k rows for progress.',
+							example: 'INSERT INTO orders (user_id, total)\n  SELECT (random()*{{NUM_USERS}})::bigint,\n         (random()*10000)::numeric\n  FROM generate_series(1, {{NUM_ROWS}});'
+						},
+						{
+							position: 2, type: 'sql',
+							name: '3 — Add indexes, constraints, foreign keys',
+							purpose: 'Add all indexes, CHECK, FOREIGN KEY, and UNIQUE constraints now. Building them after bulk-insert is far faster than maintaining them row-by-row.',
+							tip: 'If the table was UNLOGGED, convert it here: ALTER TABLE orders SET LOGGED;',
+							example: 'ALTER TABLE orders SET LOGGED;\nALTER TABLE orders ADD CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id);\nCREATE INDEX ON orders (user_id);\nCREATE INDEX ON orders (created_at DESC);'
+						},
+						{
+							position: 3, type: 'sql', no_transaction: true,
+							name: '4 — Maintenance (VACUUM, ANALYZE, CHECKPOINT, warm buffers)',
+							purpose: 'Bring the database to a clean, production-like state. Eliminates noise from dead tuples, stale stats, or cold buffers.',
+							tip: 'Must use no_transaction: true — VACUUM and CHECKPOINT cannot run inside a transaction. Warm the buffer pool with a full seqscan on hot tables.',
+							example: 'VACUUM ANALYZE orders;\nVACUUM ANALYZE users;\nCHECKPOINT;\n-- Warm buffer pool\nSELECT COUNT(*) FROM orders;\nSELECT COUNT(*) FROM users;'
+						},
+						{
+							position: 4, type: 'sql',
+							name: '5 — Table sizes before benchmark',
+							purpose: 'Snapshot table and index sizes before load so you can measure write amplification and bloat caused by the benchmark.',
+							example: "SELECT relname,\n       pg_size_pretty(pg_total_relation_size(oid)) AS total,\n       pg_size_pretty(pg_relation_size(oid)) AS heap,\n       pg_size_pretty(pg_indexes_size(oid)) AS indexes\nFROM pg_class\nWHERE relname IN ('orders','users')\nORDER BY relname;"
+						},
+						{
+							position: 5, type: 'collect', duration_secs: 15,
+							name: '6 — Pre-collect stats',
+							purpose: 'Take pg_stat_* baseline snapshots before load. The delta (post − pre) reveals cache hit rate, index usage, I/O, and WAL volume caused by the benchmark. Can be disabled if not needed.'
+						},
+						{
+							position: 6, type: 'pgbench',
+							name: '7 — Benchmark',
+							purpose: 'The actual load test. Script weights must sum to ≤ 100. Use --no-vacuum to prevent pgbench from running its own VACUUM during the test.',
+							tip: 'Model a realistic read/write mix with multiple scripts and weights. {{NUM_CLIENTS}}, {{NUM_THREADS}}, {{DURATION_SECS}} are the key params.',
+							example_options: '-c {{NUM_CLIENTS}} -j {{NUM_THREADS}} -T {{DURATION_SECS}} --no-vacuum',
+							example_scripts: [
+								{ name: 'write', weight: 30, script: '\\set uid random(1, {{NUM_USERS}})\nBEGIN;\nINSERT INTO orders (user_id, total) VALUES (:uid, random()*1000);\nEND;' },
+								{ name: 'read', weight: 70, script: '\\set uid random(1, {{NUM_USERS}})\nSELECT * FROM orders WHERE user_id = :uid LIMIT 10;' }
+							]
+						},
+						{
+							position: 7, type: 'collect', duration_secs: 15,
+							name: '8 — Post-collect stats',
+							purpose: 'Take pg_stat_* snapshots after load. Compare with pre-collect to see the impact of the benchmark on cache, I/O, WAL, and index usage.'
+						},
+						{
+							position: 8, type: 'sql',
+							name: '9 — Table sizes after benchmark',
+							purpose: 'Re-run the same size query from step 5. Compare before/after to measure index bloat, heap growth, and TOAST expansion caused by writes.',
+							example: "SELECT relname,\n       pg_size_pretty(pg_total_relation_size(oid)) AS total,\n       pg_size_pretty(pg_relation_size(oid)) AS heap,\n       pg_size_pretty(pg_indexes_size(oid)) AS indexes\nFROM pg_class\nWHERE relname IN ('orders','users')\nORDER BY relname;"
+						},
+						{
+							position: 9, type: 'sql',
+							name: '10 — Teardown',
+							purpose: 'Drop all tables created in step 1. Use CASCADE to handle foreign keys. Leave the database clean for the next run.',
+							example: 'DROP TABLE IF EXISTS orders CASCADE;\nDROP TABLE IF EXISTS users CASCADE;'
+						}
+					]
+				},
 				example_steps: {
 					sql_setup: {
 						type: 'sql', name: 'Setup', position: 0, enabled: true,

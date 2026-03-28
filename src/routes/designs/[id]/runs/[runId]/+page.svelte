@@ -410,7 +410,7 @@
       <span style="font-size:12px; color:#155724">✓ {finalStatus || 'Done'}</span>
     {/if}
   </div>
-  {#if run?.is_imported}
+  {#if run?.is_imported && !run?.steps?.some((s: { stdout?: string }) => s.stdout)}
     <div style="padding:16px; color:#666; font-style:italic; font-size:13px">Logs not available for imported runs</div>
   {:else}
     <pre class="output" bind:this={outputEl}>{#if !done}<span class="cursor">▋</span>{/if}</pre>
