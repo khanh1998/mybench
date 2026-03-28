@@ -25,3 +25,5 @@ data/mybench.db
 data/mybench.db-wal
 data/mybench.db-shm
 .claude/settings.local.json
+
+sample-data/
