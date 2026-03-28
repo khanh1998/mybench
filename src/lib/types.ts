@@ -77,6 +77,8 @@ export interface BenchmarkRun {
 	notes: string;
 	profile_name: string;
 	run_params: string; // JSON string of [{name, value}]; '' if no params
+	is_imported: number;          // 0 or 1
+	ec2_server_id: number | null;
 }
 
 export interface ParamProfile {
@@ -99,6 +101,17 @@ export interface RunStepResult {
 	exit_code: number | null;
 	started_at: string | null;
 	finished_at: string | null;
+}
+
+export interface Ec2Server {
+	id: number;
+	name: string;
+	host: string;
+	user: string;        // SSH username
+	port: number;        // SSH port (default 22)
+	private_key: string; // PEM content of SSH private key (stored in DB, not a file path)
+	remote_dir: string;  // working directory on EC2
+	log_dir: string;     // pgbench log directory on EC2
 }
 
 export interface SavedQuery {

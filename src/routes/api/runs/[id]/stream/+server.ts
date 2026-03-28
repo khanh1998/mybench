@@ -61,6 +61,19 @@ export const GET: RequestHandler = ({ params }) => {
 				return;
 			}
 
+			// Replay any stdout already flushed to DB (e.g. EC2 runs flush every 50 lines,
+			// so a page reload mid-run will catch up on past output before subscribing to live events)
+			const storedSteps = db.prepare(
+				'SELECT stdout FROM run_step_results WHERE run_id = ? ORDER BY position'
+			).all(runId) as { stdout: string | null }[];
+			for (const step of storedSteps) {
+				if (step.stdout) {
+					for (const line of step.stdout.split('\n').filter(Boolean)) {
+						try { controller.enqueue(encoder.encode(`data: ${JSON.stringify(line)}\n\n`)); } catch {}
+					}
+				}
+			}
+
 			// Replay current phase for late connects (page refresh mid-phase)
 			if (activeRun.currentPhase) {
 				try { controller.enqueue(encoder.encode(`event: phase\ndata: ${JSON.stringify(activeRun.currentPhase)}\n\n`)); } catch {}

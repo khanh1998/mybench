@@ -44,11 +44,13 @@
     snapshot_interval_seconds: number;
   }
   interface Server { id: number; name: string; }
+  interface Ec2Server { id: number; name: string; host: string; user: string; port: number; }
   interface Run { id: number; status: string; tps: number|null; latency_avg_ms: number|null; started_at: string; profile_name: string; name: string; }
   interface Profile { id: number; design_id: number; name: string; values: { param_name: string; value: string }[]; }
 
   let design: Design | null = $state(data.design as Design | null);
   let servers: Server[] = $state((data.servers ?? []) as Server[]);
+  let ec2Servers: Ec2Server[] = $state((data.ec2Servers ?? []) as Ec2Server[]);
   let runs: Run[] = $state((data.runs ?? []) as Run[]);
   let profiles: Profile[] = $state((data.profiles ?? []) as Profile[]);
   const initialStep = design?.steps?.find(s => s.enabled) ?? design?.steps?.[0] ?? null;
@@ -72,6 +74,8 @@
   let runSnapshotInterval = $state(30);
   let runProfile = $state<number|null>(null);
   let runName = $state('');
+  let runMode = $state<'local' | 'ec2'>('local');
+  let runEc2ServerId = $state<number|null>(null);
 
   // Profile management state
   let showProfileForm = $state(false);
@@ -93,6 +97,8 @@
     runSnapshotInterval = design.snapshot_interval_seconds;
     runProfile = null;
     runName = '';
+    runMode = 'local';
+    runEc2ServerId = null;
     showRunModal = true;
   }
 
@@ -187,17 +193,22 @@
     if (!design) return;
     showRunModal = false;
     startingRun = true;
+    const body: Record<string, unknown> = {
+      design_id: id,
+      profile_id: runProfile ?? undefined,
+      name: runName || undefined
+    };
+    if (runMode === 'ec2') {
+      body.ec2_server_id = runEc2ServerId;
+    } else {
+      body.server_id = runServer;
+      body.database = runDatabase;
+      body.snapshot_interval_seconds = runSnapshotInterval;
+    }
     const res = await fetch('/api/runs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        design_id: id,
-        server_id: runServer,
-        database: runDatabase,
-        snapshot_interval_seconds: runSnapshotInterval,
-        profile_id: runProfile ?? undefined,
-        name: runName || undefined
-      })
+      body: JSON.stringify(body)
     });
     const { run_id } = await res.json();
     startingRun = false;
@@ -433,22 +444,48 @@
       {/if}
 
       <div class="form-group">
-        <label for="run-server">Server</label>
-        <select id="run-server" bind:value={runServer}>
-          <option value={null}>— select server —</option>
-          {#each servers as s}
-            <option value={s.id}>{s.name}</option>
-          {/each}
-        </select>
+        <label>Run location</label>
+        <div style="display:flex; gap:16px">
+          <label style="font-weight:normal; cursor:pointer; display:flex; align-items:center; gap:6px">
+            <input type="radio" bind:group={runMode} value="local" style="width:auto" />
+            Local
+          </label>
+          <label style="font-weight:normal; cursor:pointer; display:flex; align-items:center; gap:6px" class:disabled={ec2Servers.length === 0}>
+            <input type="radio" bind:group={runMode} value="ec2" style="width:auto" disabled={ec2Servers.length === 0} />
+            EC2{#if ec2Servers.length === 0}<span style="color:#aaa; font-size:11px; margin-left:4px">(none configured)</span>{/if}
+          </label>
+        </div>
       </div>
-      <div class="form-group">
-        <label for="run-db">Database</label>
-        <input id="run-db" bind:value={runDatabase} placeholder="benchmark_db" />
-      </div>
-      <div class="form-group">
-        <label for="run-snap" title="How often pg_stat_* snapshots are collected">Snapshot interval (s)</label>
-        <input id="run-snap" type="number" bind:value={runSnapshotInterval} min="5" max="300" />
-      </div>
+
+      {#if runMode === 'ec2'}
+        <div class="form-group">
+          <label for="run-ec2-server">EC2 Server</label>
+          <select id="run-ec2-server" bind:value={runEc2ServerId}>
+            <option value={null}>— select EC2 server —</option>
+            {#each ec2Servers as s}
+              <option value={s.id}>{s.name} ({s.user}@{s.host}:{s.port})</option>
+            {/each}
+          </select>
+        </div>
+      {:else}
+        <div class="form-group">
+          <label for="run-server">Server</label>
+          <select id="run-server" bind:value={runServer}>
+            <option value={null}>— select server —</option>
+            {#each servers as s}
+              <option value={s.id}>{s.name}</option>
+            {/each}
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="run-db">Database</label>
+          <input id="run-db" bind:value={runDatabase} placeholder="benchmark_db" />
+        </div>
+        <div class="form-group">
+          <label for="run-snap" title="How often pg_stat_* snapshots are collected">Snapshot interval (s)</label>
+          <input id="run-snap" type="number" bind:value={runSnapshotInterval} min="5" max="300" />
+        </div>
+      {/if}
 
       <!-- pgbench steps summary -->
       {#if design.steps.filter(s => s.enabled && s.type === 'pgbench').length > 0}
@@ -477,7 +514,7 @@
 
       <div class="modal-actions">
         <button onclick={() => showRunModal = false}>Cancel</button>
-        <button class="primary" onclick={startRun} disabled={!runServer || !runDatabase}>▶ Start Run</button>
+        <button class="primary" onclick={startRun} disabled={runMode === 'local' ? (!runServer || !runDatabase) : !runEc2ServerId}>▶ Start Run</button>
       </div>
     </div>
   </div>

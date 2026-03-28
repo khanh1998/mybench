@@ -1,6 +1,7 @@
 import { json, error } from '@sveltejs/kit';
 import getDb from '$lib/server/db';
 import { startRun } from '$lib/server/run-executor';
+import { startEc2Run } from '$lib/server/ec2-executor';
 import type { RequestHandler } from './$types';
 
 export const GET: RequestHandler = ({ url }) => {
@@ -14,11 +15,20 @@ export const GET: RequestHandler = ({ url }) => {
 
 export const POST: RequestHandler = async ({ request }) => {
 	const body = await request.json();
-	const { design_id, server_id, database, snapshot_interval_seconds, profile_id, name } = body;
+	const { design_id, server_id, database, snapshot_interval_seconds, profile_id, name, ec2_server_id } = body;
 	if (!design_id) throw error(400, 'Missing design_id');
 	try {
-		const runId = startRun(Number(design_id), { server_id, database, snapshot_interval_seconds, profile_id, name });
-		return json({ run_id: runId }, { status: 201 });
+		if (ec2_server_id) {
+			const runId = startEc2Run(Number(design_id), Number(ec2_server_id), {
+				profile_id,
+				name,
+				snapshot_interval_seconds
+			});
+			return json({ run_id: runId }, { status: 201 });
+		} else {
+			const runId = startRun(Number(design_id), { server_id, database, snapshot_interval_seconds, profile_id, name });
+			return json({ run_id: runId }, { status: 201 });
+		}
 	} catch (e: unknown) {
 		throw error(400, e instanceof Error ? e.message : String(e));
 	}

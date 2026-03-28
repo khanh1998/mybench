@@ -137,6 +137,17 @@ function migrate(db: Database.Database) {
       param_name TEXT    NOT NULL DEFAULT '',
       value      TEXT    NOT NULL DEFAULT ''
     );
+
+    CREATE TABLE IF NOT EXISTS ec2_servers (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      name        TEXT    NOT NULL,
+      host        TEXT    NOT NULL DEFAULT '',
+      user        TEXT    NOT NULL DEFAULT 'ec2-user',
+      port        INTEGER NOT NULL DEFAULT 22,
+      private_key TEXT    NOT NULL DEFAULT '',
+      remote_dir  TEXT    NOT NULL DEFAULT '~/mybench-bench',
+      log_dir     TEXT    NOT NULL DEFAULT '/tmp/mybench-logs'
+    );
   `);
 
   // Add ssl column to pg_servers if it doesn't exist (idempotent)
@@ -147,6 +158,7 @@ function migrate(db: Database.Database) {
   const stepResultCols = (db.prepare(`PRAGMA table_info(run_step_results)`).all() as { name: string }[]).map(c => c.name);
   if (!stepResultCols.includes('command')) db.exec(`ALTER TABLE run_step_results ADD COLUMN command TEXT NOT NULL DEFAULT ''`);
   if (!stepResultCols.includes('processed_script')) db.exec(`ALTER TABLE run_step_results ADD COLUMN processed_script TEXT NOT NULL DEFAULT ''`);
+
 
   // One-time backfill: migrate existing pgbench step scripts (idempotent)
   db.exec(`
@@ -623,6 +635,15 @@ function migrate(db: Database.Database) {
 	if (!runCols.includes('notes')) db.exec(`ALTER TABLE benchmark_runs ADD COLUMN notes TEXT NOT NULL DEFAULT ''`);
 	if (!runCols.includes('profile_name')) db.exec(`ALTER TABLE benchmark_runs ADD COLUMN profile_name TEXT NOT NULL DEFAULT ''`);
 	if (!runCols.includes('run_params')) db.exec(`ALTER TABLE benchmark_runs ADD COLUMN run_params TEXT NOT NULL DEFAULT ''`);
+	if (!runCols.includes('is_imported')) db.exec(`ALTER TABLE benchmark_runs ADD COLUMN is_imported INTEGER NOT NULL DEFAULT 0`);
+	if (!runCols.includes('ec2_server_id')) db.exec(`ALTER TABLE benchmark_runs ADD COLUMN ec2_server_id INTEGER REFERENCES ec2_servers(id)`);
+	if (!runCols.includes('ec2_run_token')) db.exec(`ALTER TABLE benchmark_runs ADD COLUMN ec2_run_token TEXT`);
+
+	// ec2_servers: migrate key_path → private_key (stores key content instead of path)
+	const ec2Cols = (db.prepare(`PRAGMA table_info(ec2_servers)`).all() as { name: string }[]).map(c => c.name);
+	if (ec2Cols.includes('key_path') && !ec2Cols.includes('private_key')) {
+		db.exec(`ALTER TABLE ec2_servers ADD COLUMN private_key TEXT NOT NULL DEFAULT ''`);
+	}
 
 	// Per-decision metrics (compare screen, persisted)
 	db.exec(`

@@ -31,6 +31,7 @@ export const load: PageServerLoad = ({ params }) => {
 	).all(id) as DesignParam[];
 
 	const servers = db.prepare('SELECT id, name, host, port, username, password, ssl FROM pg_servers ORDER BY id').all();
+	const ec2Servers = db.prepare('SELECT id, name, host, user, port FROM ec2_servers ORDER BY id').all();
 	const runs = db.prepare('SELECT * FROM benchmark_runs WHERE design_id = ? ORDER BY id DESC').all(id);
 
 	const profileRows = db.prepare('SELECT * FROM design_param_profiles WHERE design_id = ? ORDER BY id').all(id) as { id: number; design_id: number; name: string }[];
@@ -48,6 +49,7 @@ export const load: PageServerLoad = ({ params }) => {
 	return {
 		design: { ...design as object, steps: stepsWithScripts, params: designParams },
 		servers,
+		ec2Servers,
 		runs,
 		profiles
 	};
