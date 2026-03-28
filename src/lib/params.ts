@@ -10,6 +10,11 @@ export interface ValidationError {
 	placeholder: string;
 }
 
+export interface WeightError {
+	step: string;
+	totalWeight: number;
+}
+
 export interface DesignLike {
 	params?: { name: string }[];
 	steps?: {
@@ -17,8 +22,19 @@ export interface DesignLike {
 		type: string;
 		script: string;
 		pgbench_options?: string;
-		pgbench_scripts?: { name: string; script: string }[];
+		pgbench_scripts?: { name: string; weight?: number; script: string }[];
 	}[];
+}
+
+export function validateScriptWeights(design: DesignLike): WeightError[] {
+	const errors: WeightError[] = [];
+	for (const step of design.steps ?? []) {
+		if (step.type === 'pgbench' && (step.pgbench_scripts ?? []).length > 0) {
+			const total = (step.pgbench_scripts ?? []).reduce((sum, ps) => sum + (ps.weight ?? 1), 0);
+			if (total > 100) errors.push({ step: step.name, totalWeight: total });
+		}
+	}
+	return errors;
 }
 
 export function validateDesignParams(design: DesignLike): ValidationError[] {

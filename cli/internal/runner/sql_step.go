@@ -10,15 +10,15 @@ import (
 
 // runSQLStep writes the script to a .sql file, then spawns psql to execute it.
 // Stdout+stderr go to a .log file. If progress is true, output is also tee'd to terminal.
-// Returns the psql command string and an error if psql exits with a non-zero exit code.
-func runSQLStep(opts RunOpts, stepName string, script string, noTransaction bool) (string, error) {
+// Returns the psql command string, log file path, and an error if psql exits with a non-zero exit code.
+func runSQLStep(opts RunOpts, stepName string, script string, noTransaction bool) (string, string, error) {
 	sqlFile, logFile, err := prepareStepFiles(opts.LogDir, opts.Timestamp, stepName, "sql")
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	if err := os.WriteFile(sqlFile, []byte(script), 0644); err != nil {
-		return "", fmt.Errorf("writing sql script: %w", err)
+		return "", "", fmt.Errorf("writing sql script: %w", err)
 	}
 
 	server := opts.Plan.Server
@@ -43,7 +43,7 @@ func runSQLStep(opts RunOpts, stepName string, script string, noTransaction bool
 
 	logFH, err := os.Create(logFile)
 	if err != nil {
-		return "", fmt.Errorf("creating log file: %w", err)
+		return "", "", fmt.Errorf("creating log file: %w", err)
 	}
 	defer logFH.Close()
 
@@ -55,7 +55,7 @@ func runSQLStep(opts RunOpts, stepName string, script string, noTransaction bool
 	cmd.Stderr = out
 
 	if err := cmd.Run(); err != nil {
-		return cmdStr, fmt.Errorf("psql exited with error: %w", err)
+		return cmdStr, logFile, fmt.Errorf("psql exited with error: %w", err)
 	}
-	return cmdStr, nil
+	return cmdStr, logFile, nil
 }

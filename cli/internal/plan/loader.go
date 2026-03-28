@@ -45,6 +45,34 @@ func ApplyParamOverrides(p *Plan, overrides map[string]string) {
 	}
 }
 
+// ApplyProfile looks up a profile by name in the plan and applies its param
+// overrides. It sets ProfileName on the plan so the result records which profile
+// was used. Returns an error if the profile name is not found.
+// Profile overrides are applied first; use ApplyParamOverrides afterwards to
+// let --param flags take precedence over profile values.
+func ApplyProfile(p *Plan, profileName string) error {
+	for _, prof := range p.Profiles {
+		if prof.Name == profileName {
+			overrides := make(map[string]string, len(prof.Values))
+			for _, v := range prof.Values {
+				overrides[v.ParamName] = v.Value
+			}
+			ApplyParamOverrides(p, overrides)
+			p.ProfileName = prof.Name
+			return nil
+		}
+	}
+	names := make([]string, len(p.Profiles))
+	for i, prof := range p.Profiles {
+		names[i] = fmt.Sprintf("%q", prof.Name)
+	}
+	available := "(none)"
+	if len(names) > 0 {
+		available = strings.Join(names, ", ")
+	}
+	return fmt.Errorf("profile %q not found in plan (available: %s)", profileName, available)
+}
+
 // SubstituteParams replaces {{NAME}} placeholders in a script string with
 // the values from the plan's params list.
 func SubstituteParams(script string, params []Param) string {

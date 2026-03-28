@@ -14,10 +14,10 @@ export const GET: RequestHandler = ({ url }) => {
 
 export const POST: RequestHandler = async ({ request }) => {
 	const body = await request.json();
-	const { design_id, server_id, database, snapshot_interval_seconds } = body;
+	const { design_id, server_id, database, snapshot_interval_seconds, profile_id, name } = body;
 	if (!design_id) throw error(400, 'Missing design_id');
 	try {
-		const runId = startRun(Number(design_id), { server_id, database, snapshot_interval_seconds });
+		const runId = startRun(Number(design_id), { server_id, database, snapshot_interval_seconds, profile_id, name });
 		return json({ run_id: runId }, { status: 201 });
 	} catch (e: unknown) {
 		throw error(400, e instanceof Error ? e.message : String(e));

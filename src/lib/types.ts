@@ -73,6 +73,17 @@ export interface BenchmarkRun {
 	latency_avg_ms: number | null;
 	latency_stddev_ms: number | null;
 	transactions: number | null;
+	name: string;
+	notes: string;
+	profile_name: string;
+	run_params: string; // JSON string of [{name, value}]; '' if no params
+}
+
+export interface ParamProfile {
+	id: number;
+	design_id: number;
+	name: string;
+	values: { param_name: string; value: string }[];
 }
 
 export interface RunStepResult {

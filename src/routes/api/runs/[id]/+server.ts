@@ -11,6 +11,24 @@ export const GET: RequestHandler = ({ params }) => {
 	return json({ ...run as object, steps });
 };
 
+export const PATCH: RequestHandler = async ({ params, request }) => {
+	const db = getDb();
+	const runId = Number(params.id);
+	const run = db.prepare('SELECT id FROM benchmark_runs WHERE id = ?').get(runId);
+	if (!run) throw error(404, 'Not found');
+
+	const body = await request.json() as { name?: string; notes?: string };
+	const fields: string[] = [];
+	const values: unknown[] = [];
+	if (body.name !== undefined) { fields.push('name = ?'); values.push(body.name); }
+	if (body.notes !== undefined) { fields.push('notes = ?'); values.push(body.notes); }
+	if (fields.length === 0) throw error(400, 'No fields to update');
+
+	values.push(runId);
+	db.prepare(`UPDATE benchmark_runs SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+	return json({ updated: true });
+};
+
 export const DELETE: RequestHandler = async ({ params, url }) => {
 	const runId = Number(params.id);
 	const db = getDb();

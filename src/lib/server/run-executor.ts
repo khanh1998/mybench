@@ -10,6 +10,8 @@ export interface StartRunOptions {
 	server_id?: number;
 	database?: string;
 	snapshot_interval_seconds?: number;
+	profile_id?: number;
+	name?: string;
 }
 
 /**
@@ -52,6 +54,21 @@ export function startRun(designId: number, opts: StartRunOptions = {}): number {
 		'SELECT * FROM design_params WHERE design_id = ? ORDER BY position'
 	).all(design.id) as DesignParam[];
 
+	// Merge profile overrides if a profile_id was provided
+	let resolvedParams: DesignParam[] = designParams;
+	let profileName = '';
+	if (opts.profile_id) {
+		const profile = db.prepare('SELECT * FROM design_param_profiles WHERE id = ?').get(opts.profile_id) as { id: number; design_id: number; name: string } | undefined;
+		if (profile) {
+			profileName = profile.name;
+			const profileValues = db.prepare('SELECT * FROM design_param_profile_values WHERE profile_id = ?').all(opts.profile_id) as { param_name: string; value: string }[];
+			const overrideMap = new Map(profileValues.map(v => [v.param_name, v.value]));
+			resolvedParams = designParams.map(p => overrideMap.has(p.name) ? { ...p, value: overrideMap.get(p.name)! } : p);
+		}
+	}
+	const runName = opts.name ?? (profileName || '');
+	const runParamsJson = resolvedParams.length > 0 ? JSON.stringify(resolvedParams.map(p => ({ name: p.name, value: p.value }))) : '';
+
 	const hasCollectSteps = steps.some(s => s.type === 'collect');
 	let preCollectSecs: number;
 	let postCollectSecs: number;
@@ -66,8 +83,8 @@ export function startRun(designId: number, opts: StartRunOptions = {}): number {
 	}
 
 	const runResult = db.prepare(
-		'INSERT INTO benchmark_runs (design_id, status, snapshot_interval_seconds, pre_collect_secs, post_collect_secs) VALUES (?, ?, ?, ?, ?)'
-	).run(design.id, 'running', snapshot_interval_seconds, preCollectSecs, postCollectSecs);
+		'INSERT INTO benchmark_runs (design_id, status, snapshot_interval_seconds, pre_collect_secs, post_collect_secs, name, profile_name, run_params) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+	).run(design.id, 'running', snapshot_interval_seconds, preCollectSecs, postCollectSecs, runName, profileName, runParamsJson);
 	const runId = runResult.lastInsertRowid as number;
 
 	const insertStepResult = db.prepare(
@@ -171,7 +188,7 @@ export function startRun(designId: number, opts: StartRunOptions = {}): number {
 					}
 					const substitutedScripts = scripts.map(ps => ({
 						...ps,
-						script: substituteParams(ps.script, designParams)
+						script: substituteParams(ps.script, resolvedParams)
 					}));
 
 					const result = await runPgbench(
@@ -182,7 +199,7 @@ export function startRun(designId: number, opts: StartRunOptions = {}): number {
 							password: server.password,
 							database: resolvedDatabase,
 							scripts: substitutedScripts,
-							options: substituteParams(step.pgbench_options, designParams),
+							options: substituteParams(step.pgbench_options, resolvedParams),
 							runId,
 							stepId: step.id
 						},
@@ -212,7 +229,7 @@ export function startRun(designId: number, opts: StartRunOptions = {}): number {
 						password: server.password,
 						database: resolvedDatabase
 					};
-					const processedSqlScript = substituteParams(step.script, designParams);
+					const processedSqlScript = substituteParams(step.script, resolvedParams);
 					const result = await runSqlStep(sqlOpts, processedSqlScript, activeRun.emitter, onLine, !!step.no_transaction);
 					exitCode = result.exitCode;
 					db.prepare(`UPDATE run_step_results SET command=?, processed_script=? WHERE run_id=? AND step_id=?`)

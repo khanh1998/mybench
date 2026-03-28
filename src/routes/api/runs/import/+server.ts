@@ -28,12 +28,20 @@ export const POST: RequestHandler = async ({ request }) => {
 		latency_avg_ms?: number;
 		latency_stddev_ms?: number;
 		transactions?: number;
+		profile_name?: string;
+		params?: Array<{ name: string; value: string }>;
 	};
 
 	// Ensure is_imported column exists
 	const runCols = (db.prepare(`PRAGMA table_info(benchmark_runs)`).all() as { name: string }[]).map(c => c.name);
 	if (!runCols.includes('is_imported')) {
 		db.exec(`ALTER TABLE benchmark_runs ADD COLUMN is_imported INTEGER NOT NULL DEFAULT 0`);
+	}
+	if (!runCols.includes('profile_name')) {
+		db.exec(`ALTER TABLE benchmark_runs ADD COLUMN profile_name TEXT NOT NULL DEFAULT ''`);
+	}
+	if (!runCols.includes('run_params')) {
+		db.exec(`ALTER TABLE benchmark_runs ADD COLUMN run_params TEXT NOT NULL DEFAULT ''`);
 	}
 
 	// Insert benchmark_run record
@@ -43,8 +51,8 @@ export const POST: RequestHandler = async ({ request }) => {
 			bench_started_at, post_started_at,
 			snapshot_interval_seconds, pre_collect_secs, post_collect_secs,
 			tps, latency_avg_ms, latency_stddev_ms, transactions,
-			is_imported
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+			is_imported, profile_name, run_params
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
 	`).run(
 		Number(design_id),
 		run.status ?? 'completed',
@@ -58,7 +66,9 @@ export const POST: RequestHandler = async ({ request }) => {
 		run.tps ?? null,
 		run.latency_avg_ms ?? null,
 		run.latency_stddev_ms ?? null,
-		run.transactions ?? null
+		run.transactions ?? null,
+		run.profile_name ?? '',
+		run.params ? JSON.stringify(run.params) : ''
 	);
 
 	const runId = insertResult.lastInsertRowid as number;
@@ -66,16 +76,16 @@ export const POST: RequestHandler = async ({ request }) => {
 	// Insert step results
 	const steps = result.steps as {
 		step_id: number; position: number; name: string; type: string;
-		status: string; command?: string; started_at: string; finished_at: string;
+		status: string; command?: string; log?: string; started_at: string; finished_at: string;
 	}[] | undefined;
 	if (steps?.length) {
 		const insStep = db.prepare(`
-			INSERT INTO run_step_results (run_id, step_id, position, name, type, status, command, started_at, finished_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			INSERT INTO run_step_results (run_id, step_id, position, name, type, status, command, stdout, started_at, finished_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`);
 		db.transaction(() => {
 			for (const s of steps) {
-				insStep.run(runId, s.step_id, s.position, s.name, s.type, s.status, s.command ?? '', s.started_at, s.finished_at);
+				insStep.run(runId, s.step_id, s.position, s.name, s.type, s.status, s.command ?? '', s.log ?? '', s.started_at, s.finished_at);
 			}
 		})();
 	}

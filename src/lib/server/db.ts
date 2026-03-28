@@ -124,6 +124,19 @@ function migrate(db: Database.Database) {
       name      TEXT    NOT NULL DEFAULT '',
       value     TEXT    NOT NULL DEFAULT ''
     );
+
+    CREATE TABLE IF NOT EXISTS design_param_profiles (
+      id        INTEGER PRIMARY KEY AUTOINCREMENT,
+      design_id INTEGER NOT NULL REFERENCES designs(id) ON DELETE CASCADE,
+      name      TEXT    NOT NULL DEFAULT ''
+    );
+
+    CREATE TABLE IF NOT EXISTS design_param_profile_values (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      profile_id INTEGER NOT NULL REFERENCES design_param_profiles(id) ON DELETE CASCADE,
+      param_name TEXT    NOT NULL DEFAULT '',
+      value      TEXT    NOT NULL DEFAULT ''
+    );
   `);
 
   // Add ssl column to pg_servers if it doesn't exist (idempotent)
@@ -606,6 +619,10 @@ function migrate(db: Database.Database) {
 	if (!runCols.includes('post_collect_secs')) db.exec(`ALTER TABLE benchmark_runs ADD COLUMN post_collect_secs INTEGER NOT NULL DEFAULT 60`);
 	if (!runCols.includes('bench_started_at')) db.exec(`ALTER TABLE benchmark_runs ADD COLUMN bench_started_at TEXT`);
 	if (!runCols.includes('post_started_at')) db.exec(`ALTER TABLE benchmark_runs ADD COLUMN post_started_at TEXT`);
+	if (!runCols.includes('name')) db.exec(`ALTER TABLE benchmark_runs ADD COLUMN name TEXT NOT NULL DEFAULT ''`);
+	if (!runCols.includes('notes')) db.exec(`ALTER TABLE benchmark_runs ADD COLUMN notes TEXT NOT NULL DEFAULT ''`);
+	if (!runCols.includes('profile_name')) db.exec(`ALTER TABLE benchmark_runs ADD COLUMN profile_name TEXT NOT NULL DEFAULT ''`);
+	if (!runCols.includes('run_params')) db.exec(`ALTER TABLE benchmark_runs ADD COLUMN run_params TEXT NOT NULL DEFAULT ''`);
 
 	// Per-decision metrics (compare screen, persisted)
 	db.exec(`

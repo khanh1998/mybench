@@ -2,6 +2,7 @@
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import { onMount, onDestroy } from 'svelte';
+  import { marked } from 'marked';
   import type { PageData } from './$types';
 
   let { data }: { data: PageData } = $props();
@@ -20,6 +21,7 @@
     started_at: string; finished_at: string|null;
     pre_collect_secs: number; post_collect_secs: number;
     is_imported?: number;
+    name: string; notes: string; profile_name: string; run_params: string;
     steps: StepResult[];
   }
   interface PhaseState {
@@ -33,6 +35,11 @@
   let run: Run | null = $state(data.run as Run | null);
   let done = $state(false);
   let finalStatus = $state('');
+  let editingName = $state(false);
+  let nameEdit = $state(run?.name ?? '');
+  let editingNotes = $state(false);
+  let notesEdit = $state(run?.notes ?? '');
+  let showRunParams = $state(false);
   let eventSource: EventSource | null = null;
   let outputEl: HTMLPreElement | null = $state(null);
   let expandedStep = $state<number | null>(null);
@@ -100,6 +107,29 @@
         ? phases.map((p, i) => i === idx ? { ...p, status: 'completed' } : p)
         : [...phases, { ...data, elapsed_secs: data.duration_secs }];
     }
+  }
+
+  async function saveName() {
+    editingName = false;
+    if (!run) return;
+    const trimmed = nameEdit.trim();
+    await fetch(`/api/runs/${runId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: trimmed })
+    });
+    run = { ...run, name: trimmed };
+  }
+
+  async function saveNotes() {
+    editingNotes = false;
+    if (!run) return;
+    await fetch(`/api/runs/${runId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ notes: notesEdit })
+    });
+    run = { ...run, notes: notesEdit };
   }
 
   function connectSSE() {
@@ -176,9 +206,24 @@
 
 <div class="row" style="margin-bottom:16px">
   <a href="/designs/{designId}" style="color:#0066cc; text-decoration:none; font-size:13px">← Design</a>
-  <h1 style="margin-left:8px">Run #{runId}</h1>
+  {#if editingName}
+    <input
+      class="run-name-input"
+      bind:value={nameEdit}
+      onblur={saveName}
+      onkeydown={(e) => { if (e.key === 'Enter') saveName(); if (e.key === 'Escape') { editingName = false; nameEdit = run?.name ?? ''; } }}
+      autofocus
+    />
+  {:else}
+    <h1 style="margin-left:8px; cursor:pointer" title="Click to edit name" onclick={() => { nameEdit = run?.name ?? ''; editingName = true; }}>
+      {run?.name || `Run #${runId}`}
+    </h1>
+  {/if}
   {#if run}
     <span class="badge badge-{run.status}">{run.status}</span>
+    {#if run.profile_name}
+      <span class="profile-badge">{run.profile_name}</span>
+    {/if}
   {/if}
   <span class="spacer"></span>
   {#if !done && run?.status === 'running'}
@@ -304,6 +349,56 @@
       </table>
     </div>
   {/if}
+
+  <!-- run_params: Parameters used -->
+  {#if run?.run_params}
+    {@const parsedParams = (() => { try { return JSON.parse(run.run_params) as { name: string; value: string }[]; } catch { return []; } })()}
+    {#if parsedParams.length > 0}
+      <div class="card" style="margin-bottom:12px">
+        <div class="row" style="cursor:pointer; user-select:none" onclick={() => showRunParams = !showRunParams}>
+          <h3 style="margin:0">Parameters used</h3>
+          <span style="margin-left:8px; color:#888; font-size:12px">{showRunParams ? '▲' : '▼'} {parsedParams.length} param(s)</span>
+        </div>
+        {#if showRunParams}
+          <div class="params-grid" style="margin-top:8px">
+            {#each parsedParams as p}
+              <div class="param-row">
+                <code class="param-name">{p.name}</code>
+                <code class="param-val">{p.value}</code>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {/if}
+  {/if}
+
+  <!-- Notes -->
+  <div class="card" style="margin-bottom:12px">
+    <div class="row" style="margin-bottom:8px">
+      <h3 style="margin:0">Notes</h3>
+      {#if !editingNotes}
+        <button class="expand-btn" style="margin-left:8px" onclick={() => { notesEdit = run?.notes ?? ''; editingNotes = true; }}>Edit</button>
+      {/if}
+    </div>
+    {#if editingNotes}
+      <textarea
+        class="notes-textarea"
+        bind:value={notesEdit}
+        placeholder="Add notes (markdown supported)…"
+        rows="5"
+        onblur={saveNotes}
+      ></textarea>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="primary" onclick={saveNotes}>Save</button>
+        <button onclick={() => { editingNotes = false; notesEdit = run?.notes ?? ''; }}>Cancel</button>
+      </div>
+    {:else if run?.notes}
+      <div class="notes-content">{@html marked(run.notes)}</div>
+    {:else}
+      <div style="color:#aaa;font-size:13px;font-style:italic">No notes yet. Click Edit to add.</div>
+    {/if}
+  </div>
 {/if}
 
 <div class="card">
@@ -351,4 +446,27 @@
   .phase-fill { height: 100%; background: #0066cc; border-radius: 3px; transition: width 0.8s linear; }
   .phase-elapsed { color: #666; font-size: 11px; }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+  .profile-badge {
+    background: #e8d8ff; color: #5500aa; font-size: 11px; font-weight: 700;
+    padding: 2px 8px; border-radius: 10px; margin-left: 6px;
+  }
+  .run-name-input {
+    margin-left: 8px; font-size: 22px; font-weight: 700;
+    border: none; border-bottom: 2px solid #0066cc;
+    background: transparent; outline: none; color: #222;
+    flex: 1; min-width: 0;
+  }
+  .params-grid { display: flex; flex-direction: column; gap: 4px; }
+  .param-row { display: flex; align-items: center; gap: 8px; }
+  .param-name { background: #f0f0f0; color: #5500aa; padding: 1px 6px; border-radius: 3px; font-size: 12px; }
+  .param-val  { color: #007a2e; font-size: 12px; }
+  .notes-textarea {
+    width: 100%; box-sizing: border-box; font-family: inherit; font-size: 13px;
+    border: 1px solid #ddd; border-radius: 4px; padding: 8px; resize: vertical;
+  }
+  .notes-content { font-size: 13px; line-height: 1.6; color: #333; }
+  .notes-content :global(p) { margin: 0 0 8px; }
+  .notes-content :global(pre) { background: #f5f5f5; padding: 8px; border-radius: 4px; overflow-x: auto; }
+  .notes-content :global(code) { background: #f5f5f5; padding: 1px 4px; border-radius: 3px; font-size: 12px; }
 </style>

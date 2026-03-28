@@ -2,15 +2,29 @@ package plan
 
 // Plan is the top-level structure parsed from plan.json.
 type Plan struct {
-	Version         int           `json:"version"`
-	ExportedAt      string        `json:"exported_at"`
-	DesignID        int           `json:"design_id"`
-	DesignName      string        `json:"design_name"`
-	Server          ServerConfig  `json:"server"`
-	RunSettings     RunSettings   `json:"run_settings"`
-	Params          []Param       `json:"params"`
-	Steps           []Step        `json:"steps"`
+	Version           int             `json:"version"`
+	ExportedAt        string          `json:"exported_at"`
+	DesignID          int             `json:"design_id"`
+	DesignName        string          `json:"design_name"`
+	Server            ServerConfig    `json:"server"`
+	RunSettings       RunSettings     `json:"run_settings"`
+	Params            []Param         `json:"params"`
+	Profiles          []Profile       `json:"profiles,omitempty"`
+	ProfileName       string          `json:"profile_name,omitempty"`
+	Steps             []Step          `json:"steps"`
 	EnabledSnapTables []SnapTableSpec `json:"enabled_snap_tables"`
+}
+
+// Profile is a named set of param overrides exported from the web UI.
+type Profile struct {
+	Name   string         `json:"name"`
+	Values []ProfileValue `json:"values"`
+}
+
+// ProfileValue is a single param override within a profile.
+type ProfileValue struct {
+	ParamName string `json:"param_name"`
+	Value     string `json:"value"`
 }
 
 // ServerConfig holds the PostgreSQL connection parameters.

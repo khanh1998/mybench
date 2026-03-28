@@ -56,6 +56,24 @@ export const GET: RequestHandler = ({ params }) => {
 		'SELECT * FROM design_params WHERE design_id = ? ORDER BY position'
 	).all(designId) as DesignParam[];
 
+	// Load profiles with their values
+	const profileRows = db.prepare(
+		'SELECT * FROM design_param_profiles WHERE design_id = ? ORDER BY id'
+	).all(designId) as { id: number; name: string }[];
+	const profileValueRows = db.prepare(
+		'SELECT * FROM design_param_profile_values WHERE profile_id IN (SELECT id FROM design_param_profiles WHERE design_id = ?) ORDER BY profile_id, id'
+	).all(designId) as { profile_id: number; param_name: string; value: string }[];
+	const profileValuesById = new Map<number, { param_name: string; value: string }[]>();
+	for (const v of profileValueRows) {
+		const arr = profileValuesById.get(v.profile_id) ?? [];
+		arr.push({ param_name: v.param_name, value: v.value });
+		profileValuesById.set(v.profile_id, arr);
+	}
+	const profiles = profileRows.map(p => ({
+		name: p.name,
+		values: profileValuesById.get(p.id) ?? []
+	}));
+
 	// Load server info
 	let serverInfo = {
 		host: '',
@@ -125,6 +143,7 @@ export const GET: RequestHandler = ({ params }) => {
 			post_collect_secs: design.post_collect_secs
 		},
 		params: designParams.map(p => ({ name: p.name, value: p.value })),
+		profiles,
 		steps: stepsWithScripts,
 		enabled_snap_tables: enabledSnapTables
 	};

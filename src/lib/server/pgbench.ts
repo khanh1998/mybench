@@ -44,9 +44,9 @@ export function runPgbench(
 			'-h', opts.host,
 			'-p', String(opts.port),
 			'-U', opts.user,
-			'-d', opts.database,
 			...fileArgs,
-			...parseOptions(opts.options)
+			...parseOptions(opts.options),
+			opts.database
 		];
 
 		const command = `pgbench ${args.join(' ')}`;

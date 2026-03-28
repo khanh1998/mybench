@@ -30,6 +30,7 @@ type pgbenchResult struct {
 	LatencyStddevMs float64
 	Transactions    int64
 	Command         string
+	LogPath         string
 }
 
 // parsePgbenchOutput scans pgbench stdout lines and extracts metrics.
@@ -72,7 +73,7 @@ func runPgbenchStep(
 	}
 
 	// Parse and build pgbench args.
-	baseArgs := strings.Fields(step.PgbenchOptions)
+	baseArgs := strings.Fields(plan.SubstituteParams(step.PgbenchOptions, opts.Plan.Params))
 	args := append(baseArgs,
 		"-h", server.Host,
 		"-p", fmt.Sprintf("%d", server.Port),
@@ -91,6 +92,7 @@ func runPgbenchStep(
 
 	// Set up log file.
 	_, logFile, err := prepareStepFiles(opts.LogDir, opts.Timestamp, step.Name, "pgbench")
+	res.LogPath = logFile
 	if err != nil {
 		return pgbenchResult{}, err
 	}

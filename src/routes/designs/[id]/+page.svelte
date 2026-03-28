@@ -3,7 +3,7 @@
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import CodeEditor from '$lib/CodeEditor.svelte';
-  import { validateDesignParams, type ValidationError } from '$lib/params';
+  import { validateDesignParams, validateScriptWeights, type ValidationError, type WeightError } from '$lib/params';
   import type { PageData } from './$types';
 
   let { data }: { data: PageData } = $props();
@@ -44,11 +44,13 @@
     snapshot_interval_seconds: number;
   }
   interface Server { id: number; name: string; }
-  interface Run { id: number; status: string; tps: number|null; latency_avg_ms: number|null; started_at: string; }
+  interface Run { id: number; status: string; tps: number|null; latency_avg_ms: number|null; started_at: string; profile_name: string; name: string; }
+  interface Profile { id: number; design_id: number; name: string; values: { param_name: string; value: string }[]; }
 
   let design: Design | null = $state(data.design as Design | null);
   let servers: Server[] = $state((data.servers ?? []) as Server[]);
   let runs: Run[] = $state((data.runs ?? []) as Run[]);
+  let profiles: Profile[] = $state((data.profiles ?? []) as Profile[]);
   const initialStep = design?.steps?.find(s => s.enabled) ?? design?.steps?.[0] ?? null;
   let selectedStepId = $state<number|null>(initialStep?.id ?? null);
   let selectedScriptIdx = $state(0);
@@ -68,17 +70,74 @@
   let runServer = $state<number|null>(null);
   let runDatabase = $state('');
   let runSnapshotInterval = $state(30);
+  let runProfile = $state<number|null>(null);
+  let runName = $state('');
+
+  // Profile management state
+  let showProfileForm = $state(false);
+  let editingProfileId = $state<number|null>(null);
+  let profileFormName = $state('');
+  let profileFormValues = $state<{ param_name: string; value: string }[]>([]);
 
   function openRunModal() {
     if (!design) return;
     if (!isValid) {
-      msg = `Cannot run: ${validationErrors.length} undefined placeholder(s). Check params.`;
+      const parts = [];
+      if (validationErrors.length > 0) parts.push(`${validationErrors.length} undefined placeholder(s)`);
+      if (weightErrors.length > 0) parts.push(`${weightErrors.length} script weight issue(s)`);
+      msg = `Cannot run: ${parts.join(', ')}. Check validation.`;
       return;
     }
     runServer = design.server_id;
     runDatabase = design.database;
     runSnapshotInterval = design.snapshot_interval_seconds;
+    runProfile = null;
+    runName = '';
     showRunModal = true;
+  }
+
+  function openProfileForm(profile?: Profile) {
+    if (profile) {
+      editingProfileId = profile.id;
+      profileFormName = profile.name;
+      profileFormValues = design?.params.map(p => {
+        const ov = profile.values.find(v => v.param_name === p.name);
+        return { param_name: p.name, value: ov ? ov.value : p.value };
+      }) ?? [];
+    } else {
+      editingProfileId = null;
+      profileFormName = '';
+      profileFormValues = design?.params.map(p => ({ param_name: p.name, value: p.value })) ?? [];
+    }
+    showProfileForm = true;
+  }
+
+  async function saveProfile() {
+    if (!design || !profileFormName.trim()) return;
+    const values = profileFormValues.filter(v => v.value !== (design?.params.find(p => p.name === v.param_name)?.value ?? ''));
+    if (editingProfileId) {
+      await fetch(`/api/designs/${id}/profiles/${editingProfileId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: profileFormName.trim(), values })
+      });
+      profiles = profiles.map(p => p.id === editingProfileId ? { ...p, name: profileFormName.trim(), values } : p);
+    } else {
+      const res = await fetch(`/api/designs/${id}/profiles`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: profileFormName.trim(), values })
+      });
+      const { profile_id } = await res.json();
+      profiles = [...profiles, { id: profile_id, design_id: id, name: profileFormName.trim(), values }];
+    }
+    showProfileForm = false;
+  }
+
+  async function deleteProfile(profileId: number) {
+    if (!confirm('Delete this profile?')) return;
+    await fetch(`/api/designs/${id}/profiles/${profileId}`, { method: 'DELETE' });
+    profiles = profiles.filter(p => p.id !== profileId);
   }
 
   const selectedStep: Step | null = $derived(
@@ -92,17 +151,26 @@
   const validationErrors: ValidationError[] = $derived(
     design ? validateDesignParams(design) : []
   );
-  const isValid = $derived(validationErrors.length === 0);
+  const weightErrors: WeightError[] = $derived(
+    design ? validateScriptWeights(design) : []
+  );
+  const isValid = $derived(validationErrors.length === 0 && weightErrors.length === 0);
 
   async function save() {
     if (!design) return;
     if (!isValid) {
-      const ok = confirm(
-        `${validationErrors.length} undefined placeholder(s) found.\n` +
-        validationErrors.map(e => `  {{${e.placeholder}}} in "${e.step} / ${e.script}"`).join('\n') +
-        '\n\nSave anyway?'
-      );
-      if (!ok) return;
+      const lines: string[] = [];
+      if (validationErrors.length > 0) {
+        lines.push(`${validationErrors.length} undefined placeholder(s):`);
+        validationErrors.forEach(e => lines.push(`  {{${e.placeholder}}} in "${e.step} / ${e.script}"`));
+      }
+      if (weightErrors.length > 0) {
+        if (lines.length > 0) lines.push('');
+        lines.push(`${weightErrors.length} script weight issue(s):`);
+        weightErrors.forEach(e => lines.push(`  "${e.step}": total weight ${e.totalWeight} exceeds 100`));
+      }
+      lines.push('\nSave anyway?');
+      if (!confirm(lines.join('\n'))) return;
     }
     saving = true;
     await fetch(`/api/designs/${id}`, {
@@ -126,7 +194,9 @@
         design_id: id,
         server_id: runServer,
         database: runDatabase,
-        snapshot_interval_seconds: runSnapshotInterval
+        snapshot_interval_seconds: runSnapshotInterval,
+        profile_id: runProfile ?? undefined,
+        name: runName || undefined
       })
     });
     const { run_id } = await res.json();
@@ -276,7 +346,7 @@
       class:warn={!isValid}
       class:active={showValidation}
       title="Validation status"
-    >{isValid ? '✓ Valid' : `⚠ ${validationErrors.length} issue(s)`}</button>
+    >{isValid ? '✓ Valid' : `⚠ ${validationErrors.length + weightErrors.length} issue(s)`}</button>
     <button onclick={save} disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
     <a href="/api/designs/{design.id}/export" download class="btn">Export Plan</a>
     <button onclick={() => { importError = ''; importFile = null; showImportModal = true; }}>Import Run</button>
@@ -290,10 +360,18 @@
 <!-- Validation panel (collapsible) -->
 {#if showValidation && !isValid}
   <div class="validation-panel">
-    <div class="validation-title">⚠ Undefined placeholders:</div>
-    {#each validationErrors as e}
-      <div class="validation-item">· {e.step} / {e.script}: <code>&#123;&#123;{e.placeholder}&#125;&#125;</code></div>
-    {/each}
+    {#if validationErrors.length > 0}
+      <div class="validation-title">⚠ Undefined placeholders:</div>
+      {#each validationErrors as e}
+        <div class="validation-item">· {e.step} / {e.script}: <code>&#123;&#123;{e.placeholder}&#125;&#125;</code></div>
+      {/each}
+    {/if}
+    {#if weightErrors.length > 0}
+      <div class="validation-title" style={validationErrors.length > 0 ? 'margin-top:8px' : ''}>⚠ Script weight exceeds 100:</div>
+      {#each weightErrors as e}
+        <div class="validation-item">· "{e.step}": total weight <strong>{e.totalWeight}</strong> (max 100)</div>
+      {/each}
+    {/if}
   </div>
 {/if}
 
@@ -337,6 +415,22 @@
   <div class="modal-backdrop" onclick={() => showRunModal = false}>
     <div class="modal" onclick={(e) => e.stopPropagation()}>
       <h3 style="margin:0 0 16px">Configure Run</h3>
+
+      <div class="form-group">
+        <label for="run-name">Run name <span style="color:#aaa;font-weight:400">(optional)</span></label>
+        <input id="run-name" bind:value={runName} placeholder="optional name" />
+      </div>
+      {#if profiles.length > 0}
+        <div class="form-group">
+          <label for="run-profile">Profile</label>
+          <select id="run-profile" bind:value={runProfile}>
+            <option value={null}>— no profile —</option>
+            {#each profiles as p}
+              <option value={p.id}>{p.name}</option>
+            {/each}
+          </select>
+        </div>
+      {/if}
 
       <div class="form-group">
         <label for="run-server">Server</label>
@@ -479,7 +573,10 @@
           <div class="run-item-row">
             <a href="/designs/{id}/runs/{r.id}" class="run-item">
               <span class="badge badge-{r.status}" style="font-size:10px">{r.status}</span>
-              <span class="run-item-id">#{r.id}</span>
+              <span class="run-item-id">{r.name || '#' + r.id}</span>
+              {#if r.profile_name}
+                <span class="run-profile-tag">{r.profile_name}</span>
+              {/if}
               {#if r.tps !== null}
                 <span class="run-item-tps">{r.tps.toFixed(1)} TPS</span>
               {/if}
@@ -632,6 +729,59 @@
             <button class="icon-btn danger-icon" onclick={() => removeParam(i)} title="Remove">✕</button>
           </div>
         {/each}
+
+        <!-- Profiles section -->
+        {#if design.params.length > 0}
+          <div class="profiles-section-header">
+            <span class="steps-title" style="font-size:10px">Profiles</span>
+            <button class="add-btn" style="font-size:10px" onclick={() => openProfileForm()}>+ Add</button>
+          </div>
+          {#if profiles.length === 0}
+            <div class="params-empty">No profiles yet</div>
+          {/if}
+          {#each profiles as prof (prof.id)}
+            <div class="profile-item">
+              <div class="profile-item-header">
+                <span class="profile-name">{prof.name}</span>
+                <button class="icon-btn" style="font-size:10px" onclick={() => openProfileForm(prof)} title="Edit">✎</button>
+                <button class="icon-btn danger-icon" style="font-size:10px" onclick={() => deleteProfile(prof.id)} title="Delete">✕</button>
+              </div>
+              {#if prof.values.length > 0}
+                <div class="profile-values">
+                  {#each prof.values as v}
+                    <span class="profile-value-pill">{v.param_name}={v.value}</span>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          {/each}
+        {/if}
+      </div>
+    </div>
+  {/if}
+
+  <!-- Profile form modal -->
+  {#if showProfileForm}
+    <div class="modal-backdrop" onclick={() => showProfileForm = false}>
+      <div class="modal" onclick={(e) => e.stopPropagation()}>
+        <h3 style="margin:0 0 16px">{editingProfileId ? 'Edit Profile' : 'Add Profile'}</h3>
+        <div class="form-group">
+          <label for="profile-name">Profile name</label>
+          <input id="profile-name" bind:value={profileFormName} placeholder="e.g. small, medium, large" />
+        </div>
+        {#if profileFormValues.length > 0}
+          <div style="font-size:12px;font-weight:600;color:#555;margin-bottom:8px">Parameter overrides</div>
+          {#each profileFormValues as v}
+            <div class="form-group" style="margin-bottom:8px;display:flex;align-items:center;gap:8px">
+              <label style="width:90px;font-size:12px;margin:0;font-family:monospace;color:#333">{v.param_name}</label>
+              <input style="flex:1" bind:value={v.value} placeholder="value" />
+            </div>
+          {/each}
+        {/if}
+        <div class="modal-actions">
+          <button onclick={() => showProfileForm = false}>Cancel</button>
+          <button class="primary" onclick={saveProfile} disabled={!profileFormName.trim()}>Save</button>
+        </div>
       </div>
     </div>
   {/if}
@@ -944,8 +1094,9 @@
     flex: 1;
   }
   .run-item:hover { background: #2a2a3e; color: #cdd6f4; }
-  .run-item-id { font-family: monospace; }
+  .run-item-id { font-family: monospace; max-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .run-item-tps { margin-left: auto; color: #a6e3a1; font-size: 11px; }
+  .run-profile-tag { background: #4a3f6b; color: #cba6f7; font-size: 10px; padding: 1px 5px; border-radius: 8px; white-space: nowrap; max-width: 60px; overflow: hidden; text-overflow: ellipsis; }
   .run-delete-btn {
     opacity: 0; flex-shrink: 0; padding: 4px 8px;
     background: none; border: none; color: #f38ba8; cursor: pointer; font-size: 12px;
@@ -1135,4 +1286,22 @@
   .phase-pill { display: inline-block; padding: 1px 7px; border-radius: 8px; font-size: 11px; font-weight: 700; }
   .phase-pill.pre  { background: #e8f4ff; color: #0055aa; }
   .phase-pill.post { background: #fff8e8; color: #885500; }
+
+  /* Profiles section in params panel */
+  .profiles-section-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 0 4px; border-top: 1px solid #313244; margin-top: 8px;
+  }
+  .profile-item {
+    background: #181825; border: 1px solid #313244; border-radius: 4px;
+    padding: 6px 8px; margin-bottom: 6px;
+  }
+  .profile-item-header { display: flex; align-items: center; gap: 4px; margin-bottom: 4px; }
+  .profile-name { flex: 1; font-size: 12px; font-weight: 600; color: #cba6f7; }
+  .profile-values { display: flex; flex-wrap: wrap; gap: 3px; }
+  .profile-value-pill {
+    font-size: 10px; font-family: monospace;
+    background: #313244; color: #a6e3a1;
+    padding: 1px 5px; border-radius: 8px;
+  }
 </style>

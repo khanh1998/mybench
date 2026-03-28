@@ -12,6 +12,10 @@ import (
 	"github.com/khanh1998/mybench/cli/internal/result"
 )
 
+// warnedTables tracks tables for which we've already printed a skip warning,
+// so each incompatible table only warns once per process.
+var warnedTables = make(map[string]bool)
+
 // collectOnce queries all enabled pg_stat views once and appends snapshot rows
 // to the provided snapshots map. The phase string is embedded in each row.
 func collectOnce(ctx context.Context, pool *pgxpool.Pool, snapTables []plan.SnapTableSpec, phase string, snapshots map[string][]result.SnapshotRow) error {
@@ -34,7 +38,10 @@ func collectOnce(ctx context.Context, pool *pgxpool.Pool, snapTables []plan.Snap
 
 		rows, err := pool.Query(ctx, query)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", spec.PgViewName, err)
+			if !warnedTables[spec.PgViewName] {
+				fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", spec.PgViewName, err)
+				warnedTables[spec.PgViewName] = true
+			}
 			continue
 		}
 

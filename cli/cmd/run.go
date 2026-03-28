@@ -20,9 +20,11 @@ import (
 
 func newRunCmd() *cobra.Command {
 	var outputFile string
+	var profileName string
 	var paramOverrides []string
 	var logDir string
 	var progress bool
+	var logTailLines int
 
 	cmd := &cobra.Command{
 		Use:   "run <plan.json>",
@@ -37,7 +39,14 @@ func newRunCmd() *cobra.Command {
 				return fmt.Errorf("loading plan: %w", err)
 			}
 
-			// Apply --param overrides.
+			// Apply --profile first (sets baseline overrides from a named profile).
+			if profileName != "" {
+				if err := plan.ApplyProfile(p, profileName); err != nil {
+					return err
+				}
+			}
+
+			// Apply --param overrides (takes precedence over profile values).
 			overrides := make(map[string]string)
 			for _, kv := range paramOverrides {
 				parts := strings.SplitN(kv, "=", 2)
@@ -63,10 +72,11 @@ func newRunCmd() *cobra.Command {
 			timestamp := time.Now().UTC().Format("20060102T150405Z")
 
 			opts := runner.RunOpts{
-				Plan:      p,
-				LogDir:    logDir,
-				Progress:  progress,
-				Timestamp: timestamp,
+				Plan:         p,
+				LogDir:       logDir,
+				Progress:     progress,
+				Timestamp:    timestamp,
+				LogTailLines: logTailLines,
 			}
 
 			// Create a cancellable context so SIGINT can abort in-progress steps.
@@ -164,9 +174,11 @@ func newRunCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVarP(&outputFile, "output", "o", "", "output result file (default: <plan-basename>-result-<timestamp>.json)")
-	cmd.Flags().StringArrayVar(&paramOverrides, "param", nil, "override plan param KEY=VALUE (repeatable)")
+	cmd.Flags().StringVar(&profileName, "profile", "", "apply a named parameter profile from the plan (e.g. \"small\", \"large\")")
+	cmd.Flags().StringArrayVar(&paramOverrides, "param", nil, "override plan param KEY=VALUE (repeatable, applied after --profile)")
 	cmd.Flags().StringVar(&logDir, "log-dir", "/tmp", "directory for step log files")
 	cmd.Flags().BoolVar(&progress, "progress", false, "tee subprocess output to terminal")
+	cmd.Flags().IntVar(&logTailLines, "log-tail-lines", 100, "trailing log lines per step in result (0 to disable)")
 
 	return cmd
 }

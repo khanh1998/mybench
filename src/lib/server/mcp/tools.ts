@@ -38,7 +38,8 @@ and the recommended workflow for creating and running a benchmark plan.`
 					decisions: 'Top-level question you are answering (e.g. "Which table design is faster?"). Contains one or more designs.',
 					designs: 'One candidate design to benchmark (e.g. "plain table" vs "partitioned table"). Each design is linked to a database server and has steps + params.',
 					steps: 'Ordered list of actions: sql setup → collect pre-stats → pgbench load test → collect post-stats → sql teardown.',
-					params: 'Named values (e.g. NUM_USERS=1000) substituted as {{NAME}} in all step scripts.'
+					params: 'Named values (e.g. NUM_USERS=1000) substituted as {{NAME}} in all step scripts.',
+					profiles: 'Named sets of param overrides (e.g. "small"=NUM_USERS:100, "large"=NUM_USERS:10000) for running the same design at different scales. Managed with upsert_profile/list_profiles/delete_profile.'
 				},
 				step_types: {
 					sql: {
@@ -85,9 +86,11 @@ and the recommended workflow for creating and running a benchmark plan.`
 					'5. get_db_schema(design_id) — see real table/column names from the live DB',
 					'6. set_params(design_id, [{name, value}]) — define {{PARAM}} values',
 					'7. upsert_step (repeat) — add sql setup, collect, pgbench, collect, sql teardown steps',
-					'8. run_design(design_id) — start a test run, get run_id',
-					'9. get_run(run_id) — wait ~(pgbench -T seconds + collect durations) before first poll, then every ~30s',
-					'10. export_plan(design_id) — get plan.json for production mybench-runner CLI'
+					'8. upsert_profile(design_id, name, values) — optional: create "small"/"large" profiles for different scales',
+					'9. validate_design(design_id) — check for issues (undefined params, missing server, no pgbench step) before running',
+					'10. run_design(design_id, profile_id?) — start a test run (optionally with a profile), get run_id',
+					'11. get_run(run_id) — wait ~(pgbench -T seconds + collect durations) before first poll, then every ~30s',
+					'12. export_plan(design_id) — get plan.json for production mybench-runner CLI'
 				],
 				example_steps: {
 					sql_setup: {
@@ -336,6 +339,217 @@ Tip: use descriptive names like NUM_USERS, NUM_ROWS, NUM_CLIENTS, DURATION_SECS.
 	);
 
 	// ─────────────────────────────────────────────────────────────────────────
+	// upsert_profile
+	// ─────────────────────────────────────────────────────────────────────────
+	server.registerTool(
+		'upsert_profile',
+		{
+			description: 'Creates or updates a named parameter profile for a design. Profiles let you run the same design at different scales (e.g. small/medium/large). Omit profile_id to create; provide it to update.',
+			inputSchema: {
+				design_id: z.number().int(),
+				profile_id: z.number().int().optional().describe('Omit to create a new profile'),
+				name: z.string().describe('Profile name, e.g. "small", "medium", "large"'),
+				values: z.array(z.object({
+					param_name: z.string().describe('Param name (must match a design param)'),
+					value: z.string().describe('Override value for this profile')
+				})).describe('Only include params you want to override from their defaults')
+			}
+		},
+		async ({ design_id, profile_id, name, values }) => {
+			const db = getDb();
+			if (profile_id) {
+				const profile = db.prepare('SELECT id FROM design_param_profiles WHERE id = ? AND design_id = ?').get(profile_id, design_id);
+				if (!profile) return text({ error: `Profile ${profile_id} not found for design ${design_id}` });
+				db.transaction(() => {
+					db.prepare('UPDATE design_param_profiles SET name = ? WHERE id = ?').run(name, profile_id);
+					db.prepare('DELETE FROM design_param_profile_values WHERE profile_id = ?').run(profile_id);
+					const ins = db.prepare('INSERT INTO design_param_profile_values (profile_id, param_name, value) VALUES (?, ?, ?)');
+					for (const v of values) ins.run(profile_id, v.param_name, v.value);
+				})();
+				return text({ updated: true, profile_id });
+			} else {
+				const r = db.transaction(() => {
+					const res = db.prepare('INSERT INTO design_param_profiles (design_id, name) VALUES (?, ?)').run(design_id, name);
+					const newId = res.lastInsertRowid as number;
+					const ins = db.prepare('INSERT INTO design_param_profile_values (profile_id, param_name, value) VALUES (?, ?, ?)');
+					for (const v of values) ins.run(newId, v.param_name, v.value);
+					return newId;
+				})();
+				return text({ created: true, profile_id: r });
+			}
+		}
+	);
+
+	// ─────────────────────────────────────────────────────────────────────────
+	// list_profiles
+	// ─────────────────────────────────────────────────────────────────────────
+	server.registerTool(
+		'list_profiles',
+		{
+			description: 'Lists all parameter profiles for a design, including their value overrides.',
+			inputSchema: { design_id: z.number().int() }
+		},
+		async ({ design_id }) => {
+			const db = getDb();
+			const profiles = db.prepare('SELECT * FROM design_param_profiles WHERE design_id = ? ORDER BY id').all(design_id) as { id: number; design_id: number; name: string }[];
+			const values = db.prepare('SELECT * FROM design_param_profile_values WHERE profile_id IN (SELECT id FROM design_param_profiles WHERE design_id = ?) ORDER BY profile_id, id').all(design_id) as { profile_id: number; param_name: string; value: string }[];
+			const byProfile = new Map<number, { param_name: string; value: string }[]>();
+			for (const v of values) {
+				const arr = byProfile.get(v.profile_id) ?? [];
+				arr.push({ param_name: v.param_name, value: v.value });
+				byProfile.set(v.profile_id, arr);
+			}
+			return text(profiles.map(p => ({ ...p, values: byProfile.get(p.id) ?? [] })));
+		}
+	);
+
+	// ─────────────────────────────────────────────────────────────────────────
+	// delete_profile
+	// ─────────────────────────────────────────────────────────────────────────
+	server.registerTool(
+		'delete_profile',
+		{
+			description: 'Deletes a parameter profile by ID.',
+			inputSchema: { profile_id: z.number().int() }
+		},
+		async ({ profile_id }) => {
+			const db = getDb();
+			db.prepare('DELETE FROM design_param_profiles WHERE id = ?').run(profile_id);
+			return text({ deleted: true, profile_id });
+		}
+	);
+
+	// ─────────────────────────────────────────────────────────────────────────
+	// validate_design
+	// ─────────────────────────────────────────────────────────────────────────
+	server.registerTool(
+		'validate_design',
+		{
+			description: `Validates a design and returns a list of issues that would prevent it from running correctly.
+Checks performed:
+  - No server configured
+  - No database set
+  - No enabled steps
+  - No enabled pgbench step (nothing to benchmark)
+  - pgbench step with no scripts defined
+  - collect step with duration_secs = 0
+  - {{PARAM}} placeholders used in scripts/options but not defined in design params
+  - Defined params with empty values
+Call this before run_design or export_plan to catch problems early.`,
+			inputSchema: {
+				design_id: z.number().int().describe('Design ID to validate')
+			}
+		},
+		async ({ design_id }) => {
+			const db = getDb();
+			const design = db.prepare('SELECT * FROM designs WHERE id = ?').get(design_id) as {
+				id: number; name: string; server_id: number | null; database: string;
+			} | undefined;
+			if (!design) return text({ error: `Design ${design_id} not found` });
+
+			const steps = db.prepare('SELECT * FROM design_steps WHERE design_id = ? ORDER BY position').all(design_id) as DesignStep[];
+			const pgbenchScripts = db.prepare('SELECT * FROM pgbench_scripts WHERE step_id IN (SELECT id FROM design_steps WHERE design_id = ?) ORDER BY step_id, position').all(design_id) as PgbenchScript[];
+			const params = db.prepare('SELECT * FROM design_params WHERE design_id = ? ORDER BY position').all(design_id) as DesignParam[];
+
+			const scriptsByStep = new Map<number, PgbenchScript[]>();
+			for (const ps of pgbenchScripts) {
+				const arr = scriptsByStep.get(ps.step_id) ?? [];
+				arr.push(ps);
+				scriptsByStep.set(ps.step_id, arr);
+			}
+
+			const issues: { severity: 'error' | 'warning'; code: string; message: string }[] = [];
+
+			// Server and database checks
+			if (!design.server_id) {
+				issues.push({ severity: 'error', code: 'NO_SERVER', message: 'No PostgreSQL server configured. Use configure_design to set server_id, or set one in the web UI.' });
+			}
+			if (!design.database || design.database.trim() === '') {
+				issues.push({ severity: 'error', code: 'NO_DATABASE', message: 'No database name configured. Use configure_design to set database.' });
+			}
+
+			// Step checks
+			const enabledSteps = steps.filter(s => s.enabled);
+			if (enabledSteps.length === 0) {
+				issues.push({ severity: 'error', code: 'NO_ENABLED_STEPS', message: 'No enabled steps. Enable at least one step before running.' });
+			} else {
+				const hasPgbench = enabledSteps.some(s => s.type === 'pgbench');
+				if (!hasPgbench) {
+					issues.push({ severity: 'warning', code: 'NO_PGBENCH_STEP', message: 'No enabled pgbench step. The run will execute but produce no benchmark metrics (TPS, latency).' });
+				}
+
+				for (const step of enabledSteps) {
+					if (step.type === 'pgbench') {
+						const scripts = scriptsByStep.get(step.id) ?? [];
+						if (scripts.length === 0) {
+							issues.push({ severity: 'warning', code: 'PGBENCH_NO_SCRIPTS', message: `pgbench step "${step.name}" has no scripts defined. It will run pgbench's built-in TPC-B scenario instead.` });
+						} else {
+							const totalWeight = scripts.reduce((sum, ps) => sum + (ps.weight ?? 1), 0);
+							if (totalWeight > 100) {
+								issues.push({ severity: 'error', code: 'PGBENCH_WEIGHT_EXCEEDS_100', message: `pgbench step "${step.name}" has scripts with a total weight of ${totalWeight}. Total weight must not exceed 100.` });
+							}
+						}
+					}
+					if (step.type === 'collect' && (!step.duration_secs || step.duration_secs <= 0)) {
+						issues.push({ severity: 'warning', code: 'COLLECT_ZERO_DURATION', message: `collect step "${step.name}" has duration_secs = 0. It will use the design-level pre/post collect settings.` });
+					}
+				}
+			}
+
+			// Param placeholder checks
+			const definedParams = new Set(params.map(p => p.name).filter(Boolean));
+			const placeholderPattern = /\{\{([\w]+)\}\}/g;
+
+			for (const step of enabledSteps) {
+				const textsToCheck: { label: string; text: string }[] = [];
+
+				if (step.type === 'sql' && step.script) {
+					textsToCheck.push({ label: `script`, text: step.script });
+				}
+				if (step.type === 'pgbench') {
+					if (step.pgbench_options) textsToCheck.push({ label: `pgbench_options`, text: step.pgbench_options });
+					for (const ps of scriptsByStep.get(step.id) ?? []) {
+						textsToCheck.push({ label: `script "${ps.name}"`, text: ps.script });
+					}
+				}
+
+				for (const { label, text: scriptText } of textsToCheck) {
+					const matches = [...scriptText.matchAll(placeholderPattern)].map(m => m[1]);
+					for (const ph of matches) {
+						if (!definedParams.has(ph)) {
+							issues.push({
+								severity: 'error',
+								code: 'UNDEFINED_PARAM',
+								message: `Step "${step.name}" ${label} uses {{${ph}}} but this param is not defined. Add it with set_params.`
+							});
+						}
+					}
+				}
+			}
+
+			// Param value checks
+			for (const p of params) {
+				if (!p.value || p.value.trim() === '') {
+					issues.push({ severity: 'warning', code: 'EMPTY_PARAM_VALUE', message: `Param "${p.name}" has an empty value. Steps using {{${p.name}}} will substitute an empty string.` });
+				}
+			}
+
+			const errorCount = issues.filter(i => i.severity === 'error').length;
+			const warningCount = issues.filter(i => i.severity === 'warning').length;
+
+			return text({
+				design_id,
+				design_name: design.name,
+				valid: errorCount === 0,
+				summary: errorCount === 0 && warningCount === 0
+					? 'No issues found. Design is ready to run.'
+					: `${errorCount} error(s), ${warningCount} warning(s) found.`,
+				issues
+			});
+		}
+	);
+
+	// ─────────────────────────────────────────────────────────────────────────
 	// run_design
 	// ─────────────────────────────────────────────────────────────────────────
 	server.registerTool(
@@ -351,10 +565,14 @@ Polling strategy: before polling, estimate total run duration from the design st
 - Sum all steps, then wait that long before the first get_run call
 - If still "running", poll every ~30s thereafter
 Example: pgbench -T 120 + two 15s collect steps → wait ~150s before first poll.`,
-			inputSchema: { design_id: z.number().int() }
+			inputSchema: {
+				design_id: z.number().int(),
+				profile_id: z.number().int().optional().describe('Optional profile ID to apply param overrides'),
+				name: z.string().optional().describe('Optional run name; defaults to profile name if a profile is used')
+			}
 		},
-		async ({ design_id }) => {
-			const runId = startRun(design_id);
+		async ({ design_id, profile_id, name }) => {
+			const runId = startRun(design_id, { profile_id, name });
 			return text({ run_id: runId, message: 'Run started. Poll get_run(run_id) for status.' });
 		}
 	);
@@ -375,9 +593,13 @@ then poll every ~30s if still running. Rapid polling wastes resources and does n
 		},
 		async ({ run_id }) => {
 			const db = getDb();
-			const run = db.prepare('SELECT * FROM benchmark_runs WHERE id = ?').get(run_id);
+			const run = db.prepare('SELECT * FROM benchmark_runs WHERE id = ?').get(run_id) as Record<string, unknown> | undefined;
 			if (!run) return text({ error: `Run ${run_id} not found` });
-			return text(run);
+			// Parse run_params from JSON string for easier consumption
+			const runParams = run.run_params && typeof run.run_params === 'string' && run.run_params !== ''
+				? (() => { try { return JSON.parse(run.run_params as string); } catch { return []; } })()
+				: [];
+			return text({ ...run, run_params: runParams });
 		}
 	);
 
@@ -410,6 +632,16 @@ Use this after validating the plan with run_design.`,
 			}
 			const params = db.prepare('SELECT * FROM design_params WHERE design_id = ? ORDER BY position').all(design_id) as DesignParam[];
 
+			const profileRows = db.prepare('SELECT * FROM design_param_profiles WHERE design_id = ? ORDER BY id').all(design_id) as { id: number; name: string }[];
+			const profileValueRows = db.prepare('SELECT * FROM design_param_profile_values WHERE profile_id IN (SELECT id FROM design_param_profiles WHERE design_id = ?) ORDER BY profile_id, id').all(design_id) as { profile_id: number; param_name: string; value: string }[];
+			const profileValuesById = new Map<number, { param_name: string; value: string }[]>();
+			for (const v of profileValueRows) {
+				const arr = profileValuesById.get(v.profile_id) ?? [];
+				arr.push({ param_name: v.param_name, value: v.value });
+				profileValuesById.set(v.profile_id, arr);
+			}
+			const profiles = profileRows.map(p => ({ name: p.name, values: profileValuesById.get(p.id) ?? [] }));
+
 			let serverInfo = { host: '', port: 5432, username: '', password: '', database: design.database, ssl: false };
 			if (design.server_id) {
 				const srv = db.prepare('SELECT * FROM pg_servers WHERE id = ?').get(design.server_id) as PgServer | undefined;
@@ -436,6 +668,7 @@ Use this after validating the plan with run_design.`,
 				server: serverInfo,
 				run_settings: { snapshot_interval_seconds: design.snapshot_interval_seconds, pre_collect_secs: design.pre_collect_secs, post_collect_secs: design.post_collect_secs },
 				params: params.map(p => ({ name: p.name, value: p.value })),
+				profiles,
 				steps: steps.map(s => ({
 					id: s.id, position: s.position, name: s.name, type: s.type, enabled: !!s.enabled,
 					script: s.script, no_transaction: !!s.no_transaction, duration_secs: s.duration_secs,

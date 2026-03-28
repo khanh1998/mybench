@@ -18,15 +18,21 @@ const RunnerVersion = "0.1.0"
 
 // RunOpts holds runtime options for the runner.
 type RunOpts struct {
-	Plan      *plan.Plan
-	LogDir    string
-	Progress  bool
-	Timestamp string // formatted timestamp used in file names
+	Plan         *plan.Plan
+	LogDir       string
+	Progress     bool
+	Timestamp    string // formatted timestamp used in file names
+	LogTailLines int    // trailing log lines per step to embed in result (0 = skip)
 }
 
 // Run executes all enabled steps in the plan in order and returns a Result.
 // The caller is responsible for writing the result to disk (including on SIGINT).
 func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result, error) {
+	var runParams []result.RunParam
+	for _, p := range opts.Plan.Params {
+		runParams = append(runParams, result.RunParam{Name: p.Name, Value: p.Value})
+	}
+
 	res := &result.Result{
 		Version:       1,
 		DesignID:      opts.Plan.DesignID,
@@ -37,6 +43,8 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 			SnapshotIntervalSeconds: opts.Plan.RunSettings.SnapshotIntervalSeconds,
 			PreCollectSecs:          opts.Plan.RunSettings.PreCollectSecs,
 			PostCollectSecs:         opts.Plan.RunSettings.PostCollectSecs,
+			ProfileName:             opts.Plan.ProfileName,
+			Params:                  runParams,
 		},
 		Snapshots: make(map[string][]result.SnapshotRow),
 	}
@@ -82,7 +90,9 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 			if opts.Progress {
 				fmt.Printf("[sql] %s\n", step.Name)
 			}
-			stepRes.Command, stepErr = runSQLStep(opts, step.Name, script, step.NoTransaction)
+			var logPath string
+			stepRes.Command, logPath, stepErr = runSQLStep(opts, step.Name, script, step.NoTransaction)
+			stepRes.Log = tailFile(logPath, opts.LogTailLines)
 			if stepErr != nil {
 				stepRes.Status = "failed"
 				stepRes.FinishedAt = time.Now().UTC().Format(time.RFC3339)
@@ -110,6 +120,7 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 			pbRes, err := runPgbenchStep(ctx, opts, step, pool, res.Snapshots, opts.Plan.RunSettings.SnapshotIntervalSeconds)
 			seenPgbench = true
 			stepRes.Command = pbRes.Command
+			stepRes.Log = tailFile(pbRes.LogPath, opts.LogTailLines)
 
 			// Capture metrics even on error (partial results).
 			res.Run.TPS = pbRes.TPS
@@ -149,6 +160,22 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 	res.Run.Status = "completed"
 	res.Run.FinishedAt = time.Now().UTC().Format(time.RFC3339)
 	return res, nil
+}
+
+// tailFile reads the last n lines from path. Best-effort: returns "" on any error.
+func tailFile(path string, n int) string {
+	if n <= 0 || path == "" {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
 }
 
 // runCollectStep runs a collect step: loops collecting snapshots for DurationSecs.
