@@ -359,8 +359,6 @@
       title="Validation status"
     >{isValid ? '✓ Valid' : `⚠ ${validationErrors.length + weightErrors.length} issue(s)`}</button>
     <button onclick={save} disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
-    <a href="/api/designs/{design.id}/export" download class="btn">Export Plan</a>
-    <button onclick={() => { importError = ''; importFile = null; showImportModal = true; }}>Import Run</button>
     <button class="primary" onclick={openRunModal} disabled={startingRun}>
       {startingRun ? 'Starting…' : '▶ Run'}
     </button>
@@ -603,26 +601,37 @@
     </div>
 
     <!-- Run history -->
-    {#if runs.length > 0}
-      <div class="runs-section">
-        <div class="steps-title" style="padding: 8px 12px 4px;">Run History</div>
-        {#each runs.slice(0, 8) as r}
-          <div class="run-item-row">
-            <a href="/designs/{id}/runs/{r.id}" class="run-item">
+    <div class="runs-section">
+      <div class="runs-section-header">
+        <div class="steps-title">Run History</div>
+        <button class="runs-import-btn" title="Import run from result JSON" onclick={() => { importError = ''; importFile = null; showImportModal = true; }}>⬆ Import</button>
+      </div>
+      {#if runs.length === 0}
+        <div style="padding: 8px 12px; font-size:11px; color:#585b70">No runs yet</div>
+      {/if}
+      {#each runs.slice(0, 8) as r}
+        <div class="run-item-row">
+          <a href="/designs/{id}/runs/{r.id}" class="run-item">
+            <div class="run-item-top">
               <span class="badge badge-{r.status}" style="font-size:10px">{r.status}</span>
               <span class="run-item-id">{r.name || '#' + r.id}</span>
+            </div>
+            <div class="run-item-bottom">
               {#if r.profile_name}
                 <span class="run-profile-tag">{r.profile_name}</span>
               {/if}
               {#if r.tps !== null}
                 <span class="run-item-tps">{r.tps.toFixed(1)} TPS</span>
               {/if}
-            </a>
-            <button class="run-delete-btn" title="Delete run" onclick={() => deleteRun(r.id)}>✕</button>
-          </div>
-        {/each}
-      </div>
-    {/if}
+              {#if r.latency_avg_ms !== null}
+                <span class="run-item-lat">{r.latency_avg_ms.toFixed(1)}ms</span>
+              {/if}
+            </div>
+          </a>
+          <button class="run-delete-btn" title="Delete run" onclick={() => deleteRun(r.id)}>✕</button>
+        </div>
+      {/each}
+    </div>
   </div>
 
   <!-- RIGHT: Editor -->
@@ -1030,7 +1039,7 @@
 
   /* Steps panel */
   .steps-panel {
-    width: 240px;
+    width: 264px;
     flex-shrink: 0;
     background: #1e1e2e;
     color: #cdd6f4;
@@ -1115,28 +1124,44 @@
   .runs-section {
     flex-shrink: 0;
     border-top: 1px solid #313244;
-    max-height: 200px;
+    max-height: 280px;
     overflow-y: auto;
   }
-  .run-item-row { display: flex; align-items: center; border-bottom: 1px solid #1e1e2e; }
+  .runs-section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px 4px;
+  }
+  .runs-import-btn {
+    background: none; border: 1px solid #45475a; color: #a6adc8;
+    font-size: 10px; padding: 2px 7px; border-radius: 4px; cursor: pointer;
+  }
+  .runs-import-btn:hover { background: #2a2a3e; color: #cdd6f4; border-color: #89b4fa; }
+  .run-item-row { display: flex; align-items: stretch; border-bottom: 1px solid #1e1e2e; }
   .run-item-row:hover .run-delete-btn { opacity: 1; }
   .run-item {
     display: flex;
-    align-items: center;
-    gap: 6px;
+    flex-direction: column;
+    gap: 3px;
     padding: 5px 12px;
     text-decoration: none;
     font-size: 12px;
     color: #a6adc8;
     flex: 1;
+    min-width: 0;
   }
   .run-item:hover { background: #2a2a3e; color: #cdd6f4; }
-  .run-item-id { font-family: monospace; max-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .run-item-tps { margin-left: auto; color: #a6e3a1; font-size: 11px; }
-  .run-profile-tag { background: #4a3f6b; color: #cba6f7; font-size: 10px; padding: 1px 5px; border-radius: 8px; white-space: nowrap; max-width: 60px; overflow: hidden; text-overflow: ellipsis; }
+  .run-item-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .run-item-bottom { display: flex; align-items: center; gap: 5px; min-width: 0; padding-left: 2px; }
+  .run-item-id { font-family: monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+  .run-item-tps { color: #a6e3a1; font-size: 11px; white-space: nowrap; }
+  .run-item-lat { color: #89dceb; font-size: 11px; white-space: nowrap; }
+  .run-profile-tag { background: #4a3f6b; color: #cba6f7; font-size: 10px; padding: 1px 5px; border-radius: 8px; white-space: nowrap; max-width: 80px; overflow: hidden; text-overflow: ellipsis; }
   .run-delete-btn {
     opacity: 0; flex-shrink: 0; padding: 4px 8px;
     background: none; border: none; color: #f38ba8; cursor: pointer; font-size: 12px;
+    align-self: center;
   }
   .run-delete-btn:hover { opacity: 1 !important; background: #3d2028; }
 

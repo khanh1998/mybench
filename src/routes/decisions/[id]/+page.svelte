@@ -124,7 +124,10 @@
     <div class="card design-card">
       <div class="row">
         <div>
-          <a href="/designs/{design.id}" style="text-decoration:none; color:#0066cc; font-weight:600; font-size:15px">{design.name}</a>
+          <div style="display:flex; align-items:center; gap:8px">
+            <a href="/designs/{design.id}" style="text-decoration:none; color:#0066cc; font-weight:600; font-size:15px">{design.name}</a>
+            <a href="/api/designs/{design.id}/export" download style="text-decoration:none; font-size:11px; color:#666; border:1px solid #ccc; padding:1px 7px; border-radius:4px; white-space:nowrap" title="Export plan JSON">↓ Export Plan</a>
+          </div>
           {#if design.description}<p style="color:#666; margin:2px 0 0; font-size:12px">{design.description}</p>{/if}
           <p style="color:#999; font-size:11px; margin:4px 0 0">DB: {design.database || '—'}</p>
         </div>

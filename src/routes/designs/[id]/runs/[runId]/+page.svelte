@@ -3,6 +3,7 @@
   import { goto } from '$app/navigation';
   import { onMount, onDestroy } from 'svelte';
   import { marked } from 'marked';
+  import MarkdownEditor from '$lib/MarkdownEditor.svelte';
   import type { PageData } from './$types';
 
   let { data }: { data: PageData } = $props();
@@ -37,8 +38,11 @@
   let finalStatus = $state('');
   let editingName = $state(false);
   let nameEdit = $state(run?.name ?? '');
-  let editingNotes = $state(false);
   let notesEdit = $state(run?.notes ?? '');
+  let notesSaveStatus = $state<'' | 'saving' | 'saved'>('');
+  let notesTimer: ReturnType<typeof setTimeout> | null = null;
+  let notesMode = $state<'edit' | 'view'>('edit');
+  let notesFullscreen = $state(false);
   let showRunParams = $state(false);
   let eventSource: EventSource | null = null;
   let outputEl: HTMLPreElement | null = $state(null);
@@ -121,15 +125,35 @@
     run = { ...run, name: trimmed };
   }
 
-  async function saveNotes() {
-    editingNotes = false;
+  async function saveNotesNow() {
     if (!run) return;
+    if (notesTimer) { clearTimeout(notesTimer); notesTimer = null; }
+    notesSaveStatus = 'saving';
     await fetch(`/api/runs/${runId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ notes: notesEdit })
     });
     run = { ...run, notes: notesEdit };
+    notesSaveStatus = 'saved';
+    setTimeout(() => { notesSaveStatus = ''; }, 2500);
+  }
+
+  function onNotesInput(val?: string) {
+    if (val !== undefined) notesEdit = val;
+    if (notesTimer) clearTimeout(notesTimer);
+    notesSaveStatus = '';
+    notesTimer = setTimeout(saveNotesNow, 1000);
+  }
+
+  function onKeydown(e: KeyboardEvent) {
+    if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+      e.preventDefault();
+      saveNotesNow();
+    }
+    if (e.key === 'Escape' && notesFullscreen) {
+      notesFullscreen = false;
+    }
   }
 
   function connectSSE() {
@@ -203,6 +227,8 @@
     for (const t of phaseTimers.values()) clearInterval(t);
   });
 </script>
+
+<svelte:window onkeydown={onKeydown} />
 
 <div class="row" style="margin-bottom:16px">
   <a href="/designs/{designId}" style="color:#0066cc; text-decoration:none; font-size:13px">← Design</a>
@@ -373,35 +399,9 @@
     {/if}
   {/if}
 
-  <!-- Notes -->
-  <div class="card" style="margin-bottom:12px">
-    <div class="row" style="margin-bottom:8px">
-      <h3 style="margin:0">Notes</h3>
-      {#if !editingNotes}
-        <button class="expand-btn" style="margin-left:8px" onclick={() => { notesEdit = run?.notes ?? ''; editingNotes = true; }}>Edit</button>
-      {/if}
-    </div>
-    {#if editingNotes}
-      <textarea
-        class="notes-textarea"
-        bind:value={notesEdit}
-        placeholder="Add notes (markdown supported)…"
-        rows="5"
-        onblur={saveNotes}
-      ></textarea>
-      <div style="display:flex;gap:8px;margin-top:8px">
-        <button class="primary" onclick={saveNotes}>Save</button>
-        <button onclick={() => { editingNotes = false; notesEdit = run?.notes ?? ''; }}>Cancel</button>
-      </div>
-    {:else if run?.notes}
-      <div class="notes-content">{@html marked(run.notes)}</div>
-    {:else}
-      <div style="color:#aaa;font-size:13px;font-style:italic">No notes yet. Click Edit to add.</div>
-    {/if}
-  </div>
 {/if}
 
-<div class="card">
+<div class="card" style="margin-bottom:12px">
   <div class="row" style="margin-bottom:8px">
     <h3>Output</h3>
     {#if !done}
@@ -416,6 +416,65 @@
     <pre class="output" bind:this={outputEl}>{#if !done}<span class="cursor">▋</span>{/if}</pre>
   {/if}
 </div>
+
+<!-- Notes — split editor + live preview, or view-only; optional fullscreen -->
+{#if run}
+  <div class="card notes-card" class:notes-fullscreen={notesFullscreen}>
+    <div class="notes-header">
+      <h3 style="margin:0">Notes</h3>
+      <span class="notes-hint">Markdown · ⌘S to save</span>
+      {#if notesSaveStatus === 'saving'}
+        <span class="notes-status saving">Saving…</span>
+      {:else if notesSaveStatus === 'saved'}
+        <span class="notes-status saved">✓ Saved</span>
+      {/if}
+      <div class="notes-mode-toggle">
+        <button
+          class="mode-btn"
+          class:active={notesMode === 'edit'}
+          onclick={() => notesMode = 'edit'}
+          title="Edit mode"
+        >✏ Edit</button>
+        <button
+          class="mode-btn"
+          class:active={notesMode === 'view'}
+          onclick={() => notesMode = 'view'}
+          title="View mode"
+        >👁 View</button>
+      </div>
+      <button
+        class="fullscreen-btn"
+        onclick={() => notesFullscreen = !notesFullscreen}
+        title={notesFullscreen ? 'Exit fullscreen (Esc)' : 'Fullscreen'}
+      >{notesFullscreen ? '⤓' : '⤢'}</button>
+    </div>
+
+    {#if notesMode === 'edit'}
+      <div class="notes-split">
+        <MarkdownEditor
+          bind:value={notesEdit}
+          onchange={onNotesInput}
+          minHeight="200px"
+        />
+        <div class="notes-preview notes-content">
+          {#if notesEdit.trim()}
+            {@html marked(notesEdit)}
+          {:else}
+            <span class="notes-empty">Preview will appear here…</span>
+          {/if}
+        </div>
+      </div>
+    {:else}
+      <div class="notes-content notes-view">
+        {#if notesEdit.trim()}
+          {@html marked(notesEdit)}
+        {:else}
+          <span class="notes-empty">No notes yet.</span>
+        {/if}
+      </div>
+    {/if}
+  </div>
+{/if}
 
 <style>
   .stats-row { display: flex; gap: 20px; flex-wrap: wrap; }
@@ -461,12 +520,56 @@
   .param-row { display: flex; align-items: center; gap: 8px; }
   .param-name { background: #f0f0f0; color: #5500aa; padding: 1px 6px; border-radius: 3px; font-size: 12px; }
   .param-val  { color: #007a2e; font-size: 12px; }
-  .notes-textarea {
-    width: 100%; box-sizing: border-box; font-family: inherit; font-size: 13px;
-    border: 1px solid #ddd; border-radius: 4px; padding: 8px; resize: vertical;
+  .notes-card { display: flex; flex-direction: column; }
+  .notes-fullscreen {
+    position: fixed; inset: 0; z-index: 1000;
+    border-radius: 0; margin: 0;
+    display: flex; flex-direction: column;
   }
+  .notes-fullscreen .notes-split {
+    flex: 1; min-height: 0;
+  }
+  .notes-fullscreen .notes-split > :global(.md-editor-root),
+  .notes-fullscreen .notes-split .notes-preview {
+    min-height: unset; height: 100%;
+  }
+  .notes-fullscreen .notes-view {
+    flex: 1; overflow-y: auto;
+  }
+  .notes-header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+  .notes-hint { font-size: 11px; color: #aaa; }
+  .notes-status { font-size: 11px; }
+  .notes-mode-toggle { display: flex; margin-left: auto; border: 1px solid #ddd; border-radius: 5px; overflow: hidden; }
+  .mode-btn {
+    background: none; border: none; padding: 3px 10px; font-size: 12px;
+    cursor: pointer; color: #888; border-radius: 0;
+  }
+  .mode-btn:hover { background: #f5f5f5; color: #333; }
+  .mode-btn.active { background: #0066cc; color: #fff; }
+  .fullscreen-btn {
+    background: none; border: 1px solid #ddd; border-radius: 5px;
+    padding: 3px 8px; font-size: 14px; cursor: pointer; color: #888; line-height: 1;
+  }
+  .fullscreen-btn:hover { background: #f5f5f5; color: #333; border-color: #aaa; }
+  .notes-view { padding: 2px 0; min-height: 40px; }
+  .notes-status.saving { color: #888; }
+  .notes-status.saved { color: #00884d; }
+  .notes-split {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    align-items: stretch;
+  }
+  .notes-preview {
+    border: 1px solid #eee; border-radius: 4px; padding: 10px;
+    min-height: 200px; overflow-y: auto; background: #fff;
+  }
+  .notes-empty { color: #ccc; font-style: italic; font-size: 13px; }
   .notes-content { font-size: 13px; line-height: 1.6; color: #333; }
+  .notes-content :global(h1), .notes-content :global(h2), .notes-content :global(h3) { margin: 0 0 8px; font-size: 15px; }
   .notes-content :global(p) { margin: 0 0 8px; }
+  .notes-content :global(ul), .notes-content :global(ol) { margin: 0 0 8px; padding-left: 20px; }
   .notes-content :global(pre) { background: #f5f5f5; padding: 8px; border-radius: 4px; overflow-x: auto; }
-  .notes-content :global(code) { background: #f5f5f5; padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+  .notes-content :global(code) { background: #f5f5f5; padding: 1px 4px; border-radius: 3px; font-size: 12px; font-family: monospace; }
+  .notes-content :global(blockquote) { border-left: 3px solid #ddd; margin: 0 0 8px; padding-left: 10px; color: #666; }
 </style>
