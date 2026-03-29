@@ -20,7 +20,7 @@
   interface AasRow     { _collected_at: string; wait_event_type: string; wait_event: string; n: number; }
   interface SessionRow { _collected_at: string; state: string; n: number; }
   interface WaitRow    { wait_event_type: string; wait_event: string; occurrences: number; }
-  interface SqlRow     { queryid: string; query_short: string; delta_calls: number; delta_exec_time: number; cache_hit_pct: number | null; delta_blks_read: number; }
+  interface SqlRow     { queryid: string; query_short: string; delta_calls: number; delta_exec_time: number; cache_hit_pct: number | null; delta_blks_read: number; snapshot_count: number; }
   interface LockRow    { _collected_at: string; blocked_pid: number; blocked_query: string; blocked_user: string; blocking_pid: number; blocking_query: string; blocking_user: string; locktype: string; held_mode: string; requested_mode: string; }
   interface TotalAasRow { _collected_at: string; total_active: number; }
 
@@ -141,21 +141,36 @@
       waitsData = { ...waitsData, [rid]: waitsRes.error ? [] : (waitsRes.rows as unknown as WaitRow[]) };
 
       // Top SQL (no phase filter — step-based collection)
+      // When only 1 snapshot exists (single collect step), use absolute MAX values.
+      // When 2+ snapshots exist, use delta (MAX-MIN) to capture activity during the run.
       const sqlRes = await queryApi(
         `SELECT queryid,
                 SUBSTR(query,1,120) as query_short,
-                MAX(calls)-MIN(calls) as delta_calls,
-                MAX(total_exec_time)-MIN(total_exec_time) as delta_exec_time,
-                CASE WHEN MAX(CAST(shared_blks_hit AS REAL)+CAST(shared_blks_read AS REAL))-MIN(CAST(shared_blks_hit AS REAL)+CAST(shared_blks_read AS REAL)) > 0
-                  THEN ROUND(1.0*(MAX(CAST(shared_blks_hit AS REAL))-MIN(CAST(shared_blks_hit AS REAL))) /
-                    (MAX(CAST(shared_blks_hit AS REAL)+CAST(shared_blks_read AS REAL))-MIN(CAST(shared_blks_hit AS REAL)+CAST(shared_blks_read AS REAL)))*100, 1)
+                CASE WHEN COUNT(*) > 1
+                  THEN MAX(CAST(calls AS REAL)) - MIN(CAST(calls AS REAL))
+                  ELSE MAX(CAST(calls AS REAL)) END as delta_calls,
+                CASE WHEN COUNT(*) > 1
+                  THEN MAX(CAST(total_exec_time AS REAL)) - MIN(CAST(total_exec_time AS REAL))
+                  ELSE MAX(CAST(total_exec_time AS REAL)) END as delta_exec_time,
+                CASE WHEN (CASE WHEN COUNT(*) > 1
+                    THEN MAX(CAST(shared_blks_hit AS REAL)+CAST(shared_blks_read AS REAL)) - MIN(CAST(shared_blks_hit AS REAL)+CAST(shared_blks_read AS REAL))
+                    ELSE MAX(CAST(shared_blks_hit AS REAL)+CAST(shared_blks_read AS REAL)) END) > 0
+                  THEN ROUND(1.0 * (CASE WHEN COUNT(*) > 1
+                    THEN MAX(CAST(shared_blks_hit AS REAL)) - MIN(CAST(shared_blks_hit AS REAL))
+                    ELSE MAX(CAST(shared_blks_hit AS REAL)) END) /
+                    (CASE WHEN COUNT(*) > 1
+                    THEN MAX(CAST(shared_blks_hit AS REAL)+CAST(shared_blks_read AS REAL)) - MIN(CAST(shared_blks_hit AS REAL)+CAST(shared_blks_read AS REAL))
+                    ELSE MAX(CAST(shared_blks_hit AS REAL)+CAST(shared_blks_read AS REAL)) END) * 100, 1)
                   ELSE NULL END as cache_hit_pct,
-                MAX(CAST(shared_blks_read AS REAL))-MIN(CAST(shared_blks_read AS REAL)) as delta_blks_read
+                CASE WHEN COUNT(*) > 1
+                  THEN MAX(CAST(shared_blks_read AS REAL)) - MIN(CAST(shared_blks_read AS REAL))
+                  ELSE MAX(CAST(shared_blks_read AS REAL)) END as delta_blks_read,
+                COUNT(*) as snapshot_count
          FROM snap_pg_stat_statements
          WHERE _run_id = ?
          GROUP BY queryid, query_short
-         HAVING MAX(calls)-MIN(calls) > 0
-         ORDER BY delta_exec_time DESC LIMIT 20`,
+         HAVING delta_exec_time > 0
+         ORDER BY delta_exec_time DESC LIMIT 50`,
         [rid]
       );
       hasSql = { ...hasSql, [rid]: !sqlRes.error && sqlRes.rows.length > 0 };
@@ -420,7 +435,15 @@
   {#if !anySql}
     <div class="empty">pg_stat_statements not available — add a <code>pg_stat_statements_collect</code> step to collect query stats.</div>
   {:else}
-    <p class="section-desc">Delta from first to last pg_stat_statements snapshot. Click column headers to sort.</p>
+    {@const isSingleSnapshot = runs.every(r => (sqlData[r.id] ?? [])[0]?.snapshot_count === 1)}
+    <p class="section-desc">
+      {#if isSingleSnapshot}
+        Absolute values from single pg_stat_statements snapshot (add a pre-benchmark collect step for deltas).
+      {:else}
+        Delta from first to last pg_stat_statements snapshot.
+      {/if}
+      Click column headers to sort.
+    </p>
     <div class="sql-panels">
       {#each runs as run}
         {#if hasSql[run.id]}
