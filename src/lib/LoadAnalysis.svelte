@@ -17,7 +17,7 @@
   }: { runs: RunMeta[]; phases?: string[]; showPhaseFilter?: boolean } = $props();
 
   // ── Types ──────────────────────────────────────────────────────────────────
-  interface AasRow     { _collected_at: string; wait_type: string; n: number; }
+  interface AasRow     { _collected_at: string; wait_event_type: string; wait_event: string; n: number; }
   interface SessionRow { _collected_at: string; state: string; n: number; }
   interface WaitRow    { wait_event_type: string; wait_event: string; occurrences: number; }
   interface SqlRow     { queryid: string; query_short: string; delta_calls: number; delta_exec_time: number; cache_hit_pct: number | null; delta_blks_read: number; }
@@ -95,16 +95,15 @@
     await Promise.all(runs.map(async (run) => {
       const rid = run.id;
 
-      // AAS stacked
+      // AAS: group by type+event for detailed tooltip, aggregate to type for chart stacking
       const aasRes = await queryApi(
         `SELECT _collected_at,
-          CASE WHEN state = 'active' AND wait_event_type IS NULL THEN 'CPU'
-               WHEN wait_event_type IS NOT NULL THEN wait_event_type
-               ELSE 'Other' END as wait_type,
+          COALESCE(wait_event_type, 'CPU') as wait_event_type,
+          COALESCE(wait_event, 'running') as wait_event,
           COUNT(*) as n
          FROM snap_pg_stat_activity
          WHERE _run_id = ? AND ${clause} AND state = 'active'
-         GROUP BY _collected_at, wait_type ORDER BY _collected_at`,
+         GROUP BY _collected_at, wait_event_type, wait_event ORDER BY _collected_at`,
         [rid, ...pParams]
       );
       aasData = { ...aasData, [rid]: aasRes.error ? [] : (aasRes.rows as unknown as AasRow[]) };
@@ -181,22 +180,34 @@
   function buildAasSeries(run: RunMeta) {
     const rows = aasData[run.id] ?? [];
     const org = origin(run);
-    const byType = new Map<string, { t: number; v: number }[]>();
+    // Aggregate by type (broad) for stacking
+    const byType = new Map<string, Map<number, number>>();
     for (const row of rows) {
       const t = toMs(row._collected_at, org);
-      const type = row.wait_type ?? 'Other';
-      if (!byType.has(type)) byType.set(type, []);
-      byType.get(type)!.push({ t, v: Number(row.n) });
+      const type = row.wait_event_type ?? 'Other';
+      if (!byType.has(type)) byType.set(type, new Map());
+      byType.get(type)!.set(t, (byType.get(type)!.get(t) ?? 0) + Number(row.n));
     }
-    const types = [...byType.keys()];
-    types.sort((a, b) => {
+    const types = [...byType.keys()].sort((a, b) => {
       const ai = WAIT_ORDER.indexOf(a), bi = WAIT_ORDER.indexOf(b);
       return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
     });
     return types.map(type => ({
       label: type,
       color: WAIT_COLORS[type] ?? WAIT_COLORS.Other,
-      points: byType.get(type)!
+      points: [...byType.get(type)!.entries()].map(([t, v]) => ({ t, v })).sort((a, b) => a.t - b.t)
+    }));
+  }
+
+  function buildAasRawRows(run: RunMeta) {
+    const rows = aasData[run.id] ?? [];
+    const org = origin(run);
+    return rows.map(row => ({
+      t: toMs(row._collected_at, org),
+      typeKey: row.wait_event_type ?? 'Other',
+      eventKey: row.wait_event ?? 'running',
+      color: WAIT_COLORS[row.wait_event_type ?? 'Other'] ?? WAIT_COLORS.Other,
+      v: Number(row.n)
     }));
   }
 
@@ -222,13 +233,25 @@
     }));
   }
 
+  function buildSessionRawRows(run: RunMeta) {
+    const rows = sessionData[run.id] ?? [];
+    const org = origin(run);
+    return rows.map(row => ({
+      t: toMs(row._collected_at, org),
+      typeKey: row.state ?? 'unknown',
+      eventKey: row.state ?? 'unknown',
+      color: STATE_COLORS[row.state ?? 'unknown'] ?? STATE_COLORS.unknown,
+      v: Number(row.n)
+    }));
+  }
+
   function buildTotalAasSeries() {
     return runs.map((run, i) => {
       const rows = totalAas[run.id] ?? [];
       const org = origin(run);
       return {
         label: run.label,
-        color: RUN_COLORS[i % RUN_COLORS.length],
+        color: run.color || RUN_COLORS[i % RUN_COLORS.length],
         points: rows.map(r => ({ t: toMs(r._collected_at, org), v: Number(r.total_active) }))
       };
     });
@@ -316,22 +339,24 @@
   {#if isCompare}
     <!-- Compare: total AAS overlay -->
     <div style="margin-bottom:12px">
-      <LineChart series={buildTotalAasSeries()} title="Total Active Sessions — all runs" />
+      <LineChart series={buildTotalAasSeries()} title="Total Active Sessions — all runs" originMs={runs[0] ? origin(runs[0]) : null} />
     </div>
     <!-- Per-run stacked breakdown -->
     <div class="chart-grid">
       {#each runs as run}
         {@const series = buildAasSeries(run)}
+        {@const rawRows = buildAasRawRows(run)}
         <div>
           <div class="run-label" style="color:{run.color}">{run.label}</div>
-          <StackedAreaChart {series} title="AAS by wait type" markers={buildMarkers(run)} />
+          <StackedAreaChart {series} {rawRows} title="AAS by wait type" markers={buildMarkers(run)} originMs={origin(run)} />
         </div>
       {/each}
     </div>
   {:else}
     {#each runs as run}
       {@const series = buildAasSeries(run)}
-      <StackedAreaChart {series} title="AAS by wait type" markers={buildMarkers(run)} />
+      {@const rawRows = buildAasRawRows(run)}
+      <StackedAreaChart {series} {rawRows} title="AAS by wait type" markers={buildMarkers(run)} originMs={origin(run)} />
     {/each}
   {/if}
 </div>
@@ -343,9 +368,10 @@
   <div class="chart-grid">
     {#each runs as run}
       {@const series = buildSessionSeries(run)}
+      {@const rawRows = buildSessionRawRows(run)}
       <div>
         {#if isCompare}<div class="run-label" style="color:{run.color}">{run.label}</div>{/if}
-        <StackedAreaChart {series} title="Session states" markers={buildMarkers(run)} />
+        <StackedAreaChart {series} {rawRows} title="Session states" markers={buildMarkers(run)} originMs={origin(run)} />
       </div>
     {/each}
   </div>
