@@ -6,7 +6,7 @@ import { SNAP_TABLE_MAP } from '$lib/server/pg-stats';
 import { startRun } from '$lib/server/run-executor';
 import type { PgServer, DesignStep, PgbenchScript, DesignParam } from '$lib/types';
 
-const EXCLUDED_SNAP_COLS = new Set(['_id', '_run_id', '_collected_at', '_phase', '_is_baseline']);
+const EXCLUDED_SNAP_COLS = new Set(['_id', '_run_id', '_collected_at', '_phase', '_is_baseline', '_step_id']);
 
 function text(obj: unknown): { content: [{ type: 'text'; text: string }] } {
 	return { content: [{ type: 'text' as const, text: JSON.stringify(obj, null, 2) }] };
@@ -37,7 +37,7 @@ and the recommended workflow for creating and running a benchmark plan.`
 				data_model: {
 					decisions: 'Top-level question you are answering (e.g. "Which table design is faster?"). Contains one or more designs.',
 					designs: 'One candidate design to benchmark (e.g. "plain table" vs "partitioned table"). Each design is linked to a database server and has steps + params.',
-					steps: 'Ordered list of actions: sql setup → collect pre-stats → pgbench load test → collect post-stats → sql teardown.',
+					steps: 'Ordered list of actions: sql setup → wait for pre-stats → optional pg_stat_statements reset → pgbench load test → optional pg_stat_statements collect → wait for post-stats → sql teardown.',
 					params: 'Named values (e.g. NUM_USERS=1000) substituted as {{NAME}} in all step scripts.',
 					profiles: 'Named sets of param overrides (e.g. "small"=NUM_USERS:100, "large"=NUM_USERS:10000) for running the same design at different scales. Managed with upsert_profile/list_profiles/delete_profile.'
 				},
@@ -66,14 +66,34 @@ and the recommended workflow for creating and running a benchmark plan.`
 						note: 'Supports {{PARAM}} substitution in pgbench_options and in each pgbench script.'
 					},
 					collect: {
-						description: 'Takes periodic pg_stat_* snapshots for duration_secs seconds. Place before pgbench (pre phase) and after (post phase).',
+						description: 'Waits for duration_secs seconds while taking periodic pg_stat_* snapshots. Place before pgbench for a baseline window or after pgbench for a post-run window.',
 						fields: {
 							type: '"collect"',
 							name: 'string',
 							position: 'integer',
-							duration_secs: 'integer — seconds to collect',
+							duration_secs: 'integer — seconds to wait while collecting snapshots',
 							enabled: 'boolean'
 						}
+					},
+					pg_stat_statements_reset: {
+						description: 'Resets pg_stat_statements before a benchmark. Use right before pgbench when you want query-level stats to start from zero.',
+						fields: {
+							type: '"pg_stat_statements_reset"',
+							name: 'string',
+							position: 'integer',
+							enabled: 'boolean'
+						},
+						note: 'If pg_stat_statements is unavailable or cannot be reset, mybench logs a warning and continues.'
+					},
+					pg_stat_statements_collect: {
+						description: 'Captures a single pg_stat_statements snapshot for the current benchmark database. Place after pgbench.',
+						fields: {
+							type: '"pg_stat_statements_collect"',
+							name: 'string',
+							position: 'integer',
+							enabled: 'boolean'
+						},
+						note: 'This is a one-time snapshot, not a duration-based time series collect step.'
 					}
 				},
 				param_syntax: 'Write {{PARAM_NAME}} in any step script or pgbench_options. Set the value with set_params. Example: "INSERT INTO users SELECT generate_series(1, {{NUM_USERS}})"',
@@ -85,7 +105,7 @@ and the recommended workflow for creating and running a benchmark plan.`
 					'4. configure_design(design_id, {server_id, database}) — assign a server from the database_servers list',
 					'5. get_db_schema(design_id) — see real table/column names from the live DB',
 					'6. set_params(design_id, [{name, value}]) — define {{PARAM}} values',
-					'7. upsert_step (repeat) — add sql setup, collect, pgbench, collect, sql teardown steps',
+					'7. upsert_step (repeat) — add sql setup, wait, optional pg_stat_statements reset, pgbench, optional pg_stat_statements collect, wait, sql teardown steps',
 					'8. upsert_profile(design_id, name, values) — optional: create "small"/"large" profiles for different scales',
 					'9. validate_design(design_id) — check for issues (undefined params, missing server, no pgbench step) before running',
 					'10. run_design(design_id, profile_id?) — start a test run (optionally with a profile), get run_id',
@@ -131,8 +151,8 @@ and the recommended workflow for creating and running a benchmark plan.`
 						},
 						{
 							position: 5, type: 'collect', duration_secs: 15,
-							name: '6 — Pre-collect stats',
-							purpose: 'Take pg_stat_* baseline snapshots before load. The delta (post − pre) reveals cache hit rate, index usage, I/O, and WAL volume caused by the benchmark. Can be disabled if not needed.'
+							name: '6 — Wait before benchmark',
+							purpose: 'Wait while taking pg_stat_* baseline snapshots before load. The delta (post − pre) reveals cache hit rate, index usage, I/O, and WAL volume caused by the benchmark. Can be disabled if not needed.'
 						},
 						{
 							position: 6, type: 'pgbench',
@@ -147,8 +167,8 @@ and the recommended workflow for creating and running a benchmark plan.`
 						},
 						{
 							position: 7, type: 'collect', duration_secs: 15,
-							name: '8 — Post-collect stats',
-							purpose: 'Take pg_stat_* snapshots after load. Compare with pre-collect to see the impact of the benchmark on cache, I/O, WAL, and index usage.'
+							name: '8 — Wait after benchmark',
+							purpose: 'Wait while taking pg_stat_* snapshots after load. Compare with the pre-run wait step to see the impact of the benchmark on cache, I/O, WAL, and index usage.'
 						},
 						{
 							position: 8, type: 'sql',
@@ -169,14 +189,16 @@ and the recommended workflow for creating and running a benchmark plan.`
 						type: 'sql', name: 'Setup', position: 0, enabled: true,
 						script: 'DROP TABLE IF EXISTS payments;\nCREATE TABLE payments (id BIGSERIAL PRIMARY KEY, user_id INT, amount INT);\nINSERT INTO payments (user_id, amount)\n  SELECT (random()*{{NUM_USERS}})::int, (random()*1000)::int\n  FROM generate_series(1, {{NUM_ROWS}});'
 					},
-					collect_pre: { type: 'collect', name: 'pre collect', position: 1, duration_secs: 15, enabled: true },
+					collect_pre: { type: 'collect', name: 'wait before benchmark', position: 1, duration_secs: 15, enabled: true },
+					pg_stat_statements_reset: { type: 'pg_stat_statements_reset', name: 'reset pg_stat_statements', position: 2, enabled: true },
 					pgbench: {
-						type: 'pgbench', name: 'Benchmark', position: 2, enabled: true,
+						type: 'pgbench', name: 'Benchmark', position: 3, enabled: true,
 						pgbench_options: '-c {{NUM_CLIENTS}} -j 2 -T 60 --no-vacuum',
 						pgbench_scripts: [{ name: 'main', weight: 1, script: '\\set uid random(1, {{NUM_USERS}})\nBEGIN;\nUPDATE payments SET amount = amount - 10 WHERE user_id = :uid;\nEND;' }]
 					},
-					collect_post: { type: 'collect', name: 'post collect', position: 3, duration_secs: 15, enabled: true },
-					sql_teardown: { type: 'sql', name: 'Teardown', position: 4, script: 'DROP TABLE IF EXISTS payments;', enabled: true }
+					pg_stat_statements_collect: { type: 'pg_stat_statements_collect', name: 'collect pg_stat_statements', position: 4, enabled: true },
+					collect_post: { type: 'collect', name: 'wait after benchmark', position: 5, duration_secs: 15, enabled: true },
+					sql_teardown: { type: 'sql', name: 'Teardown', position: 6, script: 'DROP TABLE IF EXISTS payments;', enabled: true }
 				}
 			};
 			return text(guide);
@@ -324,12 +346,14 @@ Call this after create_design to assign a server before running the design.`,
 Step types:
   "sql"     — provide script (SQL text, supports {{PARAM}})
   "pgbench" — provide pgbench_options and pgbench_scripts [{name, weight, script}]
-  "collect" — provide duration_secs (seconds to collect pg_stat_* snapshots)
+  "collect" — provide duration_secs (seconds to wait while collecting pg_stat_* snapshots)
+  "pg_stat_statements_reset"   — no extra fields; resets pg_stat_statements and logs a warning if unavailable
+  "pg_stat_statements_collect" — no extra fields; captures one pg_stat_statements snapshot for the current database
 Use {{PARAM_NAME}} in scripts and pgbench_options — values come from set_params.`,
 			inputSchema: {
 				design_id: z.number().int(),
 				step_id: z.number().int().optional().describe('Omit to insert a new step'),
-				type: z.enum(['sql', 'pgbench', 'collect']),
+				type: z.enum(['sql', 'pgbench', 'collect', 'pg_stat_statements_reset', 'pg_stat_statements_collect']),
 				name: z.string(),
 				position: z.number().int().describe('Execution order, 0-based. Lower = runs earlier.'),
 				enabled: z.boolean().default(true),
@@ -504,7 +528,7 @@ Checks performed:
   - No enabled steps
   - No enabled pgbench step (nothing to benchmark)
   - pgbench step with no scripts defined
-  - collect step with duration_secs = 0
+  - wait step with duration_secs = 0
   - {{PARAM}} placeholders used in scripts/options but not defined in design params
   - Defined params with empty values
 Call this before run_design or export_plan to catch problems early.`,
@@ -563,7 +587,7 @@ Call this before run_design or export_plan to catch problems early.`,
 						}
 					}
 					if (step.type === 'collect' && (!step.duration_secs || step.duration_secs <= 0)) {
-						issues.push({ severity: 'warning', code: 'COLLECT_ZERO_DURATION', message: `collect step "${step.name}" has duration_secs = 0. It will use the design-level pre/post collect settings.` });
+						issues.push({ severity: 'warning', code: 'COLLECT_ZERO_DURATION', message: `wait step "${step.name}" has duration_secs = 0. It will use the design-level pre/post collect settings.` });
 					}
 				}
 			}
@@ -628,15 +652,16 @@ Call this before run_design or export_plan to catch problems early.`,
 		'run_design',
 		{
 			description: `Starts a benchmark run for a design. Returns run_id immediately — poll get_run(run_id) until status is "completed" or "failed".
-Executes all enabled steps in order: sql setup → pre-collect → pgbench → post-collect → sql teardown.
+Executes all enabled steps in order: sql setup → wait → pgbench → wait → sql teardown.
+Optional query-level steps can be inserted anywhere: pg_stat_statements_reset and pg_stat_statements_collect.
 This is a validation/test run. For production benchmarking, use export_plan + mybench-runner on EC2.
 
 Polling strategy: before polling, estimate total run duration from the design steps:
 - For each pgbench step: parse the -T <seconds> flag from pgbench_options (e.g. "-T 60" → 60s)
-- For each collect step: add duration_secs
+- For each wait step: add duration_secs
 - Sum all steps, then wait that long before the first get_run call
 - If still "running", poll every ~30s thereafter
-Example: pgbench -T 120 + two 15s collect steps → wait ~150s before first poll.`,
+Example: pgbench -T 120 + two 15s wait steps → wait ~150s before first poll.`,
 			inputSchema: {
 				design_id: z.number().int(),
 				profile_id: z.number().int().optional().describe('Optional profile ID to apply param overrides'),
@@ -730,6 +755,21 @@ Use this after validating the plan with run_design.`,
 					try { cols = (db.prepare(`PRAGMA table_info(${snapTable})`).all() as { name: string }[]).map(r => r.name).filter(n => !EXCLUDED_SNAP_COLS.has(n)); } catch { /* not yet created */ }
 					enabledSnapTables.push({ pg_view_name: table_name, snap_table_name: snapTable, columns: cols });
 				}
+			}
+			if (steps.some((step) => step.type === 'pg_stat_statements_collect')) {
+				let cols: string[] = [];
+				try {
+					cols = (db.prepare(`PRAGMA table_info(snap_pg_stat_statements)`).all() as { name: string }[])
+						.map((r) => r.name)
+						.filter((n) => !EXCLUDED_SNAP_COLS.has(n));
+				} catch {
+					// table not yet created
+				}
+				enabledSnapTables.push({
+					pg_view_name: 'pg_stat_statements',
+					snap_table_name: 'snap_pg_stat_statements',
+					columns: cols
+				});
 			}
 
 			return text({

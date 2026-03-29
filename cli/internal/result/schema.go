@@ -47,6 +47,7 @@ type RunParam struct {
 	Value string `json:"value"`
 }
 
-// SnapshotRow is a single row from a pg_stat_* view, keyed by column name.
-// The special keys _collected_at and _phase are always present.
+// SnapshotRow is a single exported snapshot row keyed by column name.
+// _collected_at is always present; time-series pg_stat_* rows also carry _phase,
+// while pg_stat_statements rows carry _step_id.
 type SnapshotRow map[string]any

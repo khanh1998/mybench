@@ -1,6 +1,11 @@
 import getDb from '$lib/server/db';
 import { createPool } from '$lib/server/pg-client';
-import { collectSnapshot, getEnabledTablesForRun } from '$lib/server/pg-stats';
+import {
+	collectPgStatStatementsSnapshot,
+	collectSnapshot,
+	getEnabledTablesForRun,
+	resetPgStatStatements
+} from '$lib/server/pg-stats';
 import { runPgbench, runSqlStep, type SqlStepOptions } from '$lib/server/pgbench';
 import { createRun, completeRun, setPool, setSnapshotTimer, setActivePhase } from '$lib/server/run-manager';
 import { substituteParams } from '$lib/server/params';
@@ -151,6 +156,10 @@ export function startRun(designId: number, opts: StartRunOptions = {}): number {
 						else if (!stderr.endsWith('[truncated]\n')) stderr += '[truncated]\n';
 					}
 				};
+				const logStepLine = (line: string, stream: 'stdout' | 'stderr' = 'stdout') => {
+					activeRun.emitter.emit('line', line);
+					onLine(line, stream);
+				};
 
 				if (step.type === 'collect') {
 					const phase = seenPgbench ? 'post' : 'pre';
@@ -169,6 +178,24 @@ export function startRun(designId: number, opts: StartRunOptions = {}): number {
 						activeRun.emitter.emit('phase', phaseDone);
 					} else {
 						activeRun.emitter.emit('line', durationSecs <= 0 ? '[snapshot] Duration is 0, skipping.' : '[snapshot] No tables enabled, skipping.');
+					}
+					exitCode = 0;
+				} else if (step.type === 'pg_stat_statements_reset') {
+					logStepLine('[pg_stat_statements] Resetting query stats...');
+					const result = await resetPgStatStatements(pool);
+					if (result.warning) {
+						logStepLine(`[warning] ${result.warning}`, 'stderr');
+					} else {
+						logStepLine('[pg_stat_statements] Reset complete.');
+					}
+					exitCode = 0;
+				} else if (step.type === 'pg_stat_statements_collect') {
+					logStepLine('[pg_stat_statements] Collecting query stats snapshot...');
+					const result = await collectPgStatStatementsSnapshot(pool, runId, step.id);
+					if (result.warning) {
+						logStepLine(`[warning] ${result.warning}`, 'stderr');
+					} else {
+						logStepLine(`[pg_stat_statements] Stored ${result.rowCount} row(s) for the current database.`);
 					}
 					exitCode = 0;
 				} else if (step.type === 'pgbench') {

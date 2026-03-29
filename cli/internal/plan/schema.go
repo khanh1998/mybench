@@ -55,7 +55,7 @@ type Step struct {
 	ID              int             `json:"id"`
 	Position        int             `json:"position"`
 	Name            string          `json:"name"`
-	Type            string          `json:"type"` // "sql", "pgbench", "collect"
+	Type            string          `json:"type"` // "sql", "pgbench", "collect", "pg_stat_statements_reset", "pg_stat_statements_collect"
 	Enabled         bool            `json:"enabled"`
 	Script          string          `json:"script,omitempty"`
 	NoTransaction   bool            `json:"no_transaction,omitempty"`

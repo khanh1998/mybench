@@ -71,6 +71,8 @@
   :global(.badge-sql) { background: #e8f4fd; color: #0066cc; }
   :global(.badge-pgbench) { background: #fef3e8; color: #cc6600; }
   :global(.badge-collect) { background: #f0e8ff; color: #6600cc; }
+  :global(.badge-pg_stat_statements_reset) { background: #e8f7f1; color: #0b6b50; }
+  :global(.badge-pg_stat_statements_collect) { background: #fff1e8; color: #9a4d00; }
   :global(.badge-running) { background: #fff3cd; color: #856404; }
   :global(.badge-completed) { background: #d4edda; color: #155724; }
   :global(.badge-failed) { background: #f8d7da; color: #721c24; }

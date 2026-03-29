@@ -1,5 +1,6 @@
 import pg from 'pg';
 import getDb from './db';
+import { getPgStatStatementsSqliteType } from './pg-stat-statements-schema';
 
 // Mapping from pg_stat view names to our snap_ table names
 export const SNAP_TABLE_MAP: Record<string, string> = {
@@ -24,6 +25,28 @@ export const SNAP_TABLE_MAP: Record<string, string> = {
 };
 
 export const ALL_SNAP_TABLES = Object.values(SNAP_TABLE_MAP);
+
+function quoteIdentifier(identifier: string): string {
+	return `"${identifier.replace(/"/g, '""')}"`;
+}
+
+async function getPgStatStatementsSchema(pool: pg.Pool): Promise<string | null> {
+	const result = await pool.query<{
+		schema_name: string;
+	}>(
+		`SELECT n.nspname AS schema_name
+		FROM pg_extension e
+		JOIN pg_namespace n ON n.oid = e.extnamespace
+		WHERE e.extname = 'pg_stat_statements'
+		LIMIT 1`
+	);
+
+	if (result.rows.length === 0) {
+		return null;
+	}
+
+	return result.rows[0].schema_name;
+}
 
 export async function collectSnapshot(
 	pgPool: pg.Pool,
@@ -88,6 +111,86 @@ export async function collectSnapshot(
 		} catch (_err) {
 			// Skip tables that fail (permissions, etc.)
 		}
+	}
+}
+
+export async function resetPgStatStatements(pgPool: pg.Pool): Promise<{ warning?: string }> {
+	try {
+		const schemaName = await getPgStatStatementsSchema(pgPool);
+		if (!schemaName) {
+			return { warning: 'pg_stat_statements is not installed on this PostgreSQL server. Skipping reset.' };
+		}
+
+		const resetFn = `${quoteIdentifier(schemaName)}.${quoteIdentifier('pg_stat_statements_reset')}`;
+		await pgPool.query(`SELECT ${resetFn}()`);
+		return {};
+	} catch (err: unknown) {
+		const message = err instanceof Error ? err.message : String(err);
+		return { warning: `Could not reset pg_stat_statements: ${message}` };
+	}
+}
+
+export async function collectPgStatStatementsSnapshot(
+	pgPool: pg.Pool,
+	runId: number,
+	stepId: number
+): Promise<{ rowCount: number; warning?: string }> {
+	try {
+		const schemaName = await getPgStatStatementsSchema(pgPool);
+		if (!schemaName) {
+			return { rowCount: 0, warning: 'pg_stat_statements is not installed on this PostgreSQL server. Skipping collection.' };
+		}
+		const relation = `${quoteIdentifier(schemaName)}.${quoteIdentifier('pg_stat_statements')}`;
+
+		const result = await pgPool.query(
+			`SELECT *
+			FROM ${relation}
+			WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())`
+		);
+		if (result.rows.length === 0) {
+			return { rowCount: 0 };
+		}
+
+		const db = getDb();
+		const collectedAt = new Date().toISOString();
+		const cols = result.fields.map((f: pg.FieldDef) => f.name);
+		const existingCols = new Set(
+			(db.prepare(`PRAGMA table_info(snap_pg_stat_statements)`).all() as { name: string }[]).map((r) => r.name)
+		);
+		for (const col of cols) {
+			if (!existingCols.has(col)) {
+				db.exec(`ALTER TABLE snap_pg_stat_statements ADD COLUMN ${col} ${getPgStatStatementsSqliteType(col)}`);
+			}
+		}
+
+		const insertCols = ['_run_id', '_step_id', '_collected_at', ...cols];
+		const placeholders = insertCols.map((_, i) => `@p${i}`).join(', ');
+		const stmt = db.prepare(
+			`INSERT INTO snap_pg_stat_statements (${insertCols.join(', ')}) VALUES (${placeholders})`
+		);
+		const insertMany = db.transaction((rows: Record<string, unknown>[]) => {
+			for (const row of rows) {
+				const params: Record<string, unknown> = {
+					p0: runId,
+					p1: stepId,
+					p2: collectedAt
+				};
+				cols.forEach((col: string, i: number) => {
+					const val = row[col];
+					params[`p${i + 3}`] =
+						val instanceof Date ? val.toISOString() :
+						typeof val === 'boolean' ? (val ? 1 : 0) :
+						val ?? null;
+				});
+				stmt.run(params);
+			}
+		});
+
+		insertMany(result.rows);
+		return { rowCount: result.rows.length };
+	} catch (err: unknown) {
+		const message = err instanceof Error ? err.message : String(err);
+		return { rowCount: 0, warning: `Could not read pg_stat_statements: ${message}` };
 	}
 }
 

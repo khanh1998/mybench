@@ -1,0 +1,62 @@
+export type SqliteColumnType = 'INTEGER' | 'REAL' | 'TEXT';
+
+export const PG_STAT_STATEMENTS_SQLITE_COLUMNS: Array<[string, SqliteColumnType]> = [
+	['userid', 'INTEGER'],
+	['dbid', 'INTEGER'],
+	['toplevel', 'INTEGER'],
+	['queryid', 'INTEGER'],
+	['query', 'TEXT'],
+	['plans', 'INTEGER'],
+	['total_plan_time', 'REAL'],
+	['min_plan_time', 'REAL'],
+	['max_plan_time', 'REAL'],
+	['mean_plan_time', 'REAL'],
+	['stddev_plan_time', 'REAL'],
+	['calls', 'INTEGER'],
+	['total_exec_time', 'REAL'],
+	['min_exec_time', 'REAL'],
+	['max_exec_time', 'REAL'],
+	['mean_exec_time', 'REAL'],
+	['stddev_exec_time', 'REAL'],
+	['rows', 'INTEGER'],
+	['shared_blks_hit', 'INTEGER'],
+	['shared_blks_read', 'INTEGER'],
+	['shared_blks_dirtied', 'INTEGER'],
+	['shared_blks_written', 'INTEGER'],
+	['local_blks_hit', 'INTEGER'],
+	['local_blks_read', 'INTEGER'],
+	['local_blks_dirtied', 'INTEGER'],
+	['local_blks_written', 'INTEGER'],
+	['temp_blks_read', 'INTEGER'],
+	['temp_blks_written', 'INTEGER'],
+	['shared_blk_read_time', 'REAL'],
+	['shared_blk_write_time', 'REAL'],
+	['local_blk_read_time', 'REAL'],
+	['local_blk_write_time', 'REAL'],
+	['temp_blk_read_time', 'REAL'],
+	['temp_blk_write_time', 'REAL'],
+	['wal_records', 'INTEGER'],
+	['wal_fpi', 'INTEGER'],
+	['wal_bytes', 'REAL'],
+	['wal_buffers_full', 'INTEGER'],
+	['jit_functions', 'INTEGER'],
+	['jit_generation_time', 'REAL'],
+	['jit_inlining_count', 'INTEGER'],
+	['jit_inlining_time', 'REAL'],
+	['jit_optimization_count', 'INTEGER'],
+	['jit_optimization_time', 'REAL'],
+	['jit_emission_count', 'INTEGER'],
+	['jit_emission_time', 'REAL'],
+	['jit_deform_count', 'INTEGER'],
+	['jit_deform_time', 'REAL'],
+	['parallel_workers_to_launch', 'INTEGER'],
+	['parallel_workers_launched', 'INTEGER'],
+	['stats_since', 'TEXT'],
+	['minmax_stats_since', 'TEXT']
+];
+
+const PG_STAT_STATEMENTS_SQLITE_TYPE_MAP = new Map(PG_STAT_STATEMENTS_SQLITE_COLUMNS);
+
+export function getPgStatStatementsSqliteType(columnName: string): SqliteColumnType {
+	return PG_STAT_STATEMENTS_SQLITE_TYPE_MAP.get(columnName) ?? 'TEXT';
+}

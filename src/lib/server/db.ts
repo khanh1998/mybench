@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import { existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
+import { PG_STAT_STATEMENTS_SQLITE_COLUMNS } from './pg-stat-statements-schema';
 
 const DATA_DIR = process.env.DATA_DIR ?? join(process.cwd(), 'data');
 if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
@@ -8,6 +9,22 @@ if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
 const DB_PATH = join(DATA_DIR, 'mybench.db');
 
 let _db: Database.Database | null = null;
+
+function createSnapPgStatStatementsTableSql(): string {
+	const dataColumns = PG_STAT_STATEMENTS_SQLITE_COLUMNS.map(
+		([name, type]) => `${name} ${type}`
+	).join(',\n      ');
+
+	return `
+    CREATE TABLE snap_pg_stat_statements (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _step_id INTEGER,
+      _collected_at TEXT NOT NULL,
+      ${dataColumns}
+    )
+  `;
+}
 
 export function getDb(): Database.Database {
 	if (!_db) {
@@ -620,6 +637,16 @@ function migrate(db: Database.Database) {
 	const stepCols = (db.prepare(`PRAGMA table_info(design_steps)`).all() as { name: string }[]).map(c => c.name);
 	if (!stepCols.includes('duration_secs')) db.exec(`ALTER TABLE design_steps ADD COLUMN duration_secs INTEGER NOT NULL DEFAULT 0`);
 	if (!stepCols.includes('no_transaction')) db.exec(`ALTER TABLE design_steps ADD COLUMN no_transaction INTEGER NOT NULL DEFAULT 0`);
+
+	db.exec(createSnapPgStatStatementsTableSql().replace('CREATE TABLE ', 'CREATE TABLE IF NOT EXISTS '));
+	const pgStatStatementsMigrated = db.prepare(`SELECT id FROM schema_migrations WHERE id = 'snap_pg_stat_statements_v2'`).get();
+	if (!pgStatStatementsMigrated) {
+		db.exec(`
+      DROP TABLE IF EXISTS snap_pg_stat_statements;
+    `);
+		db.exec(createSnapPgStatStatementsTableSql());
+		db.prepare(`INSERT INTO schema_migrations (id) VALUES ('snap_pg_stat_statements_v2')`).run();
+	}
 
 	const designCols = (db.prepare(`PRAGMA table_info(designs)`).all() as { name: string }[]).map(c => c.name);
 	if (!designCols.includes('pre_collect_secs')) db.exec(`ALTER TABLE designs ADD COLUMN pre_collect_secs INTEGER NOT NULL DEFAULT 0`);

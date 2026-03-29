@@ -112,6 +112,32 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 				fmt.Fprintf(os.Stderr, "warning: collect step %q: %v\n", step.Name, err)
 			}
 
+		case "pg_stat_statements_reset":
+			if opts.Progress {
+				fmt.Printf("[pg_stat_statements reset] %s\n", step.Name)
+			}
+			stepRes.Command = "pg_stat_statements_reset()"
+			msg, err := runPgStatStatementsResetStep(ctx, opts, pool)
+			if err != nil {
+				stepRes.Log = err.Error()
+				fmt.Fprintf(os.Stderr, "warning: pg_stat_statements reset step %q: %v\n", step.Name, err)
+			} else {
+				stepRes.Log = msg
+			}
+
+		case "pg_stat_statements_collect":
+			if opts.Progress {
+				fmt.Printf("[pg_stat_statements collect] %s\n", step.Name)
+			}
+			stepRes.Command = fmt.Sprintf("collect pg_stat_statements for database=%s", opts.Plan.Server.Database)
+			msg, err := runPgStatStatementsCollectStep(ctx, opts, step, pool, res.Snapshots)
+			if err != nil {
+				stepRes.Log = err.Error()
+				fmt.Fprintf(os.Stderr, "warning: pg_stat_statements collect step %q: %v\n", step.Name, err)
+			} else {
+				stepRes.Log = msg
+			}
+
 		case "pgbench":
 			if opts.Progress {
 				fmt.Printf("[pgbench] %s\n", step.Name)

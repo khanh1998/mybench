@@ -91,6 +91,15 @@ function createTestDb() {
       _phase TEXT,
       datid INTEGER, datname TEXT, xact_commit INTEGER
     );
+    CREATE TABLE snap_pg_stat_statements (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER,
+      _step_id INTEGER,
+      _collected_at TEXT NOT NULL,
+      queryid TEXT,
+      calls TEXT,
+      query TEXT
+    );
   `);
 	return db;
 }
@@ -99,7 +108,7 @@ function createTestDb() {
 // Handler logic extracted (mirrors +server.ts)
 // ---------------------------------------------------------------------------
 
-const EXCLUDED_SNAP_COLS = new Set(['_id', '_run_id', '_collected_at', '_phase', '_is_baseline']);
+const EXCLUDED_SNAP_COLS = new Set(['_id', '_run_id', '_collected_at', '_phase', '_is_baseline', '_step_id']);
 
 const SNAP_TABLE_MAP: Record<string, string> = {
 	pg_stat_database: 'snap_pg_stat_database',
@@ -182,6 +191,18 @@ function exportPlan(db: Database.Database, designId: number) {
 			enabledSnapTables.push({ pg_view_name: pgViewName, snap_table_name: snapTableName, columns });
 		}
 	}
+	if (steps.some(s => s.type === 'pg_stat_statements_collect')) {
+		let columns: string[] = [];
+		try {
+			const pragmaRows = db.prepare(`PRAGMA table_info(snap_pg_stat_statements)`).all() as { name: string }[];
+			if (pragmaRows.length > 0) {
+				columns = pragmaRows.map(r => r.name).filter(name => !EXCLUDED_SNAP_COLS.has(name));
+			}
+		} catch {
+			// table doesn't exist
+		}
+		enabledSnapTables.push({ pg_view_name: 'pg_stat_statements', snap_table_name: 'snap_pg_stat_statements', columns });
+	}
 
 	return {
 		version: 1,
@@ -211,6 +232,7 @@ function seedDb(db: Database.Database) {
 	db.prepare(`INSERT INTO design_steps (id, design_id, position, name, type, script, pgbench_options, enabled, duration_secs, no_transaction) VALUES (1, 1, 0, 'Setup', 'sql', 'CREATE TABLE t (id int);', '', 1, 0, 0)`).run();
 	db.prepare(`INSERT INTO design_steps (id, design_id, position, name, type, script, pgbench_options, enabled, duration_secs, no_transaction) VALUES (2, 1, 1, 'Disabled', 'sql', 'DROP TABLE t;', '', 0, 0, 0)`).run();
 	db.prepare(`INSERT INTO design_steps (id, design_id, position, name, type, script, pgbench_options, enabled, duration_secs, no_transaction) VALUES (3, 1, 2, 'Bench', 'pgbench', '', '-c 10 -T 30', 1, 0, 0)`).run();
+	db.prepare(`INSERT INTO design_steps (id, design_id, position, name, type, script, pgbench_options, enabled, duration_secs, no_transaction) VALUES (4, 1, 3, 'Collect statements', 'pg_stat_statements_collect', '', '', 1, 0, 0)`).run();
 	db.prepare(`INSERT INTO pgbench_scripts (id, step_id, position, name, weight, script) VALUES (1, 3, 0, 'main', 100, 'SELECT 1;')`).run();
 	db.prepare(`INSERT INTO design_params (id, design_id, position, name, value) VALUES (1, 1, 0, 'scale', '10')`).run();
 	db.prepare(`INSERT INTO pg_stat_table_selections (server_id, table_name, enabled) VALUES (1, 'pg_stat_database', 1)`).run();
@@ -284,6 +306,17 @@ describe('Export endpoint logic', () => {
 		// Should contain actual data columns
 		expect(cols).toContain('datname');
 		expect(cols).toContain('xact_commit');
+	});
+
+	it('includes snap_pg_stat_statements when the design has a collect step for it', () => {
+		const plan = exportPlan(db, 1);
+		const snapTable = plan!.enabled_snap_tables.find(t => t.pg_view_name === 'pg_stat_statements');
+		expect(snapTable).toBeDefined();
+		expect(snapTable!.snap_table_name).toBe('snap_pg_stat_statements');
+		expect(snapTable!.columns).not.toContain('_step_id');
+		expect(snapTable!.columns).toContain('queryid');
+		expect(snapTable!.columns).toContain('calls');
+		expect(snapTable!.columns).toContain('query');
 	});
 
 	it('returns null for a non-existent design ID', () => {

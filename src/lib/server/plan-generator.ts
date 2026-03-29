@@ -2,7 +2,7 @@ import getDb from '$lib/server/db';
 import { SNAP_TABLE_MAP } from '$lib/server/pg-stats';
 import type { PgbenchScript, DesignParam, DesignStep, PgServer } from '$lib/types';
 
-const EXCLUDED_SNAP_COLS = new Set(['_id', '_run_id', '_collected_at', '_phase', '_is_baseline']);
+const EXCLUDED_SNAP_COLS = new Set(['_id', '_run_id', '_collected_at', '_phase', '_is_baseline', '_step_id']);
 
 export interface PlanRunSettingsOverride {
 	snapshot_interval_seconds?: number;
@@ -132,6 +132,24 @@ export function generatePlan(designId: number, overrides: PlanRunSettingsOverrid
 				columns
 			});
 		}
+	}
+
+	if (steps.some((step) => step.type === 'pg_stat_statements_collect')) {
+		let columns: string[] = [];
+		try {
+			const pragmaRows = db.prepare(`PRAGMA table_info(snap_pg_stat_statements)`).all() as { name: string }[];
+			if (pragmaRows.length > 0) {
+				columns = pragmaRows.map((r) => r.name).filter((name) => !EXCLUDED_SNAP_COLS.has(name));
+			}
+		} catch {
+			// table doesn't exist yet
+		}
+
+		enabledSnapTables.push({
+			pg_view_name: 'pg_stat_statements',
+			snap_table_name: 'snap_pg_stat_statements',
+			columns
+		});
 	}
 
 	return {

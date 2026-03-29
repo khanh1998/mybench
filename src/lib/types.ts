@@ -1,3 +1,10 @@
+export type DesignStepType =
+	| 'sql'
+	| 'pgbench'
+	| 'collect'
+	| 'pg_stat_statements_reset'
+	| 'pg_stat_statements_collect';
+
 export interface PgServer {
 	id: number;
 	name: string;
@@ -51,7 +58,7 @@ export interface DesignStep {
 	design_id: number;
 	position: number;
 	name: string;
-	type: 'sql' | 'pgbench' | 'collect';
+	type: DesignStepType;
 	script: string;
 	pgbench_options: string;
 	duration_secs: number;
@@ -94,7 +101,7 @@ export interface RunStepResult {
 	step_id: number;
 	position: number;
 	name: string;
-	type: 'sql' | 'pgbench' | 'collect';
+	type: DesignStepType;
 	status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
 	stdout: string;
 	stderr: string;

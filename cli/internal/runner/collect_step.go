@@ -22,6 +22,10 @@ func collectOnce(ctx context.Context, pool *pgxpool.Pool, snapTables []plan.Snap
 	collectedAt := time.Now().UTC().Format(time.RFC3339)
 
 	for _, spec := range snapTables {
+		if spec.PgViewName == "pg_stat_statements" {
+			// pg_stat_statements is collected only by its explicit step type.
+			continue
+		}
 		if len(spec.Columns) == 0 {
 			continue
 		}

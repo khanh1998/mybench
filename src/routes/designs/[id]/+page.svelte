@@ -4,6 +4,7 @@
   import { goto } from '$app/navigation';
   import CodeEditor from '$lib/CodeEditor.svelte';
   import { validateDesignParams, validateScriptWeights, type ValidationError, type WeightError } from '$lib/params';
+  import type { DesignStepType } from '$lib/types';
   import type { PageData } from './$types';
 
   let { data }: { data: PageData } = $props();
@@ -30,7 +31,7 @@
     design_id: number;
     position: number;
     name: string;
-    type: 'sql' | 'pgbench' | 'collect';
+    type: DesignStepType;
     script: string;
     pgbench_options: string;
     duration_secs: number;
@@ -67,6 +68,14 @@
   let importFile = $state<File | null>(null);
   let importError = $state('');
   let importing = $state(false);
+
+  const STEP_TYPE_OPTIONS: { value: DesignStepType; label: string }[] = [
+    { value: 'sql', label: 'SQL' },
+    { value: 'pgbench', label: 'pgbench' },
+    { value: 'collect', label: 'wait' },
+    { value: 'pg_stat_statements_reset', label: 'reset pg_stat_statements' },
+    { value: 'pg_stat_statements_collect', label: 'collect pg_stat_statements' }
+  ];
 
   // Run history panel
   let runsCollapsed = $state(false);
@@ -168,6 +177,10 @@
     design ? validateScriptWeights(design) : []
   );
   const isValid = $derived(validationErrors.length === 0 && weightErrors.length === 0);
+
+  function stepTypeLabel(type: DesignStepType): string {
+    return STEP_TYPE_OPTIONS.find((option) => option.value === type)?.label ?? type;
+  }
 
   async function save() {
     if (!design) return;
@@ -595,7 +608,7 @@
         >
           <div class="step-item-main">
             <span class="step-item-name">{step.name}</span>
-            <span class="badge badge-{step.type}">{step.type}</span>
+            <span class="badge badge-{step.type}">{stepTypeLabel(step.type)}</span>
           </div>
           <div class="step-item-controls" role="group">
             <input
@@ -688,9 +701,9 @@
           placeholder="Step name"
         />
         <select bind:value={selectedStep.type} class="type-select">
-          <option value="sql">SQL</option>
-          <option value="pgbench">pgbench</option>
-          <option value="collect">collect</option>
+          {#each STEP_TYPE_OPTIONS as option}
+            <option value={option.value}>{option.label}</option>
+          {/each}
         </select>
         {#if selectedStep.type === 'pgbench'}
           <input
@@ -701,7 +714,7 @@
           />
         {:else if selectedStep.type === 'collect'}
           <label class="collect-duration-label">
-            Duration
+            Wait
             <input type="number" bind:value={selectedStep.duration_secs} min="0" max="3600" class="collect-duration-input" />
             s
           </label>
@@ -720,9 +733,26 @@
         <div class="collect-info">
           <div class="collect-icon">📊</div>
           <div class="collect-desc">
-            Collects pg_stat_* snapshots for <strong>{selectedStep.duration_secs}s</strong>.
-            <br>Steps before pgbench → <span class="phase-pill pre">pre</span> phase.
-            Steps after pgbench → <span class="phase-pill post">post</span> phase.
+            Waits for <strong>{selectedStep.duration_secs}s</strong> while collecting periodic pg_stat_* snapshots.
+            <br>Place it before pgbench for a baseline window, or after pgbench for a cooldown window.
+          </div>
+        </div>
+      {:else if selectedStep.type === 'pg_stat_statements_reset'}
+        <div class="collect-info">
+          <div class="collect-icon">↺</div>
+          <div class="collect-desc">
+            Resets <strong>pg_stat_statements</strong> before a benchmark.
+            <br>Use this right before a pgbench step when you want a clean query-level baseline.
+            <br>If the extension is unavailable, the run logs a warning and continues.
+          </div>
+        </div>
+      {:else if selectedStep.type === 'pg_stat_statements_collect'}
+        <div class="collect-info">
+          <div class="collect-icon">Σ</div>
+          <div class="collect-desc">
+            Captures a single <strong>pg_stat_statements</strong> snapshot for the current benchmark database.
+            <br>This is a one-time collection step, not a time-series snapshot.
+            <br>Place it after pgbench to capture the workload you just ran.
           </div>
         </div>
       {:else if selectedStep.type === 'pgbench'}
@@ -909,6 +939,8 @@
   .phase.sql  { background: #f5f5f5; color: #555; }
   .phase.post { background: #fff8e8; color: #885500; }
   .phase.collect { background: #f0e8ff; color: #6600cc; }
+  .phase.pg_stat_statements_reset { background: #e8f7f1; color: #0b6b50; }
+  .phase.pg_stat_statements_collect { background: #fff1e8; color: #9a4d00; }
 
   /* Run modal steps summary */
   .run-steps-summary { border: 1px solid #eee; border-radius: 6px; padding: 8px 10px; margin-bottom: 14px; background: #fafafa; }

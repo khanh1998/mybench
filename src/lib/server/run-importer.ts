@@ -1,4 +1,5 @@
 import getDb from '$lib/server/db';
+import { getPgStatStatementsSqliteType } from '$lib/server/pg-stat-statements-schema';
 
 export interface RunnerResultRun {
 	status: string;
@@ -33,6 +34,21 @@ export interface RunnerResult {
 	run: RunnerResultRun;
 	steps?: RunnerResultStep[];
 	snapshots?: Record<string, Record<string, unknown>[]>;
+}
+
+function normalizeSqliteValue(value: unknown): unknown {
+	if (value instanceof Date) return value.toISOString();
+	if (typeof value === 'boolean') return value ? 1 : 0;
+	if (
+		typeof value === 'number' ||
+		typeof value === 'string' ||
+		typeof value === 'bigint' ||
+		value === null ||
+		value === undefined
+	) {
+		return value ?? null;
+	}
+	return JSON.stringify(value);
 }
 
 /**
@@ -104,26 +120,35 @@ export function importResultIntoRun(runId: number, result: RunnerResult): void {
 
 			db.exec(`CREATE TABLE IF NOT EXISTS ${snapTableName} (
 				_id INTEGER PRIMARY KEY AUTOINCREMENT,
-				_run_id INTEGER,
-				_collected_at TEXT,
-				_phase TEXT
+				_run_id INTEGER
 			)`);
 
 			const existingCols = new Set(
 				(db.prepare(`PRAGMA table_info(${snapTableName})`).all() as { name: string }[]).map(r => r.name)
 			);
 
-			const metaCols = new Set(['_collected_at', '_phase', '_is_baseline']);
+			const metaCols = new Set(['_collected_at', '_phase', '_is_baseline', '_step_id']);
 			const firstRow = rows[0];
+			const rowMetaCols = ['_collected_at', ...Object.keys(firstRow).filter(k => k !== '_collected_at' && metaCols.has(k))];
 			const dataCols = Object.keys(firstRow).filter(k => !metaCols.has(k));
 
-			for (const col of dataCols) {
+			for (const col of rowMetaCols) {
 				if (!existingCols.has(col)) {
-					db.exec(`ALTER TABLE ${snapTableName} ADD COLUMN ${col} TEXT`);
+					const columnType = col === '_step_id' ? 'INTEGER' : 'TEXT';
+					db.exec(`ALTER TABLE ${snapTableName} ADD COLUMN ${col} ${columnType}`);
 				}
 			}
 
-			const insertCols = ['_run_id', '_collected_at', '_phase', ...dataCols];
+			for (const col of dataCols) {
+				if (!existingCols.has(col)) {
+					const columnType = snapTableName === 'snap_pg_stat_statements'
+						? getPgStatStatementsSqliteType(col)
+						: 'TEXT';
+					db.exec(`ALTER TABLE ${snapTableName} ADD COLUMN ${col} ${columnType}`);
+				}
+			}
+
+			const insertCols = ['_run_id', ...rowMetaCols, ...dataCols];
 			const placeholders = insertCols.map((_, i) => `@p${i}`).join(', ');
 			const stmt = db.prepare(
 				`INSERT INTO ${snapTableName} (${insertCols.join(', ')}) VALUES (${placeholders})`
@@ -131,13 +156,16 @@ export function importResultIntoRun(runId: number, result: RunnerResult): void {
 
 			const insertMany = db.transaction((rowsToInsert: Record<string, unknown>[]) => {
 				for (const row of rowsToInsert) {
-					const params: Record<string, unknown> = {
-						p0: runId,
-						p1: row['_collected_at'] ?? new Date().toISOString(),
-						p2: row['_phase'] ?? 'bench'
-					};
+					const params: Record<string, unknown> = { p0: runId };
+					rowMetaCols.forEach((col, i) => {
+						if (col === '_collected_at') {
+							params[`p${i + 1}`] = normalizeSqliteValue(row[col] ?? new Date().toISOString());
+						} else {
+							params[`p${i + 1}`] = normalizeSqliteValue(row[col]);
+						}
+					});
 					dataCols.forEach((col, i) => {
-						params[`p${i + 3}`] = row[col] ?? null;
+						params[`p${i + rowMetaCols.length + 1}`] = normalizeSqliteValue(row[col]);
 					});
 					stmt.run(params);
 				}
