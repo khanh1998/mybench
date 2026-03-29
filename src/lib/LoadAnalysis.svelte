@@ -20,6 +20,7 @@
   interface AasRow     { _collected_at: string; wait_event_type: string; wait_event: string; n: number; }
   interface SessionRow { _collected_at: string; state: string; n: number; }
   interface WaitRow    { wait_event_type: string; wait_event: string; occurrences: number; }
+  // queryid stored as CAST(queryid AS TEXT) to avoid JS float64 precision loss on large int64 values
   interface SqlRow     { queryid: string; query_short: string; delta_calls: number; delta_exec_time: number; cache_hit_pct: number | null; delta_blks_read: number; snapshot_count: number; }
   interface LockRow    { _collected_at: string; blocked_pid: number; blocked_query: string; blocked_user: string; blocking_pid: number; blocking_query: string; blocking_user: string; locktype: string; held_mode: string; requested_mode: string; }
   interface TotalAasRow { _collected_at: string; total_active: number; }
@@ -144,7 +145,7 @@
       // When only 1 snapshot exists (single collect step), use absolute MAX values.
       // When 2+ snapshots exist, use delta (MAX-MIN) to capture activity during the run.
       const sqlRes = await queryApi(
-        `SELECT queryid,
+        `SELECT CAST(queryid AS TEXT) as queryid,
                 SUBSTR(query,1,120) as query_short,
                 CASE WHEN COUNT(*) > 1
                   THEN MAX(CAST(calls AS REAL)) - MIN(CAST(calls AS REAL))
@@ -335,7 +336,7 @@
   interface FlameItem { wtype: string; wevent: string; seconds: number; color: string; }
   interface ActiveFlame {
     runId: number; queryId: string; queryShort: string;
-    totalExecMs: number; items: FlameItem[]; noData: boolean;
+    totalExecMs: number; items: FlameItem[]; noData: boolean; fallback: boolean;
   }
   let activeFlame = $state<ActiveFlame | null>(null);
   let flameLoading = $state(false);
@@ -344,14 +345,12 @@
     flameLoading = true;
     activeFlame = null;
 
-    // Fetch interval from benchmark_runs
-    const intRes = await queryApi(
-      `SELECT snapshot_interval_seconds FROM benchmark_runs WHERE id = ?`, [run.id]);
-    const intervalSecs = Number((intRes.rows[0] as Record<string, unknown>)?.snapshot_interval_seconds ?? 30);
-
-    // Fetch per-query wait attribution from activity snapshots
+    const totalExecMs = Number(row.delta_exec_time ?? 0);
     const p = showPhaseFilter ? localPhases : phases;
     const { clause, params: pParams } = phaseClause(p);
+
+    // queryid is already a TEXT string from the SQL query (CAST(queryid AS TEXT))
+    // so no float64 precision loss. Compare as text in SQLite.
     const res = await queryApi(
       `SELECT COALESCE(wait_event_type,'CPU') as wtype,
               COALESCE(wait_event,'running') as wevent,
@@ -359,13 +358,28 @@
        FROM snap_pg_stat_activity
        WHERE _run_id = ? AND ${clause}
          AND state = 'active'
-         AND CAST(query_id AS TEXT) = CAST(? AS TEXT)
+         AND CAST(query_id AS TEXT) = ?
        GROUP BY 1,2 ORDER BY 3 DESC`,
       [run.id, ...pParams, row.queryid]);
 
-    const rawItems = res.rows as { wtype: string; wevent: string; samples: number }[];
+    let rawItems = res.rows as { wtype: string; wevent: string; samples: number }[];
+    let fallback = false;
+
+    // If per-query match found nothing, fall back to run-wide wait distribution
+    if (rawItems.length === 0) {
+      fallback = true;
+      const fbRes = await queryApi(
+        `SELECT COALESCE(wait_event_type,'CPU') as wtype,
+                COALESCE(wait_event,'running') as wevent,
+                COUNT(*) as samples
+         FROM snap_pg_stat_activity
+         WHERE _run_id = ? AND ${clause} AND state = 'active'
+         GROUP BY 1,2 ORDER BY 3 DESC`,
+        [run.id, ...pParams]);
+      rawItems = fbRes.rows as { wtype: string; wevent: string; samples: number }[];
+    }
+
     const totalSamples = rawItems.reduce((s, r) => s + Number(r.samples), 0);
-    const totalExecMs = Number(row.delta_exec_time ?? 0);
 
     // Apportion exec time proportionally across wait categories
     const items: FlameItem[] = rawItems.map(r => ({
@@ -373,7 +387,7 @@
       wevent: r.wevent,
       seconds: totalSamples > 0
         ? (Number(r.samples) / totalSamples) * totalExecMs / 1000
-        : Number(r.samples) * intervalSecs,
+        : 0,
       color: WAIT_COLORS[r.wtype] ?? WAIT_COLORS.Other
     })).sort((a, b) => b.seconds - a.seconds);
 
@@ -383,7 +397,8 @@
       queryShort: row.query_short,
       totalExecMs,
       items,
-      noData: items.length === 0
+      noData: items.length === 0,
+      fallback
     };
     flameLoading = false;
   }
@@ -668,10 +683,11 @@
         <div class="flame-query" title={activeFlame.queryShort}>{activeFlame.queryShort}</div>
 
         {#if activeFlame.noData}
-          <div class="flame-nodata">No activity samples matched this query.<br>
-            <small>query_id matching requires PostgreSQL 14+ and pg_stat_activity.query_id.</small>
-          </div>
+          <div class="flame-nodata">No activity samples found for this run.</div>
         {:else}
+          {#if activeFlame.fallback}
+            <div class="flame-notice">⚠ Query not captured in activity snapshots — showing run-wide wait distribution instead.</div>
+          {/if}
           {@const total = flameTotalSeconds(activeFlame.items)}
           <!-- Stacked horizontal bar -->
           <div class="flame-bar-wrap">
@@ -692,8 +708,7 @@
             {/each}
           </div>
           <div class="flame-footer">
-            Total exec time: {fmtMs(activeFlame.totalExecMs)} &nbsp;·&nbsp;
-            Based on {activeFlame.items.reduce((s,i) => s, 0)} activity samples
+            Total exec time: {fmtMs(activeFlame.totalExecMs)}
           </div>
         {/if}
       {/if}
@@ -773,7 +788,7 @@
   .flame-query { font-family: monospace; font-size: 11px; color: #9ca3af; margin-bottom: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .flame-loading { font-size: 13px; color: #9ca3af; padding: 12px 0; text-align: center; }
   .flame-nodata { font-size: 12px; color: #9ca3af; padding: 12px 0; line-height: 1.6; }
-  .flame-nodata small { font-size: 11px; color: #6b7280; }
+  .flame-notice { font-size: 11px; color: #f59e0b; background: #2d2a1e; border: 1px solid #78500a; border-radius: 5px; padding: 6px 9px; margin-bottom: 12px; line-height: 1.5; }
 
   /* Horizontal stacked bar */
   .flame-bar-wrap { display: flex; height: 28px; border-radius: 5px; overflow: hidden; margin-bottom: 16px; gap: 1px; }
