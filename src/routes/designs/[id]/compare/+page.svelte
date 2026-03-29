@@ -3,6 +3,7 @@
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import LineChart from '$lib/LineChart.svelte';
+  import LoadAnalysis from '$lib/LoadAnalysis.svelte';
   import { fmtTs } from '$lib/utils';
   import CodeEditor from '$lib/CodeEditor.svelte';
   import type { PageData } from './$types';
@@ -55,6 +56,7 @@
   let metricValueCol: Record<number, string> = $state({});
   let metricTableFilter: Record<number, string[]> = $state({});
   let collapsedCategories: Record<string, boolean> = $state({});
+  let loadAnalysisOpen = $state(false);
   let runningMetricId = $state<number | null>(null);
   let includedPhases = $state<string[]>(['bench']);
 
@@ -553,6 +555,35 @@
       </tbody>
     </table>
   </div>
+</div>
+{/if}
+
+<!-- ── Load Analysis ─────────────────────────────────────────────────────────── -->
+{#if selectedRunIds.length >= 1}
+<div class="card" style="margin-bottom:12px">
+  <div class="row" style="cursor:pointer;align-items:center;gap:8px;margin-bottom:0"
+       onclick={() => loadAnalysisOpen = !loadAnalysisOpen}>
+    <h3 style="margin:0">Load Analysis</h3>
+    <span style="font-size:12px;color:#888;margin-left:4px">{loadAnalysisOpen ? '▲' : '▼'}</span>
+  </div>
+  {#if loadAnalysisOpen}
+    <div style="margin-top:16px">
+      <LoadAnalysis
+        runs={selectedRunIds.map((id, i) => {
+          const r = allRuns.find(x => x.id === id);
+          return {
+            id,
+            label: r?.name || `Run #${id}`,
+            color: COLORS[i % COLORS.length],
+            bench_started_at: r?.bench_started_at ?? null,
+            post_started_at: r?.post_started_at ?? null
+          };
+        })}
+        phases={includedPhases}
+        showPhaseFilter={false}
+      />
+    </div>
+  {/if}
 </div>
 {/if}
 

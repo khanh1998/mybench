@@ -4,6 +4,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { marked } from 'marked';
   import MarkdownEditor from '$lib/MarkdownEditor.svelte';
+  import LoadAnalysis from '$lib/LoadAnalysis.svelte';
   import type { PageData } from './$types';
   import { fmtTs, fmtTime } from '$lib/utils';
 
@@ -21,6 +22,7 @@
     id: number; status: string; tps: number|null; latency_avg_ms: number|null;
     latency_stddev_ms: number|null; transactions: number|null;
     started_at: string; finished_at: string|null;
+    bench_started_at: string|null; post_started_at: string|null;
     pre_collect_secs: number; post_collect_secs: number;
     is_imported?: number;
     name: string; notes: string; profile_name: string; run_params: string;
@@ -50,6 +52,7 @@
   let expandedStep = $state<number | null>(null);
   let scrollPending = false;
   let phases: PhaseState[] = $state([]);
+  let activeTab = $state<'overview' | 'load'>('overview');
   const phaseTimers = new Map<string, ReturnType<typeof setInterval>>();
 
   const pendingLines: string[] = [];
@@ -261,6 +264,15 @@
   {/if}
 </div>
 
+<div class="run-tabs">
+  <button class="tab-btn" class:active={activeTab === 'overview'} onclick={() => activeTab = 'overview'}>Overview</button>
+  <button class="tab-btn" class:active={activeTab === 'load'}
+    disabled={!done}
+    title={!done ? 'Available after run completes' : ''}
+    onclick={() => activeTab = 'load'}>Load Analysis</button>
+</div>
+
+{#if activeTab === 'overview'}
 {#if run}
   <div class="card" style="margin-bottom:12px">
     <div class="stats-row">
@@ -476,8 +488,23 @@
     {/if}
   </div>
 {/if}
+{:else if activeTab === 'load'}
+  <div class="card">
+    <LoadAnalysis
+      runs={run ? [{ id: run.id, label: run.name || `Run #${run.id}`, color: '#0066cc',
+        bench_started_at: run.bench_started_at, post_started_at: run.post_started_at }] : []}
+      showPhaseFilter={true}
+    />
+  </div>
+{/if}
 
 <style>
+  .run-tabs { display: flex; gap: 2px; margin-bottom: 16px; border-bottom: 2px solid #e8e8e8; }
+  .tab-btn { background: none; border: none; padding: 8px 16px; font-size: 13px; font-weight: 600; color: #888; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px; border-radius: 4px 4px 0 0; transition: color 0.15s; }
+  .tab-btn:hover:not(:disabled) { color: #333; background: #f5f5f5; }
+  .tab-btn.active { color: #0066cc; border-bottom-color: #0066cc; }
+  .tab-btn:disabled { cursor: not-allowed; opacity: 0.4; }
+
   .stats-row { display: flex; gap: 20px; flex-wrap: wrap; }
   .stat { min-width: 100px; }
   .stat-label { font-size: 11px; color: #666; font-weight: 600; text-transform: uppercase; }

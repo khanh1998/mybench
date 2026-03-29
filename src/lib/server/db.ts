@@ -691,6 +691,25 @@ function migrate(db: Database.Database) {
   if (!dmCols.includes('time_col')) db.exec(`ALTER TABLE decision_metrics ADD COLUMN time_col TEXT NOT NULL DEFAULT ''`);
   if (!dmCols.includes('value_col')) db.exec(`ALTER TABLE decision_metrics ADD COLUMN value_col TEXT NOT NULL DEFAULT ''`);
 
+	// Lock conflict snapshots (blocking pairs captured at each snapshot interval)
+	db.exec(`
+    CREATE TABLE IF NOT EXISTS snap_pg_lock_conflicts (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL,
+      _phase TEXT NOT NULL DEFAULT 'bench',
+      blocked_pid INTEGER,
+      blocked_query TEXT,
+      blocked_user TEXT,
+      blocking_pid INTEGER,
+      blocking_query TEXT,
+      blocking_user TEXT,
+      locktype TEXT,
+      held_mode TEXT,
+      requested_mode TEXT
+    );
+  `);
+
 	// Metrics table (library / templates)
 	db.exec(`
     CREATE TABLE IF NOT EXISTS metrics (
