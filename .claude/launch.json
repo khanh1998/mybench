@@ -2,9 +2,9 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "my-app",
-      "runtimeExecutable": "/tmp/mybench-dev.sh",
-      "runtimeArgs": [],
+      "name": "mybench",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
       "port": 5173
     }
   ]

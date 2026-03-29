@@ -1,33 +1,54 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { page } from '$app/stores';
+  import { goto } from '$app/navigation';
   import LineChart from '$lib/LineChart.svelte';
   import { fmtTs } from '$lib/utils';
   import CodeEditor from '$lib/CodeEditor.svelte';
+  import type { PageData } from './$types';
 
-  const decisionId = $derived(Number($page.params.id));
+  let { data }: { data: PageData } = $props();
 
-  interface Design { id: number; name: string; }
-  interface Run { id: number; design_id: number; status: string; tps: number|null; latency_avg_ms: number|null; latency_stddev_ms: number|null; transactions: number|null; started_at: string; bench_started_at: string|null; post_started_at: string|null; }
+  const designId = $derived(Number($page.params.id));
+
+  interface RunInfo {
+    id: number;
+    name: string;
+    status: string;
+    tps: number | null;
+    latency_avg_ms: number | null;
+    latency_stddev_ms: number | null;
+    transactions: number | null;
+    profile_name: string;
+    run_params: string;
+    started_at: string;
+    bench_started_at: string | null;
+    post_started_at: string | null;
+    finished_at: string | null;
+  }
   interface DecisionMetric { id: number; decision_id: number; name: string; category: string; description: string; sql: string; higher_is_better: number; position: number; time_col: string; value_col: string; }
   interface LibraryMetric { id: number; name: string; category: string; description: string; sql: string; is_builtin: number; higher_is_better: number; }
   interface QueryResult { columns: string[]; rows: Record<string, unknown>[]; error?: string; }
   interface ChartPoint { t: number; v: number; }
   interface ChartSeries { label: string; color: string; points: ChartPoint[]; }
   interface SnapTable { name: string; columns: string[]; }
-
+  interface ParamRow { name: string; values: (string | null)[]; hasDiff: boolean; }
 
   const COLORS = ['#0066cc', '#e6531d', '#00996b', '#9b36b7', '#cc8800'];
   const CATEGORIES = ['Cache & I/O', 'Access Patterns', 'Write Efficiency', 'Checkpoint & BGWriter', 'Vacuum Health', 'Concurrency', 'Custom'];
+  const MAX_RUNS = 4;
+  const SUMMARY_METRICS = [
+    { key: 'tps' as const,              label: 'TPS',                  decimals: 2, higherBetter: true  },
+    { key: 'latency_avg_ms' as const,   label: 'Avg Latency (ms)',     decimals: 3, higherBetter: false },
+    { key: 'latency_stddev_ms' as const,label: 'Latency StdDev (ms)',  decimals: 3, higherBetter: false },
+    { key: 'transactions' as const,     label: 'Transactions',         decimals: 0, higherBetter: true  },
+  ];
 
-  // ── State ────────────────────────────────────────────────────────────────
-  let designs: Design[] = $state([]);
-  let runsPerDesign: Record<number, Run[]> = $state({});
-  let selectedRuns: Record<number, number> = $state({});
-  let loading = $state(true);
+  // ── State ──────────────────────────────────────────────────────────────────
+  const allRuns: RunInfo[] = data.runs as RunInfo[];
+  let selectedRunIds: number[] = $state([]);
+  let decisionMetrics: DecisionMetric[] = $state(data.metrics as DecisionMetric[]);
 
-  let decisionMetrics: DecisionMetric[] = $state([]);
-  // per-metric: results per design, view mode, chart columns, table filter, collapsed
   let metricResults: Record<number, Record<number, QueryResult>> = $state({});
   let metricView: Record<number, 'table' | 'chart'> = $state({});
   let metricTimeCol: Record<number, string> = $state({});
@@ -37,23 +58,21 @@
   let runningMetricId = $state<number | null>(null);
   let includedPhases = $state<string[]>(['bench']);
 
-  // library picker
   let libraryTemplates: LibraryMetric[] = $state([]);
   let libraryLoaded = false;
   let showLibraryPicker = $state(false);
   let librarySearch = $state('');
 
-  // metric add/edit form
   let editingMetric = $state<Partial<DecisionMetric> & { isNew?: boolean } | null>(null);
   let metricFormError = $state('');
   let metricTestResults: Record<number, QueryResult> = $state({});
   let metricTestRunning = $state(false);
 
-  // snap tables (for metric form autocomplete)
   let snapTables: SnapTable[] = $state([]);
-
   const snapSchema = $derived(Object.fromEntries(snapTables.map(t => [t.name, t.columns])));
-  const selectedRunIds = $derived(Object.values(selectedRuns).filter(Boolean));
+
+  const decisionId = $derived((data.decision as { id: number } | null)?.id ?? 0);
+
   const metricsByCategory = $derived(() => {
     const map: Record<string, DecisionMetric[]> = {};
     for (const m of decisionMetrics) (map[m.category] ??= []).push(m);
@@ -67,17 +86,63 @@
       : libraryTemplates
   );
 
-  // ── Helpers ──────────────────────────────────────────────────────────────
-  function getDesignName(did: number) { return designs.find(d => d.id === did)?.name ?? `Design ${did}`; }
+  // ── Run helpers ────────────────────────────────────────────────────────────
+  function getRunLabel(runId: number) {
+    const r = allRuns.find(r => r.id === runId);
+    if (!r) return `Run #${runId}`;
+    return r.name || `Run #${r.id}`;
+  }
+  function getRunForId(runId: number) { return allRuns.find(r => r.id === runId); }
 
+  // ── URL state ──────────────────────────────────────────────────────────────
+  function initFromUrl() {
+    const param = $page.url.searchParams.get('runs');
+    if (param) {
+      const ids = param.split(',').map(Number).filter(n => n > 0 && allRuns.some(r => r.id === n));
+      selectedRunIds = ids.slice(0, MAX_RUNS);
+    }
+    for (const m of decisionMetrics) {
+      if (m.time_col) metricTimeCol[m.id] = m.time_col;
+      if (m.value_col) metricValueCol[m.id] = m.value_col;
+    }
+  }
+
+  function syncUrl() {
+    const url = new URL($page.url);
+    if (selectedRunIds.length > 0) {
+      url.searchParams.set('runs', selectedRunIds.join(','));
+    } else {
+      url.searchParams.delete('runs');
+    }
+    goto(url.toString(), { replaceState: true, noScroll: true, keepFocus: true });
+  }
+
+  function toggleRun(runId: number) {
+    if (selectedRunIds.includes(runId)) {
+      selectedRunIds = selectedRunIds.filter(id => id !== runId);
+    } else if (selectedRunIds.length < MAX_RUNS) {
+      selectedRunIds = [...selectedRunIds, runId];
+    }
+    syncUrl();
+    onRunChange();
+  }
+
+  function clearSelection() {
+    selectedRunIds = [];
+    syncUrl();
+    snapTables = [];
+    metricResults = {};
+  }
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
   async function queryApi(sql: string, params: unknown[]): Promise<QueryResult> {
     const res = await fetch('/api/query', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sql, params })
     });
-    const data = await res.json();
-    if (!res.ok) return { columns: [], rows: [], error: data.message ?? `HTTP ${res.status}` };
-    return data as QueryResult;
+    const json = await res.json();
+    if (!res.ok) return { columns: [], rows: [], error: json.message ?? `HTTP ${res.status}` };
+    return json as QueryResult;
   }
 
   function copyCSV(metricId: number) {
@@ -86,35 +151,39 @@
     const entries = Object.entries(results);
     if (!entries.length) return;
     const cols = entries[0][1].columns;
-    const lines = [['design', ...cols].join(',')];
-    for (const [did, res] of entries) {
-      const name = getDesignName(Number(did));
+    const lines = [['run', ...cols].join(',')];
+    for (const [rid, res] of entries) {
+      const label = getRunLabel(Number(rid));
       for (const row of res.rows) {
-        lines.push([JSON.stringify(name), ...cols.map(c => String(row[c] ?? ''))].join(','));
+        lines.push([JSON.stringify(label), ...cols.map(c => String(row[c] ?? ''))].join(','));
       }
     }
     navigator.clipboard.writeText(lines.join('\n'));
   }
 
-  function getSummary(metricId: number, valueCol: string): { designId: number; avg: number }[] {
+  function getSummary(metricId: number, valueCol: string): { runId: number; avg: number }[] {
     const results = metricResults[metricId];
     if (!results) return [];
-    return Object.entries(results).map(([did, res]) => {
+    return selectedRunIds.map(runId => {
+      const res = results[runId];
+      if (!res) return null;
       const vals = res.rows.map(r => Number(r[valueCol])).filter(v => !isNaN(v));
-      return { designId: Number(did), avg: vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : NaN };
-    }).filter(x => !isNaN(x.avg));
+      return { runId, avg: vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : NaN };
+    }).filter((x): x is { runId: number; avg: number } => x !== null && !isNaN(x.avg));
   }
 
   function getWinner(metricId: number, valueCol: string): number | null {
-    const metric = decisionMetrics.find((m: DecisionMetric) => m.id === metricId);
+    const metric = decisionMetrics.find(m => m.id === metricId);
     if (!metric) return null;
     const summary = getSummary(metricId, valueCol);
     if (summary.length < 2) return null;
-    const [a, b] = summary;
-    if (a.avg === b.avg) return null;
-    return metric.higher_is_better
-      ? (a.avg > b.avg ? a.designId : b.designId)
-      : (a.avg < b.avg ? a.designId : b.designId);
+    let best = summary[0];
+    for (const s of summary.slice(1)) {
+      const isBetter = metric.higher_is_better ? s.avg > best.avg : s.avg < best.avg;
+      if (isBetter) best = s;
+    }
+    const allEqual = summary.every(s => s.avg === best.avg);
+    return allEqual ? null : best.runId;
   }
 
   function buildChartSeriesFromResult(
@@ -125,22 +194,21 @@
     const series: ChartSeries[] = [];
     const markers: { t: number; label: string; color: string }[] = [];
 
-    Object.entries(results ?? {}).forEach(([did, res], i) => {
-      const designId = Number(did);
+    selectedRunIds.forEach((runId, i) => {
+      const res = results?.[runId];
+      if (!res) return;
       const color = COLORS[i % COLORS.length];
       let rows = res.rows;
       if (filter.length > 0 && res.columns.includes('relname')) {
         rows = rows.filter(r => filter.includes(String(r['relname'])));
       }
 
-      // Use bench_started_at (or started_at) as t=0 so runs align for comparison
-      const run = runsPerDesign[designId]?.find(r => r.id === selectedRuns[designId]);
-      const originMs = run
-        ? new Date(run.bench_started_at ?? run.started_at).getTime()
-        : 0;
+      const run = getRunForId(runId);
+      const originMs = run ? new Date(run.bench_started_at ?? run.started_at).getTime() : 0;
 
-      // Group by a secondary key if present (relname, indexrelname, state, datname)
-      const groupCols = ['relname', 'indexrelname', 'state', 'datname'].filter(c => res.columns.includes(c) && c !== timeCol && c !== valueCol);
+      const groupCols = ['relname', 'indexrelname', 'state', 'datname'].filter(
+        c => res.columns.includes(c) && c !== timeCol && c !== valueCol
+      );
       if (groupCols.length > 0) {
         const groupKey = groupCols[0];
         const groups = new Map<string, Record<string, unknown>[]>();
@@ -150,22 +218,20 @@
         }
         let gi = 0;
         for (const [gk, grows] of groups) {
-          const subColor = COLORS[(i + gi) % COLORS.length];
           series.push({
-            label: `${getDesignName(designId)} · ${gk}`,
-            color: subColor,
+            label: `${getRunLabel(runId)} · ${gk}`,
+            color: COLORS[(i + gi) % COLORS.length],
             points: grows.map(r => ({ t: new Date(String(r[timeCol])).getTime() - originMs, v: Number(r[valueCol]) })).filter(p => !isNaN(p.t) && !isNaN(p.v))
           });
           gi++;
         }
       } else {
         series.push({
-          label: getDesignName(designId),
+          label: getRunLabel(runId),
           color,
           points: rows.map(r => ({ t: new Date(String(r[timeCol])).getTime() - originMs, v: Number(r[valueCol]) })).filter(p => !isNaN(p.t) && !isNaN(p.v))
         });
       }
-      // Phase markers (also relative to originMs)
       if (run?.bench_started_at) {
         markers.push({ t: new Date(run.bench_started_at).getTime() - originMs, label: 'bench', color });
       }
@@ -176,35 +242,33 @@
     return { series, markers };
   }
 
-  // ── Data loading ──────────────────────────────────────────────────────────
-  async function load() {
-    const [dRes, mRes] = await Promise.all([
-      fetch(`/api/designs?decision_id=${decisionId}`),
-      fetch(`/api/decisions/${decisionId}/metrics`)
-    ]);
-    designs = await dRes.json();
-    decisionMetrics = await mRes.json();
-    // Restore persisted col preferences
-    for (const m of decisionMetrics) {
-      if (m.time_col) metricTimeCol[m.id] = m.time_col;
-      if (m.value_col) metricValueCol[m.id] = m.value_col;
-    }
+  // ── Parameter diff ─────────────────────────────────────────────────────────
+  const paramDiffRows = $derived((): ParamRow[] => {
+    if (selectedRunIds.length === 0) return [];
+    const runs = selectedRunIds.map(id => getRunForId(id));
+    const parsedParams = runs.map(r => {
+      try { return (r?.run_params ? JSON.parse(r.run_params) : []) as { name: string; value: string }[]; }
+      catch { return []; }
+    });
+    const paramNames = new Set<string>();
+    for (const params of parsedParams) for (const p of params) paramNames.add(p.name);
 
-    for (const d of designs) {
-      const rRes = await fetch(`/api/runs?design_id=${d.id}`);
-      const runs: Run[] = await rRes.json();
-      runsPerDesign[d.id] = runs;
-      if (runs.length > 0) selectedRuns[d.id] = runs[0].id;
-    }
-    loading = false;
-    loadSnapTables();
-    runAllMetrics();
-  }
+    const rows: ParamRow[] = [];
+    const profileValues = runs.map(r => r?.profile_name || null);
+    rows.push({ name: 'Profile', values: profileValues, hasDiff: profileValues.some(v => v !== profileValues[0]) });
 
+    for (const name of paramNames) {
+      const values = parsedParams.map(params => params.find(p => p.name === name)?.value ?? null);
+      rows.push({ name, values, hasDiff: values.some(v => v !== values[0]) });
+    }
+    return rows;
+  });
+  const hasParamDiff = $derived(paramDiffRows().some(r => r.hasDiff));
+
+  // ── Data loading ───────────────────────────────────────────────────────────
   async function loadSnapTables() {
-    const runIds = selectedRunIds.join(',');
-    if (!runIds) return;
-    const res = await fetch(`/api/snap-tables?run_ids=${runIds}`);
+    if (selectedRunIds.length === 0) { snapTables = []; return; }
+    const res = await fetch(`/api/snap-tables?run_ids=${selectedRunIds.join(',')}`);
     snapTables = await res.json();
   }
 
@@ -213,7 +277,7 @@
     runAllMetrics();
   }
 
-  // ── Phase filter ──────────────────────────────────────────────────────────
+  // ── Phase filter ───────────────────────────────────────────────────────────
   function applyPhaseFilter(sql: string): string {
     const phases = includedPhases;
     if (phases.length === 0) return sql;
@@ -223,23 +287,21 @@
     return sql.replace(/_phase = 'bench'/g, filter);
   }
 
-  // ── Metrics ───────────────────────────────────────────────────────────────
+  // ── Metrics ────────────────────────────────────────────────────────────────
   async function runMetric(m: DecisionMetric) {
+    if (selectedRunIds.length === 0) return;
     runningMetricId = m.id;
     metricResults[m.id] = {};
-    for (const [did, runId] of Object.entries(selectedRuns)) {
-      if (!runId) continue;
-      metricResults[m.id][Number(did)] = await queryApi(applyPhaseFilter(m.sql), [runId]);
+    for (const runId of selectedRunIds) {
+      metricResults[m.id][runId] = await queryApi(applyPhaseFilter(m.sql), [runId]);
     }
     metricResults = { ...metricResults };
-    // Auto-detect time/value columns (only if not already set)
-    const firstRes = Object.values(metricResults[m.id])[0];
+    const firstRes = metricResults[m.id][selectedRunIds[0]];
     if (firstRes && !metricTimeCol[m.id]) {
       const timeCandidates = firstRes.columns.filter(c => c.includes('at') || c.includes('time'));
       const valueCandidates = firstRes.columns.filter(c => !c.includes('name') && !c.includes('schema') && !c.includes('at') && !c.includes('type') && !timeCandidates.includes(c));
       if (timeCandidates.length) metricTimeCol[m.id] = timeCandidates[0];
       if (valueCandidates.length) metricValueCol[m.id] = valueCandidates[0];
-      // Persist auto-detected cols
       if (metricTimeCol[m.id] || metricValueCol[m.id]) {
         persistColPrefs(m, metricTimeCol[m.id] ?? '', metricValueCol[m.id] ?? '');
       }
@@ -326,69 +388,175 @@
     if (!editingMetric?.sql?.trim()) return;
     metricTestRunning = true;
     metricTestResults = {};
-    for (const [did, runId] of Object.entries(selectedRuns)) {
-      if (!runId) continue;
-      metricTestResults[Number(did)] = await queryApi(applyPhaseFilter(editingMetric.sql), [runId]);
+    for (const runId of selectedRunIds) {
+      metricTestResults[runId] = await queryApi(applyPhaseFilter(editingMetric.sql), [runId]);
     }
     metricTestResults = { ...metricTestResults };
     metricTestRunning = false;
   }
 
-  onMount(load);
+  onMount(() => {
+    initFromUrl();
+    if (selectedRunIds.length > 0) {
+      loadSnapTables();
+      runAllMetrics();
+    }
+  });
 </script>
 
-<!-- ── Header ──────────────────────────────────────────────────────────── -->
-<div class="row" style="margin-bottom:16px">
-  <a href="/decisions/{decisionId}" style="color:#0066cc;text-decoration:none">← Decision</a>
-  <h1 style="margin-left:8px">Compare Designs</h1>
+<!-- ── Header ───────────────────────────────────────────────────────────────── -->
+<div class="row" style="margin-bottom:16px;align-items:center;gap:8px">
+  <a href="/designs/{designId}" style="color:#0066cc;text-decoration:none">← {(data.design as {name:string}|null)?.name ?? 'Design'}</a>
+  <h1 style="margin-left:8px">Compare Runs</h1>
 </div>
 
-{#if loading}
-  <p>Loading…</p>
-{:else}
-
-<!-- ── Run selector ───────────────────────────────────────────────────── -->
+<!-- ── Run selector ─────────────────────────────────────────────────────────── -->
 <div class="card">
-  <h3>Select Runs to Compare</h3>
-  <div class="design-grid">
-    {#each designs as d}
-      <div class="design-col">
-        <strong>{d.name}</strong>
-        <select bind:value={selectedRuns[d.id]} onchange={onRunChange}>
-          <option value={0}>— none —</option>
-          {#each runsPerDesign[d.id] ?? [] as r}
-            <option value={r.id}>Run #{r.id} ({r.status}) — {fmtTs(r.started_at)}</option>
+  <div class="row" style="margin-bottom:12px;align-items:center;gap:10px;flex-wrap:wrap">
+    <h3 style="margin:0">Select Runs to Compare</h3>
+    <span style="font-size:12px;color:#999">Select 2–{MAX_RUNS} completed runs</span>
+    {#if selectedRunIds.length > 0}
+      <button onclick={clearSelection} style="margin-left:auto;font-size:12px">Clear</button>
+    {/if}
+  </div>
+  {#if allRuns.length === 0}
+    <p style="color:#999;font-size:13px">No completed runs for this design yet.</p>
+  {:else}
+    <div class="run-list">
+      {#each allRuns as r}
+        {@const colorIdx = selectedRunIds.indexOf(r.id)}
+        {@const selected = colorIdx >= 0}
+        {@const disabled = !selected && selectedRunIds.length >= MAX_RUNS}
+        <label
+          class="run-chip"
+          class:selected
+          class:disabled
+          style={selected ? `border-color:${COLORS[colorIdx]};background:${COLORS[colorIdx]}18` : ''}
+        >
+          <input type="checkbox" checked={selected} {disabled} onchange={() => toggleRun(r.id)} />
+          <span class="run-chip-id" style={selected ? `color:${COLORS[colorIdx]};font-weight:700` : ''}>
+            {r.name || '#' + r.id}
+          </span>
+          {#if r.profile_name}
+            <span class="run-chip-profile">{r.profile_name}</span>
+          {/if}
+          {#if r.tps !== null}
+            <span class="run-chip-tps">{r.tps.toFixed(1)} TPS</span>
+          {/if}
+          <span class="run-chip-date">{fmtTs(r.started_at)}</span>
+        </label>
+      {/each}
+    </div>
+  {/if}
+</div>
+
+{#if selectedRunIds.length >= 2}
+
+<!-- ── pgbench Summary ───────────────────────────────────────────────────────── -->
+<div class="card">
+  <h3>pgbench Summary</h3>
+  <div class="table-wrap">
+    <table class="summary-table">
+      <thead>
+        <tr>
+          <th>Metric</th>
+          {#each selectedRunIds as runId, i}
+            <th style="color:{COLORS[i % COLORS.length]}">{getRunLabel(runId)}</th>
           {/each}
-        </select>
-      </div>
-    {/each}
+          <th>Best</th>
+        </tr>
+      </thead>
+      <tbody>
+        {#each SUMMARY_METRICS as sm}
+          {@const numVals = selectedRunIds.map(id => {
+            const r = getRunForId(id);
+            const v = r?.[sm.key] ?? null;
+            return v !== null ? Number(v) : null;
+          })}
+          {@const valid = numVals.filter((v): v is number => v !== null)}
+          {@const bestVal = valid.length === 0 ? null : sm.higherBetter ? Math.max(...valid) : Math.min(...valid)}
+          {@const baselineVal = numVals[0]}
+          <tr>
+            <td class="metric-label">{sm.label}</td>
+            {#each numVals as val, i}
+              {@const isBest = val !== null && val === bestVal && valid.length >= 2}
+              <td class:winner-cell={isBest}>
+                {#if val !== null}
+                  <span class:winner-value={isBest}>
+                    {sm.decimals === 0 ? val.toFixed(0) : val.toFixed(sm.decimals)}
+                  </span>
+                  {#if i > 0 && baselineVal !== null && baselineVal !== 0}
+                    {@const delta = (val - baselineVal) / Math.abs(baselineVal) * 100}
+                    {@const isGood = sm.higherBetter ? delta > 0 : delta < 0}
+                    <span class="inline-delta" class:positive={isGood} class:negative={!isGood && delta !== 0}>
+                      {delta > 0 ? '+' : ''}{delta.toFixed(1)}%
+                    </span>
+                  {/if}
+                {:else}
+                  <span style="color:#bbb">—</span>
+                {/if}
+              </td>
+            {/each}
+            <td>
+              {#if bestVal !== null && valid.length >= 2}
+                {@const bestIdx = numVals.findIndex(v => v === bestVal)}
+                {#if bestIdx >= 0}
+                  <span class="winner-badge" style="border-color:{COLORS[bestIdx % COLORS.length]};color:{COLORS[bestIdx % COLORS.length]}">
+                    ▲ {getRunLabel(selectedRunIds[bestIdx])}
+                  </span>
+                {/if}
+              {/if}
+            </td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
   </div>
 </div>
 
-<!-- ── pgbench summary ────────────────────────────────────────────────── -->
+<!-- ── Parameter diff ────────────────────────────────────────────────────────── -->
+{#if paramDiffRows().length > 0}
 <div class="card">
-  <h3>pgbench Summary</h3>
-  <table>
-    <thead><tr><th>Design</th><th>Run</th><th>TPS</th><th>Avg Latency (ms)</th><th>Stddev (ms)</th><th>Transactions</th><th>Status</th></tr></thead>
-    <tbody>
-      {#each designs as d}
-        {@const runId = selectedRuns[d.id]}
-        {@const run = runsPerDesign[d.id]?.find(r => r.id === runId)}
+  <div class="row" style="margin-bottom:12px;gap:8px;align-items:center">
+    <h3 style="margin:0">Parameters</h3>
+    {#if !hasParamDiff}
+      <span style="font-size:12px;color:#999">No parameter changes between selected runs</span>
+    {:else}
+      <span style="font-size:12px;color:#885500">Highlighted cells differ from first run</span>
+    {/if}
+  </div>
+  <div class="table-wrap">
+    <table class="params-table">
+      <thead>
         <tr>
-          <td><strong>{d.name}</strong></td>
-          <td>{runId ? `#${runId}` : '—'}</td>
-          <td>{run?.tps?.toFixed(2) ?? '—'}</td>
-          <td>{run?.latency_avg_ms?.toFixed(3) ?? '—'}</td>
-          <td>{run?.latency_stddev_ms?.toFixed(3) ?? '—'}</td>
-          <td>{run?.transactions ?? '—'}</td>
-          <td>{#if run}<span class="badge badge-{run.status}">{run.status}</span>{:else}—{/if}</td>
+          <th>Parameter</th>
+          {#each selectedRunIds as runId, i}
+            <th style="color:{COLORS[i % COLORS.length]}">{getRunLabel(runId)}</th>
+          {/each}
         </tr>
-      {/each}
-    </tbody>
-  </table>
+      </thead>
+      <tbody>
+        {#each paramDiffRows() as row}
+          <tr>
+            <td class="param-name">{row.name}</td>
+            {#each row.values as val, i}
+              <td class:param-diff={i > 0 && val !== row.values[0]}>
+                {#if val !== null && val !== ''}
+                  {val}
+                {:else}
+                  <span style="color:#bbb">—</span>
+                {/if}
+              </td>
+            {/each}
+          </tr>
+        {/each}
+      </tbody>
+    </table>
+  </div>
 </div>
+{/if}
 
-<!-- ── Metrics ────────────────────────────────────────────────────────── -->
+<!-- ── Metrics ────────────────────────────────────────────────────────────────── -->
 <div class="card">
   <div class="row" style="margin-bottom:12px;flex-wrap:wrap;gap:8px">
     <h3>Metrics</h3>
@@ -432,7 +600,7 @@
           <div class="metric-cards">
             {#each catMetrics as m}
               {@const res = metricResults[m.id]}
-              {@const firstRes = res ? Object.values(res)[0] : null}
+              {@const firstRes = res ? (res[selectedRunIds[0]] ?? Object.values(res)[0] ?? null) : null}
               {@const view = metricView[m.id] ?? 'chart'}
               {@const timeCol = metricTimeCol[m.id] ?? ''}
               {@const valueCol = metricValueCol[m.id] ?? ''}
@@ -444,20 +612,20 @@
               {@const activeFilter = metricTableFilter[m.id] ?? []}
 
               <div class="metric-card">
-                <!-- card header -->
                 <div class="mc-header">
                   <div class="mc-title-row">
                     <span class="mc-name">{m.name}</span>
                     {#if winner !== null}
-                      {@const wname = getDesignName(winner)}
-                      {@const wcolor = COLORS[designs.findIndex(d => d.id === winner) % COLORS.length]}
-                      <span class="winner-badge" style="border-color:{wcolor};color:{wcolor}">▲ {wname}</span>
+                      {@const wIdx = selectedRunIds.indexOf(winner)}
+                      {@const wcolor = COLORS[wIdx >= 0 ? wIdx % COLORS.length : 0]}
+                      <span class="winner-badge" style="border-color:{wcolor};color:{wcolor}">▲ {getRunLabel(winner)}</span>
                     {/if}
                   </div>
                   {#if m.description}<p class="mc-desc">{m.description}</p>{/if}
                   <div class="mc-actions">
-                    <button class="icon-btn" onclick={() => runMetric(m)} disabled={runningMetricId === m.id}
-                      title="Run">{runningMetricId === m.id ? '…' : '↺'}</button>
+                    <button class="icon-btn" onclick={() => runMetric(m)} disabled={runningMetricId === m.id} title="Run">
+                      {runningMetricId === m.id ? '…' : '↺'}
+                    </button>
                     <button class="icon-btn" onclick={() => { editingMetric = { ...m }; metricFormError = ''; metricTestResults = {}; }} title="Edit">✎</button>
                     <button class="icon-btn danger" onclick={() => deleteMetric(m)} title="Remove">✕</button>
                     <button class="icon-btn" onclick={() => copyCSV(m.id)} title="Copy CSV">⎘ CSV</button>
@@ -469,7 +637,6 @@
                 </div>
 
                 {#if res}
-                  <!-- table filter -->
                   {#if relnames.length > 0}
                     <div class="table-filter">
                       <span class="filter-label">Tables:</span>
@@ -489,7 +656,6 @@
                   {/if}
 
                   {#if view === 'chart'}
-                    <!-- column picker -->
                     <div class="col-picker">
                       <label>Time col:
                         <select value={metricTimeCol[m.id]} onchange={(e) => { metricTimeCol[m.id] = e.currentTarget.value; persistColPrefs(m, e.currentTarget.value, metricValueCol[m.id] ?? ''); }}>
@@ -506,15 +672,18 @@
                       {@const { series, markers } = buildChartSeriesFromResult(m.id, timeCol, valueCol)}
                       <LineChart title="{m.name} — {valueCol}" {series} {markers} />
                       {#if summary.length >= 2}
+                        {@const base = summary[0].avg}
+                        {@const best = summary.reduce((a, b) => Math.abs(b.avg - base) > Math.abs(a.avg - base) ? b : a)}
                         <div class="summary-row">
                           {#each summary as s, i}
-                            <span style="color:{COLORS[i % COLORS.length]}">{getDesignName(s.designId)}: <strong>{s.avg.toFixed(4)}</strong></span>
+                            <span style="color:{COLORS[i % COLORS.length]}">{getRunLabel(s.runId)}: <strong>{s.avg.toFixed(4)}</strong></span>
                           {/each}
-                          <span class="delta-pct"
-                            class:positive={(summary[0].avg - summary[1].avg) / Math.abs(summary[1].avg) > 0}
-                            class:negative={(summary[0].avg - summary[1].avg) / Math.abs(summary[1].avg) < 0}>
-                            {((summary[0].avg - summary[1].avg) / Math.abs(summary[1].avg) * 100) > 0 ? '+' : ''}{((summary[0].avg - summary[1].avg) / Math.abs(summary[1].avg) * 100).toFixed(1)}%
-                          </span>
+                          {#if best.runId !== summary[0].runId && base !== 0}
+                            {@const delta = (best.avg - base) / Math.abs(base) * 100}
+                            <span class="delta-pct" class:positive={delta > 0} class:negative={delta < 0}>
+                              {delta > 0 ? '+' : ''}{delta.toFixed(1)}%
+                            </span>
+                          {/if}
                         </div>
                       {/if}
                     {:else}
@@ -522,12 +691,11 @@
                     {/if}
 
                   {:else}
-                    <!-- table view -->
                     <div class="results-grid">
-                      {#each designs as d}
-                        {@const r = res[d.id]}
+                      {#each selectedRunIds as runId, i}
+                        {@const r = res[runId]}
                         <div class="result-col">
-                          <div class="result-col-header">{d.name}</div>
+                          <div class="result-col-header" style="color:{COLORS[i % COLORS.length]}">{getRunLabel(runId)}</div>
                           {#if r?.error}
                             <p class="error">{r.error}</p>
                           {:else if r?.rows?.length > 0}
@@ -563,7 +731,17 @@
   {/each}
 </div>
 
-<!-- ── Library picker modal ───────────────────────────────────────────── -->
+{:else if allRuns.length < 2}
+  <div class="card" style="text-align:center;padding:32px;color:#999;font-size:13px">
+    This design needs at least 2 completed runs to compare. Run the benchmark a few more times with different settings or parameter profiles.
+  </div>
+{:else}
+  <div class="card" style="text-align:center;padding:32px;color:#999;font-size:13px">
+    Select at least 2 runs above to begin comparing.
+  </div>
+{/if}
+
+<!-- ── Library picker modal ─────────────────────────────────────────────────── -->
 {#if showLibraryPicker}
   <div class="modal-backdrop" role="dialog" aria-modal="true" tabindex="-1"
     onclick={(e) => { if (e.target === e.currentTarget) showLibraryPicker = false; }}
@@ -600,7 +778,7 @@
   </div>
 {/if}
 
-<!-- ── Metric form modal ──────────────────────────────────────────────── -->
+<!-- ── Metric form modal ─────────────────────────────────────────────────────── -->
 {#if editingMetric}
   <div class="modal-backdrop" role="dialog" aria-modal="true" tabindex="-1"
     onclick={(e) => { if (e.target === e.currentTarget) { editingMetric = null; metricTestResults = {}; } }}
@@ -643,17 +821,19 @@
       {#if metricFormError}<p class="error" style="margin-bottom:8px">{metricFormError}</p>{/if}
       <div class="row" style="gap:8px;margin-bottom:{Object.keys(metricTestResults).length ? '12px' : '0'}">
         <button class="primary" onclick={saveMetric}>Save</button>
-        <button onclick={testMetric} disabled={metricTestRunning}>{metricTestRunning ? 'Testing…' : '▶ Test'}</button>
+        <button onclick={testMetric} disabled={metricTestRunning || selectedRunIds.length === 0}>
+          {metricTestRunning ? 'Testing…' : '▶ Test'}
+        </button>
         <button onclick={() => { editingMetric = null; metricTestResults = {}; }}>Cancel</button>
       </div>
       {#if Object.keys(metricTestResults).length > 0}
         <div class="test-results">
           <div class="results-grid">
-            {#each designs as d}
-              {@const res = metricTestResults[d.id]}
+            {#each selectedRunIds as runId, i}
+              {@const res = metricTestResults[runId]}
               {#if res}
                 <div class="result-col">
-                  <div class="result-col-header">{d.name}</div>
+                  <div class="result-col-header" style="color:{COLORS[i % COLORS.length]}">{getRunLabel(runId)}</div>
                   {#if res.error}
                     <p class="error">{res.error}</p>
                   {:else if res.rows.length > 0}
@@ -681,15 +861,42 @@
   </div>
 {/if}
 
-{/if}
-
 <style>
-  .design-grid { display: flex; gap: 12px; flex-wrap: wrap; }
-  .design-col { flex: 1; min-width: 200px; }
-  .design-col strong { display: block; margin-bottom: 4px; font-size: 13px; }
+  /* run selector */
+  .run-list { display: flex; flex-direction: column; gap: 6px; }
+  .run-chip {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 8px 12px; border: 1.5px solid #e0e0e0; border-radius: 6px;
+    cursor: pointer; font-size: 13px; transition: border-color 0.1s, background 0.1s;
+  }
+  .run-chip:hover:not(.disabled) { border-color: #0066cc; background: #f0f6ff; }
+  .run-chip.selected { font-weight: 500; }
+  .run-chip.disabled { opacity: 0.45; cursor: not-allowed; }
+  .run-chip input { width: auto; cursor: pointer; }
+  .run-chip-id { font-size: 13px; }
+  .run-chip-profile { font-size: 11px; background: #e8f0ff; color: #0055aa; padding: 1px 6px; border-radius: 8px; }
+  .run-chip-tps { font-size: 11px; color: #00996b; font-weight: 600; }
+  .run-chip-date { font-size: 11px; color: #aaa; margin-left: auto; font-family: monospace; }
+
+  /* summary table */
+  .summary-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .summary-table th { text-align: left; padding: 6px 10px; border-bottom: 2px solid #eee; font-size: 12px; }
+  .summary-table td { padding: 7px 10px; border-bottom: 1px solid #f5f5f5; }
+  .metric-label { font-weight: 600; color: #444; white-space: nowrap; }
+  .winner-cell { background: #f0fff8; }
+  .winner-value { font-weight: 700; color: #00774f; }
+  .inline-delta { font-size: 11px; font-weight: 600; margin-left: 5px; }
+  .inline-delta.positive { color: #00996b; }
+  .inline-delta.negative { color: #cc3333; }
+
+  /* parameter diff */
+  .params-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .params-table th { text-align: left; padding: 6px 10px; border-bottom: 2px solid #eee; font-size: 12px; }
+  .params-table td { padding: 6px 10px; border-bottom: 1px solid #f5f5f5; font-family: monospace; font-size: 12px; }
+  .param-name { font-family: monospace; font-weight: 600; color: #444; font-size: 12px; white-space: nowrap; }
+  .param-diff { background: #fff8e8; color: #885500; font-weight: 600; }
 
   /* metrics */
-
   .phase-filter { display: flex; align-items: center; gap: 6px; font-size: 12px; }
   .phase-filter-label { font-weight: 600; color: #666; }
   .phase-check { display: flex; align-items: center; gap: 3px; font-weight: 600; cursor: pointer; padding: 2px 6px; border-radius: 10px; }
@@ -715,7 +922,7 @@
   .mc-name { font-size: 13px; font-weight: 700; color: #222; }
   .mc-desc { font-size: 11px; color: #777; margin: 0 0 6px; }
   .mc-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.winner-badge { font-size: 11px; font-weight: 700; padding: 1px 8px; border-radius: 10px; border: 1.5px solid; }
+  .winner-badge { font-size: 11px; font-weight: 700; padding: 1px 8px; border-radius: 10px; border: 1.5px solid; }
   .icon-btn { font-size: 12px; padding: 2px 7px; background: none; border: 1px solid #ddd; border-radius: 3px; cursor: pointer; color: #555; }
   .icon-btn:hover { background: #f5f5f5; }
   .icon-btn.danger:hover { background: #fff0f0; color: #cc3333; border-color: #ffcccc; }
@@ -739,7 +946,7 @@
 
   .results-grid { display: flex; gap: 12px; overflow-x: auto; }
   .result-col { flex: 1; min-width: 200px; }
-  .result-col-header { font-weight: 600; font-size: 12px; color: #0066cc; margin-bottom: 6px; }
+  .result-col-header { font-weight: 600; font-size: 12px; margin-bottom: 6px; }
   .table-wrap { overflow-x: auto; max-height: 300px; overflow-y: auto; }
 
   /* library picker */

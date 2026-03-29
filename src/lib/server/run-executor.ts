@@ -83,8 +83,8 @@ export function startRun(designId: number, opts: StartRunOptions = {}): number {
 	}
 
 	const runResult = db.prepare(
-		'INSERT INTO benchmark_runs (design_id, status, snapshot_interval_seconds, pre_collect_secs, post_collect_secs, name, profile_name, run_params) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-	).run(design.id, 'running', snapshot_interval_seconds, preCollectSecs, postCollectSecs, runName, profileName, runParamsJson);
+		'INSERT INTO benchmark_runs (design_id, status, snapshot_interval_seconds, pre_collect_secs, post_collect_secs, name, profile_name, run_params, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+	).run(design.id, 'running', snapshot_interval_seconds, preCollectSecs, postCollectSecs, runName, profileName, runParamsJson, new Date().toISOString());
 	const runId = runResult.lastInsertRowid as number;
 
 	const insertStepResult = db.prepare(
@@ -132,7 +132,7 @@ export function startRun(designId: number, opts: StartRunOptions = {}): number {
 
 			let seenPgbench = false;
 			for (const step of steps) {
-				const startedAt = new Date().toISOString().replace('T', ' ').slice(0, 19);
+				const startedAt = new Date().toISOString();
 				db.prepare(`UPDATE run_step_results SET status='running', started_at=? WHERE run_id=? AND step_id=?`).run(startedAt, runId, step.id);
 				activeRun.emitter.emit('step', { step_id: step.id, status: 'running', started_at: startedAt });
 				activeRun.emitter.emit('line', `\n=== Step: ${step.name} (${step.type}) ===`);
@@ -237,7 +237,7 @@ export function startRun(designId: number, opts: StartRunOptions = {}): number {
 				}
 
 				const stepStatus = exitCode === 0 ? 'completed' : 'failed';
-				const finishedAt = new Date().toISOString().replace('T', ' ').slice(0, 19);
+				const finishedAt = new Date().toISOString();
 				db.prepare(
 					`UPDATE run_step_results SET status=?, stdout=?, stderr=?, exit_code=?, finished_at=? WHERE run_id=? AND step_id=?`
 				).run(stepStatus, stdout, stderr, exitCode, finishedAt, runId, step.id);
@@ -245,7 +245,7 @@ export function startRun(designId: number, opts: StartRunOptions = {}): number {
 
 				if (stepStatus === 'failed') {
 					activeRun.emitter.emit('line', `\n[ERROR] Step "${step.name}" failed with exit code ${exitCode}. Stopping.`);
-					db.prepare(`UPDATE benchmark_runs SET status='failed', finished_at=datetime('now') WHERE id=?`).run(runId);
+					db.prepare(`UPDATE benchmark_runs SET status='failed', finished_at=? WHERE id=?`).run(new Date().toISOString(), runId);
 					return;
 				}
 			}
@@ -263,11 +263,11 @@ export function startRun(designId: number, opts: StartRunOptions = {}): number {
 				activeRun.emitter.emit('phase', postPhaseDone);
 			}
 
-			db.prepare(`UPDATE benchmark_runs SET status='completed', finished_at=datetime('now') WHERE id=?`).run(runId);
+			db.prepare(`UPDATE benchmark_runs SET status='completed', finished_at=? WHERE id=?`).run(new Date().toISOString(), runId);
 			activeRun.emitter.emit('line', '\n=== Benchmark completed successfully ===');
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
-			db.prepare(`UPDATE benchmark_runs SET status='failed', finished_at=datetime('now') WHERE id=?`).run(runId);
+			db.prepare(`UPDATE benchmark_runs SET status='failed', finished_at=? WHERE id=?`).run(new Date().toISOString(), runId);
 			activeRun.emitter.emit('line', `\n[FATAL ERROR] ${msg}`);
 		} finally {
 			await pool.end().catch(() => {});

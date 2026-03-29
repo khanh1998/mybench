@@ -5,6 +5,7 @@
   import { marked } from 'marked';
   import MarkdownEditor from '$lib/MarkdownEditor.svelte';
   import type { PageData } from './$types';
+  import { fmtTs, fmtTime } from '$lib/utils';
 
   let { data }: { data: PageData } = $props();
 
@@ -281,12 +282,12 @@
       </div>
       <div class="stat">
         <div class="stat-label">Started</div>
-        <div class="stat-value">{run.started_at?.slice(0,16)}</div>
+        <div class="stat-value">{fmtTs(run.started_at)}</div>
       </div>
       {#if run.finished_at}
         <div class="stat">
           <div class="stat-label">Finished</div>
-          <div class="stat-value">{run.finished_at?.slice(0,16)}</div>
+          <div class="stat-value">{fmtTs(run.finished_at)}</div>
         </div>
       {/if}
     </div>
@@ -346,8 +347,8 @@
               <td>{s.name}</td>
               <td><span class="badge badge-{s.type}">{s.type}</span></td>
               <td><span class="badge badge-{s.status}">{s.status}</span></td>
-              <td>{s.started_at?.slice(11,19) ?? '—'}</td>
-              <td>{s.finished_at?.slice(11,19) ?? '—'}</td>
+              <td>{fmtTime(s.started_at)}</td>
+              <td>{fmtTime(s.finished_at)}</td>
               <td>
                 {#if s.command}
                   <button class="expand-btn" onclick={() => toggleStep(s.step_id)}>

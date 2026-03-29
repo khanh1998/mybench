@@ -68,6 +68,13 @@
   let importError = $state('');
   let importing = $state(false);
 
+  // Run history panel
+  let runsCollapsed = $state(false);
+  let runsHeight = $state(280);
+  let _resizing = false;
+  let _resizeStartY = 0;
+  let _resizeStartH = 0;
+
   // Run modal ephemeral state (editable, not persisted)
   let runServer = $state<number|null>(null);
   let runDatabase = $state('');
@@ -332,9 +339,30 @@
     }
   }
 
+  function startRunsResize(e: MouseEvent) {
+    _resizing = true;
+    _resizeStartY = e.clientY;
+    _resizeStartH = runsHeight;
+    e.preventDefault();
+  }
+
   onMount(() => {
     window.addEventListener('keydown', handleKeydown);
-    return () => window.removeEventListener('keydown', handleKeydown);
+
+    function onMouseMove(e: MouseEvent) {
+      if (!_resizing) return;
+      const dy = _resizeStartY - e.clientY; // drag up = taller
+      runsHeight = Math.max(60, Math.min(700, _resizeStartH + dy));
+    }
+    function onMouseUp() { _resizing = false; }
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+
+    return () => {
+      window.removeEventListener('keydown', handleKeydown);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
   });
 </script>
 
@@ -601,36 +629,52 @@
     </div>
 
     <!-- Run history -->
-    <div class="runs-section">
-      <div class="runs-section-header">
-        <div class="steps-title">Run History</div>
-        <button class="runs-import-btn" title="Import run from result JSON" onclick={() => { importError = ''; importFile = null; showImportModal = true; }}>⬆ Import</button>
-      </div>
-      {#if runs.length === 0}
-        <div style="padding: 8px 12px; font-size:11px; color:#585b70">No runs yet</div>
+    <div class="runs-section" style={runsCollapsed ? '' : `height:${runsHeight}px`}>
+      <!-- Resize handle (drag up to expand) -->
+      {#if !runsCollapsed}
+        <div class="runs-resize-handle" onmousedown={startRunsResize} role="separator" aria-orientation="horizontal" aria-label="Resize run history"></div>
       {/if}
-      {#each runs.slice(0, 8) as r}
-        <div class="run-item-row">
-          <a href="/designs/{id}/runs/{r.id}" class="run-item">
-            <div class="run-item-top">
-              <span class="badge badge-{r.status}" style="font-size:10px">{r.status}</span>
-              <span class="run-item-id">{r.name || '#' + r.id}</span>
+      <div class="runs-section-header">
+        <button class="runs-collapse-btn" onclick={() => runsCollapsed = !runsCollapsed} title="{runsCollapsed ? 'Expand' : 'Collapse'} run history">
+          <span class="runs-collapse-arrow">{runsCollapsed ? '▶' : '▼'}</span>
+          <span class="steps-title">Run History</span>
+        </button>
+        {#if !runsCollapsed}
+          {#if runs.filter(r => r.status === 'completed').length >= 2}
+            <a href="/designs/{id}/compare" class="runs-compare-btn" title="Compare runs side by side">⇄ Compare</a>
+          {/if}
+          <button class="runs-import-btn" title="Import run from result JSON" onclick={() => { importError = ''; importFile = null; showImportModal = true; }}>⬆ Import</button>
+        {/if}
+      </div>
+      {#if !runsCollapsed}
+        <div class="runs-list">
+          {#if runs.length === 0}
+            <div style="padding: 8px 12px; font-size:11px; color:#585b70">No runs yet</div>
+          {/if}
+          {#each runs as r}
+            <div class="run-item-row">
+              <a href="/designs/{id}/runs/{r.id}" class="run-item">
+                <div class="run-item-top">
+                  <span class="badge badge-{r.status}" style="font-size:10px">{r.status}</span>
+                  <span class="run-item-id">{r.name || '#' + r.id}</span>
+                </div>
+                <div class="run-item-bottom">
+                  {#if r.profile_name}
+                    <span class="run-profile-tag">{r.profile_name}</span>
+                  {/if}
+                  {#if r.tps !== null}
+                    <span class="run-item-tps">{r.tps.toFixed(1)} TPS</span>
+                  {/if}
+                  {#if r.latency_avg_ms !== null}
+                    <span class="run-item-lat">{r.latency_avg_ms.toFixed(1)}ms</span>
+                  {/if}
+                </div>
+              </a>
+              <button class="run-delete-btn" title="Delete run" onclick={() => deleteRun(r.id)}>✕</button>
             </div>
-            <div class="run-item-bottom">
-              {#if r.profile_name}
-                <span class="run-profile-tag">{r.profile_name}</span>
-              {/if}
-              {#if r.tps !== null}
-                <span class="run-item-tps">{r.tps.toFixed(1)} TPS</span>
-              {/if}
-              {#if r.latency_avg_ms !== null}
-                <span class="run-item-lat">{r.latency_avg_ms.toFixed(1)}ms</span>
-              {/if}
-            </div>
-          </a>
-          <button class="run-delete-btn" title="Delete run" onclick={() => deleteRun(r.id)}>✕</button>
+          {/each}
         </div>
-      {/each}
+      {/if}
     </div>
   </div>
 
@@ -1124,20 +1168,58 @@
   .runs-section {
     flex-shrink: 0;
     border-top: 1px solid #313244;
-    max-height: 280px;
-    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    /* height set via inline style when expanded */
   }
+  .runs-resize-handle {
+    flex-shrink: 0;
+    height: 4px;
+    cursor: row-resize;
+    background: transparent;
+    transition: background 0.15s;
+  }
+  .runs-resize-handle:hover { background: #45475a; }
   .runs-section-header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 8px 12px 4px;
+    gap: 4px;
+    padding-right: 8px;
+    flex-shrink: 0;
+  }
+  .runs-collapse-btn {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex: 1;
+    min-width: 0;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 7px 12px;
+    color: #a6adc8;
+    text-align: left;
+  }
+  .runs-collapse-btn:hover { background: #2a2a3e; }
+  .runs-collapse-arrow { font-size: 9px; color: #585b70; flex-shrink: 0; }
+  .runs-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
   }
   .runs-import-btn {
     background: none; border: 1px solid #45475a; color: #a6adc8;
     font-size: 10px; padding: 2px 7px; border-radius: 4px; cursor: pointer;
+    flex-shrink: 0;
   }
   .runs-import-btn:hover { background: #2a2a3e; color: #cdd6f4; border-color: #89b4fa; }
+  .runs-compare-btn {
+    background: none; border: 1px solid #45475a; color: #a6adc8;
+    font-size: 10px; padding: 2px 7px; border-radius: 4px; cursor: pointer;
+    text-decoration: none; flex-shrink: 0;
+  }
+  .runs-compare-btn:hover { background: #2a2a3e; color: #cdd6f4; border-color: #89b4fa; }
   .run-item-row { display: flex; align-items: stretch; border-bottom: 1px solid #1e1e2e; }
   .run-item-row:hover .run-delete-btn { opacity: 1; }
   .run-item {

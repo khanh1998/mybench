@@ -74,7 +74,7 @@ export async function stopRun(runId: number) {
 // On startup, reset any stale running runs
 export function recoverStaleRuns() {
 	const db = getDb();
-	const stale = db.prepare(`UPDATE benchmark_runs SET status = 'failed', finished_at = datetime('now') WHERE status = 'running'`).run();
+	const stale = db.prepare(`UPDATE benchmark_runs SET status = 'failed', finished_at = ? WHERE status = 'running'`).run(new Date().toISOString());
 	if (stale.changes > 0) {
 		console.log(`[run-manager] Reset ${stale.changes} stale running runs to failed`);
 	}
