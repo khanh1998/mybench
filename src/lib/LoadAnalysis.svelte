@@ -314,11 +314,93 @@
   const anyLocks = $derived(runs.some(r => (locksData[r.id] ?? []).length > 0));
   const anySql   = $derived(runs.some(r => hasSql[r.id]));
 
+  // ── Paging ─────────────────────────────────────────────────────────────────
+  const PER_PAGE = 10;
+  let sqlPage   = $state(0);
+  let waitsPage = $state(0);
+
+  function pagedSql(runId: number): SqlRow[] {
+    const all = sortedSql(runId);
+    return all.slice(sqlPage * PER_PAGE, (sqlPage + 1) * PER_PAGE);
+  }
+  function sqlPageCount(runId: number) { return Math.ceil(sortedSql(runId).length / PER_PAGE); }
+
+  function pagedWaits(runId: number): WaitRow[] {
+    const all = waitsData[runId] ?? [];
+    return all.slice(waitsPage * PER_PAGE, (waitsPage + 1) * PER_PAGE);
+  }
+  function waitsPageCount(runId: number) { return Math.ceil((waitsData[runId] ?? []).length / PER_PAGE); }
+
+  // ── Flamegraph ─────────────────────────────────────────────────────────────
+  interface FlameItem { wtype: string; wevent: string; seconds: number; color: string; }
+  interface ActiveFlame {
+    runId: number; queryId: string; queryShort: string;
+    totalExecMs: number; items: FlameItem[]; noData: boolean;
+  }
+  let activeFlame = $state<ActiveFlame | null>(null);
+  let flameLoading = $state(false);
+
+  async function openFlame(run: RunMeta, row: SqlRow) {
+    flameLoading = true;
+    activeFlame = null;
+
+    // Fetch interval from benchmark_runs
+    const intRes = await queryApi(
+      `SELECT snapshot_interval_seconds FROM benchmark_runs WHERE id = ?`, [run.id]);
+    const intervalSecs = Number((intRes.rows[0] as Record<string, unknown>)?.snapshot_interval_seconds ?? 30);
+
+    // Fetch per-query wait attribution from activity snapshots
+    const p = showPhaseFilter ? localPhases : phases;
+    const { clause, params: pParams } = phaseClause(p);
+    const res = await queryApi(
+      `SELECT COALESCE(wait_event_type,'CPU') as wtype,
+              COALESCE(wait_event,'running') as wevent,
+              COUNT(*) as samples
+       FROM snap_pg_stat_activity
+       WHERE _run_id = ? AND ${clause}
+         AND state = 'active'
+         AND CAST(query_id AS TEXT) = CAST(? AS TEXT)
+       GROUP BY 1,2 ORDER BY 3 DESC`,
+      [run.id, ...pParams, row.queryid]);
+
+    const rawItems = res.rows as { wtype: string; wevent: string; samples: number }[];
+    const totalSamples = rawItems.reduce((s, r) => s + Number(r.samples), 0);
+    const totalExecMs = Number(row.delta_exec_time ?? 0);
+
+    // Apportion exec time proportionally across wait categories
+    const items: FlameItem[] = rawItems.map(r => ({
+      wtype: r.wtype,
+      wevent: r.wevent,
+      seconds: totalSamples > 0
+        ? (Number(r.samples) / totalSamples) * totalExecMs / 1000
+        : Number(r.samples) * intervalSecs,
+      color: WAIT_COLORS[r.wtype] ?? WAIT_COLORS.Other
+    })).sort((a, b) => b.seconds - a.seconds);
+
+    activeFlame = {
+      runId: run.id,
+      queryId: row.queryid,
+      queryShort: row.query_short,
+      totalExecMs,
+      items,
+      noData: items.length === 0
+    };
+    flameLoading = false;
+  }
+
+  function flameTotalSeconds(items: FlameItem[]) {
+    return items.reduce((s, i) => s + i.seconds, 0);
+  }
+
+  // Reset paging when data reloads
+  function resetPages() { sqlPage = 0; waitsPage = 0; }
+
   // ── Effects ────────────────────────────────────────────────────────────────
   $effect(() => {
     // Track runs and phases (external)
     const _ = runs.map(r => r.id).join(',') + '|' + (showPhaseFilter ? localPhases : phases).join(',');
     void _;
+    resetPages();
     loadAll();
   });
 
@@ -398,11 +480,13 @@
   <p class="section-desc">Most frequent wait events across active sessions during the bench phase.</p>
   <div class="waits-grid">
     {#each runs as run}
-      {@const rows = waitsData[run.id] ?? []}
-      {@const maxOcc = rows.length ? Math.max(...rows.map(r => Number(r.occurrences))) : 1}
+      {@const allRows = waitsData[run.id] ?? []}
+      {@const pageRows = pagedWaits(run.id)}
+      {@const maxOcc = allRows.length ? Math.max(...allRows.map(r => Number(r.occurrences))) : 1}
+      {@const totalPages = waitsPageCount(run.id)}
       <div class="waits-panel">
         {#if isCompare}<div class="run-label" style="color:{run.color}">{run.label}</div>{/if}
-        {#if rows.length === 0}
+        {#if allRows.length === 0}
           <div class="empty">No wait event data</div>
         {:else}
           <table class="data-table">
@@ -410,7 +494,7 @@
               <tr><th>Wait Type</th><th>Wait Event</th><th>Count</th><th style="width:120px"></th></tr>
             </thead>
             <tbody>
-              {#each rows as row}
+              {#each pageRows as row}
                 {@const occ = Number(row.occurrences)}
                 {@const barW = (occ / maxOcc * 100).toFixed(1)}
                 {@const color = WAIT_COLORS[row.wait_event_type] ?? WAIT_COLORS.Other}
@@ -423,6 +507,13 @@
               {/each}
             </tbody>
           </table>
+          {#if totalPages > 1}
+            <div class="pager">
+              <button disabled={waitsPage === 0} onclick={() => waitsPage--}>‹ Prev</button>
+              <span>Page {waitsPage + 1} of {totalPages} &nbsp;·&nbsp; {allRows.length} events</span>
+              <button disabled={waitsPage >= totalPages - 1} onclick={() => waitsPage++}>Next ›</button>
+            </div>
+          {/if}
         {/if}
       </div>
     {/each}
@@ -447,8 +538,10 @@
     <div class="sql-panels">
       {#each runs as run}
         {#if hasSql[run.id]}
-          {@const rows = sortedSql(run.id)}
+          {@const allRows = sortedSql(run.id)}
+          {@const pageRows = pagedSql(run.id)}
           {@const totalTime = totalExecTime(sqlData[run.id] ?? [])}
+          {@const totalPages = sqlPageCount(run.id)}
           <div class="sql-panel">
             {#if isCompare}<div class="run-label" style="color:{run.color}">{run.label}</div>{/if}
             <table class="data-table sql-table">
@@ -459,7 +552,7 @@
                     Calls {sqlSort.col === 'delta_calls' ? (sqlSort.asc ? '▲' : '▼') : ''}
                   </th>
                   <th class="sortable" onclick={() => setSqlSort('delta_exec_time')}>
-                    Total ms {sqlSort.col === 'delta_exec_time' ? (sqlSort.asc ? '▲' : '▼') : ''}
+                    Total Time {sqlSort.col === 'delta_exec_time' ? (sqlSort.asc ? '▲' : '▼') : ''}
                   </th>
                   <th>% Total</th>
                   <th class="sortable" onclick={() => setSqlSort('cache_hit_pct')}>
@@ -468,10 +561,11 @@
                   <th class="sortable" onclick={() => setSqlSort('delta_blks_read')}>
                     Blks Read {sqlSort.col === 'delta_blks_read' ? (sqlSort.asc ? '▲' : '▼') : ''}
                   </th>
+                  <th title="Wait profile — click to expand">Wait Profile</th>
                 </tr>
               </thead>
               <tbody>
-                {#each rows as row}
+                {#each pageRows as row}
                   {@const execTime = Number(row.delta_exec_time ?? 0)}
                   {@const pct = totalTime > 0 ? (execTime / totalTime * 100).toFixed(1) : '0'}
                   <tr>
@@ -486,10 +580,27 @@
                     </td>
                     <td style="text-align:right">{row.cache_hit_pct != null ? row.cache_hit_pct + '%' : '—'}</td>
                     <td style="text-align:right">{fmtNum(Number(row.delta_blks_read))}</td>
+                    <td>
+                      <button class="flame-btn" onclick={() => openFlame(run, row)} title="Show wait breakdown">
+                        <span class="flame-mini">
+                          {#each WAIT_ORDER as wt}
+                            <span class="flame-seg" style="background:{WAIT_COLORS[wt] ?? WAIT_COLORS.Other}"></span>
+                          {/each}
+                        </span>
+                        <span class="flame-icon">▦</span>
+                      </button>
+                    </td>
                   </tr>
                 {/each}
               </tbody>
             </table>
+            {#if totalPages > 1}
+              <div class="pager">
+                <button disabled={sqlPage === 0} onclick={() => sqlPage--}>‹ Prev</button>
+                <span>Page {sqlPage + 1} of {totalPages} &nbsp;·&nbsp; {allRows.length} queries</span>
+                <button disabled={sqlPage >= totalPages - 1} onclick={() => sqlPage++}>Next ›</button>
+              </div>
+            {/if}
           </div>
         {/if}
       {/each}
@@ -541,6 +652,55 @@
   {/if}
 </div>
 
+<!-- ── Flame Popup ─────────────────────────────────────────────────────────── -->
+{#if activeFlame || flameLoading}
+  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
+  <div role="dialog" aria-modal="true" class="flame-overlay" onclick={() => activeFlame = null}>
+    <div role="document" class="flame-modal" onclick={e => e.stopPropagation()}>
+      <div class="flame-modal-header">
+        <span class="flame-modal-title">Wait Profile</span>
+        <button class="flame-close" onclick={() => activeFlame = null}>✕</button>
+      </div>
+
+      {#if flameLoading}
+        <div class="flame-loading">Loading wait data…</div>
+      {:else if activeFlame}
+        <div class="flame-query" title={activeFlame.queryShort}>{activeFlame.queryShort}</div>
+
+        {#if activeFlame.noData}
+          <div class="flame-nodata">No activity samples matched this query.<br>
+            <small>query_id matching requires PostgreSQL 14+ and pg_stat_activity.query_id.</small>
+          </div>
+        {:else}
+          {@const total = flameTotalSeconds(activeFlame.items)}
+          <!-- Stacked horizontal bar -->
+          <div class="flame-bar-wrap">
+            {#each activeFlame.items as item}
+              {@const w = total > 0 ? (item.seconds / total * 100).toFixed(2) : '0'}
+              <div class="flame-bar-seg" style="width:{w}%;background:{item.color}" title="{item.wtype}:{item.wevent} {item.seconds.toFixed(2)}s"></div>
+            {/each}
+          </div>
+          <!-- Legend -->
+          <div class="flame-legend-title">Legend</div>
+          <div class="flame-legend">
+            {#each activeFlame.items as item}
+              <div class="flame-leg-row">
+                <span class="flame-leg-dot" style="background:{item.color}"></span>
+                <span class="flame-leg-label">{item.wtype}{item.wevent !== 'running' && item.wevent !== item.wtype ? ':' + item.wevent : ''}</span>
+                <span class="flame-leg-val">{item.seconds.toFixed(2)}s</span>
+              </div>
+            {/each}
+          </div>
+          <div class="flame-footer">
+            Total exec time: {fmtMs(activeFlame.totalExecMs)} &nbsp;·&nbsp;
+            Based on {activeFlame.items.reduce((s,i) => s, 0)} activity samples
+          </div>
+        {/if}
+      {/if}
+    </div>
+  </div>
+{/if}
+
 <style>
   .phase-filter { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
   .phase-label { font-size: 12px; font-weight: 600; color: #555; }
@@ -580,4 +740,52 @@
 
   .pct-bar-wrap { display: flex; align-items: center; gap: 6px; min-width: 80px; }
   .pct-bar { height: 8px; background: #0066cc; border-radius: 3px; min-width: 2px; flex-shrink: 0; }
+
+  /* Pager */
+  .pager { display: flex; align-items: center; gap: 10px; margin-top: 8px; font-size: 12px; color: #666; }
+  .pager button { background: #f5f5f5; border: 1px solid #ddd; border-radius: 4px; padding: 2px 10px; font-size: 12px; cursor: pointer; }
+  .pager button:hover:not(:disabled) { background: #e8eeff; border-color: #aac; }
+  .pager button:disabled { opacity: 0.35; cursor: not-allowed; }
+
+  /* Flame button in table */
+  .flame-btn { background: none; border: 1px solid #e0e0e0; border-radius: 4px; padding: 2px 6px; cursor: pointer; display: flex; align-items: center; gap: 4px; }
+  .flame-btn:hover { background: #f0f4ff; border-color: #99b; }
+  .flame-mini { display: flex; gap: 1px; width: 40px; height: 10px; border-radius: 2px; overflow: hidden; flex-shrink: 0; }
+  .flame-seg { flex: 1; }
+  .flame-icon { font-size: 13px; color: #888; }
+
+  /* Flame popup overlay */
+  .flame-overlay {
+    position: fixed; inset: 0; z-index: 100;
+    background: rgba(0,0,0,0.45);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .flame-modal {
+    background: #1e1f2e; color: #e0e0e0;
+    border: 1px solid #3a3b50; border-radius: 10px;
+    padding: 20px 22px; min-width: 320px; max-width: 480px; width: 90%;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+  }
+  .flame-modal-header { display: flex; align-items: center; margin-bottom: 12px; }
+  .flame-modal-title { font-size: 13px; font-weight: 700; color: #e0e0e0; flex: 1; }
+  .flame-close { background: none; border: none; color: #9ca3af; font-size: 16px; cursor: pointer; padding: 0 0 0 8px; }
+  .flame-close:hover { color: #fff; }
+  .flame-query { font-family: monospace; font-size: 11px; color: #9ca3af; margin-bottom: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .flame-loading { font-size: 13px; color: #9ca3af; padding: 12px 0; text-align: center; }
+  .flame-nodata { font-size: 12px; color: #9ca3af; padding: 12px 0; line-height: 1.6; }
+  .flame-nodata small { font-size: 11px; color: #6b7280; }
+
+  /* Horizontal stacked bar */
+  .flame-bar-wrap { display: flex; height: 28px; border-radius: 5px; overflow: hidden; margin-bottom: 16px; gap: 1px; }
+  .flame-bar-seg { min-width: 2px; transition: opacity 0.15s; }
+  .flame-bar-seg:hover { opacity: 0.75; }
+
+  /* Legend */
+  .flame-legend-title { font-size: 11px; font-weight: 600; color: #6b7280; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; }
+  .flame-legend { display: flex; flex-direction: column; gap: 4px; }
+  .flame-leg-row { display: flex; align-items: center; gap: 8px; }
+  .flame-leg-dot { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
+  .flame-leg-label { flex: 1; font-size: 12px; color: #d1d5db; }
+  .flame-leg-val { font-size: 12px; font-variant-numeric: tabular-nums; color: #f9fafb; font-weight: 600; min-width: 50px; text-align: right; }
+  .flame-footer { font-size: 11px; color: #6b7280; margin-top: 14px; padding-top: 10px; border-top: 1px solid #3a3b50; }
 </style>
