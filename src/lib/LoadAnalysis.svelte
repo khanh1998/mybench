@@ -345,7 +345,8 @@
          FROM pairs p
          LEFT JOIN latest_act ba ON ba.pid = p.blocked_pid AND ba.rn = 1
          LEFT JOIN latest_act bla ON bla.pid = p.blocking_pid AND bla.rn = 1
-         ORDER BY times_seen DESC`,
+         ORDER BY times_seen DESC
+         LIMIT 200`,
         [rid, ...pParams, rid]
       );
       locksData = { ...locksData, [rid]: lockRes.error ? [] : (lockRes.rows as unknown as LockPairRow[]) };
@@ -942,6 +943,9 @@
     <div class="lock-node-query">{(node.query ?? '').substring(0, 140)}</div>
   </div>
   {#if isExpanded && hasChildren}
+    {#if node.flattened}
+      <div class="lock-flat-note" style:padding-left="{(depth + 1) * 18 + 6}px">Deeper nodes flattened to this level ({node.children.length} sessions)</div>
+    {/if}
     {#each node.children as child, ci}
       {@render lockNodeRow(child, runId, depth + 1, key, ci)}
     {/each}
@@ -1251,6 +1255,7 @@
   .lock-toggle-btn { flex-shrink: 0; font-size: 10px; width: 14px; text-align: center; margin-top: 2px; user-select: none; }
   .lock-blocking-label { font-size: 11px; color: #888; }
   .lock-node-query { flex-basis: 100%; font-family: monospace; font-size: 10px; color: #888; padding: 1px 0 0 34px; white-space: pre-wrap; word-break: break-all; }
+  .lock-flat-note { font-size: 10px; color: #b45309; background: #fef3c7; padding: 2px 8px; border-bottom: 1px solid #e8e8e8; }
   .lock-mode-info { font-size: 11px; color: #555; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
   .lock-held-dim { font-size: 10px; color: #999; }
   .lock-times-seen { font-size: 10px; color: #0066cc; font-weight: 600; margin-left: auto; white-space: nowrap; }

@@ -122,17 +122,40 @@ describe('buildLockTree', () => {
     expect(tree.length).toBe(1);
   });
 
-  it('respects MAX_LOCK_DEPTH cap', () => {
-    // Build chain 1→2→3→...→12 (11 hops, exceeds MAX_LOCK_DEPTH=10)
+  it('respects MAX_LOCK_DEPTH cap and flattens deeper nodes', () => {
+    // Build chain 1→2→3→...→9 (8 hops, well past MAX_LOCK_DEPTH=5)
     const pairs: LockPairRow[] = [];
-    for (let i = 1; i <= 11; i++) pairs.push(pair(i, i + 1));
+    for (let i = 1; i <= 8; i++) pairs.push(pair(i, i + 1));
     const tree = buildLockTree(pairs);
 
     function depth(node: LockNode): number {
       if (node.children.length === 0) return 0;
       return 1 + Math.max(...node.children.map(depth));
     }
-    expect(depth(tree[0])).toBe(MAX_LOCK_DEPTH);
+    // depth 5 node flattens all remaining descendants as direct children (+1 level)
+    expect(depth(tree[0])).toBe(MAX_LOCK_DEPTH + 1);
+
+    // Find the flattened node at depth MAX_LOCK_DEPTH
+    let n = tree[0];
+    for (let i = 0; i < MAX_LOCK_DEPTH; i++) n = n.children[0];
+    expect(n.flattened).toBe(true);
+    // All remaining deeper nodes are flat children (no nesting)
+    for (const c of n.children) expect(c.children).toHaveLength(0);
+  });
+
+  it('dense fully-connected graph stays within node budget', () => {
+    // 30 PIDs all blocking each other — exponential without budget cap
+    const pairs: LockPairRow[] = [];
+    for (let a = 1; a <= 30; a++)
+      for (let b = 1; b <= 30; b++)
+        if (a !== b) pairs.push(pair(a, b));
+
+    const tree = buildLockTree(pairs);
+    function countNodes(nodes: LockNode[]): number {
+      return nodes.reduce((s, n) => s + 1 + countNodes(n.children), 0);
+    }
+    // Must complete quickly and stay under a reasonable limit
+    expect(countNodes(tree)).toBeLessThanOrEqual(500);
   });
 
   it('empty pairs returns empty tree', () => {
