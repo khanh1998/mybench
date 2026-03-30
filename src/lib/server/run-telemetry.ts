@@ -29,6 +29,14 @@ export interface TelemetrySeries {
 	points: TelemetrySeriesPoint[];
 }
 
+export interface TelemetryChartMetric {
+	key: string;
+	label: string;
+	kind: TelemetryValueKind;
+	title: string;
+	series: TelemetrySeries[];
+}
+
 export interface TelemetryMarker {
 	t: number;
 	label: string;
@@ -43,6 +51,8 @@ export interface TelemetrySection {
 	summary: TelemetryCard[];
 	chartTitle: string;
 	chartSeries: TelemetrySeries[];
+	chartMetrics?: TelemetryChartMetric[];
+	defaultChartMetricKey?: string;
 	tableTitle: string;
 	tableColumns: TelemetryTableColumn[];
 	tableRows: Record<string, unknown>[];
@@ -74,7 +84,7 @@ interface SnapshotRow {
 	[key: string]: unknown;
 }
 
-const COLORS = ['#0066cc', '#e6531d', '#00996b', '#9b36b7', '#cc8800'];
+const COLORS = ['#0066cc', '#e6531d', '#00996b', '#9b36b7', '#cc8800', '#008b8b', '#b22222', '#2f6fed'];
 const ALL_PHASES: TelemetryPhase[] = ['pre', 'bench', 'post'];
 const METRIC_INFO: Partial<Record<string, string>> = {
 	transactions:
@@ -297,6 +307,73 @@ function buildMultiSeries(
 		.filter((series): series is TelemetrySeries => series !== null);
 }
 
+function buildGroupedSeries(
+	entries: Array<{ key: string; label: string; rows: SnapshotRow[] }>,
+	runStartMs: number,
+	valueAtIndex: (rows: SnapshotRow[], index: number) => number | null
+): TelemetrySeries[] {
+	return entries
+		.map((entry, index) => {
+			const sorted = sortRows(entry.rows);
+			if (sorted.length === 0) return null;
+			const points = sorted
+				.map((row, rowIndex) => {
+					const value = valueAtIndex(sorted, rowIndex);
+					if (value === null || !Number.isFinite(value)) return null;
+					return relPoint(row, runStartMs, value);
+				})
+				.filter((point): point is TelemetrySeriesPoint => point !== null);
+			if (points.length === 0) return null;
+			return { label: entry.label, color: COLORS[index % COLORS.length], points };
+		})
+		.filter((series): series is TelemetrySeries => series !== null);
+}
+
+function deltaAt(rows: SnapshotRow[], index: number, field: string): number | null {
+	if (rows.length === 0 || index < 0 || index >= rows.length) return null;
+	const first = toNumber(rows[0][field]);
+	const current = toNumber(rows[index][field]);
+	if (first === null || current === null) return null;
+	return current - first;
+}
+
+function sumDeltaAt(rows: SnapshotRow[], index: number, fields: string[]): number | null {
+	return sum(fields.map((field) => deltaAt(rows, index, field)));
+}
+
+function ratioAt(rows: SnapshotRow[], index: number, numeratorField: string, denominatorFields: string[]): number | null {
+	return safeRatio(deltaAt(rows, index, numeratorField), sum(denominatorFields.map((field) => deltaAt(rows, index, field))));
+}
+
+function buildGroupedMetricCharts<T extends { key: string; label: string; rows: SnapshotRow[] }>(
+	entries: T[],
+	runStartMs: number,
+	metrics: Array<{
+		key: string;
+		label: string;
+		kind: TelemetryValueKind;
+		title: string;
+		scoreFn: (entry: T) => number | null;
+		seriesValueAt: (rows: SnapshotRow[], index: number) => number | null;
+	}>,
+	limit = 5
+): TelemetryChartMetric[] {
+	return metrics
+		.map((metric) => {
+			const top = topEntries(entries, metric.scoreFn, limit);
+			const series = buildGroupedSeries(top.map((entry) => ({ key: entry.key, label: entry.label, rows: entry.rows })), runStartMs, metric.seriesValueAt);
+			if (series.length === 0) return null;
+			return {
+				key: metric.key,
+				label: metric.label,
+				kind: metric.kind,
+				title: metric.title,
+				series
+			};
+		})
+		.filter((metric): metric is TelemetryChartMetric => metric !== null);
+}
+
 function aggregateByTimestamp(
 	rows: SnapshotRow[],
 	runStartMs: number,
@@ -408,7 +485,7 @@ function buildDatabaseSection(rows: SnapshotRow[], runStartMs: number): Telemetr
 			status: 'no_data',
 			reason: 'No pg_stat_database snapshots were collected for the selected phases.',
 			summary: [],
-			chartTitle: 'Transactions',
+			chartTitle: 'Database metrics',
 			chartSeries: [],
 			tableTitle: 'Database metrics',
 			tableColumns: [],
@@ -426,10 +503,24 @@ function buildDatabaseSection(rows: SnapshotRow[], runStartMs: number): Telemetr
 			metricCard('buffer_hit_ratio', 'Buffer Hit Ratio', 'percent', hitRatio),
 			metricCard('temp_bytes', 'Temp Bytes', 'bytes', tempBytes)
 		],
-		chartTitle: 'Transactions over time',
-		chartSeries: buildCumulativeSeries(rows, 'transactions', runStartMs, (row) =>
-			sum([toNumber(row.xact_commit), toNumber(row.xact_rollback)])
-		),
+		chartTitle: 'Database metrics over time',
+		chartSeries: buildMetricSeries(rows, runStartMs, [
+			{
+				label: 'transactions',
+				valueFn: (row) => sum([toNumber(row.xact_commit), toNumber(row.xact_rollback)])
+			},
+			{ label: 'commits', valueFn: (row) => toNumber(row.xact_commit) },
+			{ label: 'rollbacks', valueFn: (row) => toNumber(row.xact_rollback) },
+			{ label: 'blocks read', valueFn: (row) => toNumber(row.blks_read) },
+			{ label: 'blocks hit', valueFn: (row) => toNumber(row.blks_hit) },
+			{ label: 'rows inserted', valueFn: (row) => toNumber(row.tup_inserted) },
+			{ label: 'rows updated', valueFn: (row) => toNumber(row.tup_updated) },
+			{ label: 'rows deleted', valueFn: (row) => toNumber(row.tup_deleted) },
+			{ label: 'temp bytes', valueFn: (row) => toNumber(row.temp_bytes) },
+			{ label: 'deadlocks', valueFn: (row) => toNumber(row.deadlocks) },
+			{ label: 'block read time', valueFn: (row) => toNumber(row.blk_read_time) },
+			{ label: 'block write time', valueFn: (row) => toNumber(row.blk_write_time) }
+		]),
 		tableTitle: 'Database metrics',
 		tableColumns: [
 			{ key: 'metric', label: 'Metric', kind: 'text' },
@@ -487,9 +578,24 @@ function buildDatabaseConflictsSection(rows: SnapshotRow[], runStartMs: number):
 		],
 		chartTitle: 'Conflict types over time',
 		chartSeries: buildMetricSeries(rows, runStartMs, [
+			{
+				label: 'total conflicts',
+				valueFn: (row) =>
+					sum([
+						toNumber(row.confl_lock),
+						toNumber(row.confl_snapshot),
+						toNumber(row.confl_deadlock),
+						toNumber(row.confl_tablespace),
+						toNumber(row.confl_bufferpin),
+						toNumber(row.confl_active_logicalslot)
+					])
+			},
 			{ label: 'lock', valueFn: (row) => toNumber(row.confl_lock) },
 			{ label: 'snapshot', valueFn: (row) => toNumber(row.confl_snapshot) },
-			{ label: 'deadlock', valueFn: (row) => toNumber(row.confl_deadlock) }
+			{ label: 'deadlock', valueFn: (row) => toNumber(row.confl_deadlock) },
+			{ label: 'tablespace', valueFn: (row) => toNumber(row.confl_tablespace) },
+			{ label: 'buffer pin', valueFn: (row) => toNumber(row.confl_bufferpin) },
+			{ label: 'logical slot', valueFn: (row) => toNumber(row.confl_active_logicalslot) }
 		]),
 		tableTitle: 'Conflict metrics',
 		tableColumns: [
@@ -521,7 +627,7 @@ function buildWalSection(rows: SnapshotRow[], runStartMs: number, transactions: 
 			status: 'no_data',
 			reason: 'No pg_stat_wal snapshots were collected for the selected phases.',
 			summary: [],
-			chartTitle: 'WAL bytes',
+			chartTitle: 'WAL metrics',
 			chartSeries: [],
 			tableTitle: 'WAL metrics',
 			tableColumns: [],
@@ -539,8 +645,13 @@ function buildWalSection(rows: SnapshotRow[], runStartMs: number, transactions: 
 			metricCard('fpi_ratio', 'FPI Ratio', 'percent', safeRatio(walFpi, walRecords)),
 			metricCard('wal_buffers_full', 'WAL Buffers Full', 'count', walBuffersFull)
 		],
-		chartTitle: 'WAL bytes over time',
-		chartSeries: buildCumulativeSeries(rows, 'wal_bytes', runStartMs, (row) => toNumber(row.wal_bytes)),
+		chartTitle: 'WAL metrics over time',
+		chartSeries: buildMetricSeries(rows, runStartMs, [
+			{ label: 'wal bytes', valueFn: (row) => toNumber(row.wal_bytes) },
+			{ label: 'wal records', valueFn: (row) => toNumber(row.wal_records) },
+			{ label: 'full page images', valueFn: (row) => toNumber(row.wal_fpi) },
+			{ label: 'wal buffers full', valueFn: (row) => toNumber(row.wal_buffers_full) }
+		]),
 		tableTitle: 'WAL metrics',
 		tableColumns: [
 			{ key: 'metric', label: 'Metric', kind: 'text' },
@@ -693,6 +804,80 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 		};
 	});
 	const topGroups = topEntries(entries, (entry) => entry.totalBytes ?? sum([entry.reads, entry.writes]));
+	const chartMetrics = buildGroupedMetricCharts(entries, runStartMs, [
+		{
+			key: 'read_bytes',
+			label: 'Read Bytes',
+			kind: 'bytes',
+			title: 'Top IO groups by read bytes over time',
+			scoreFn: (entry) => entry.readBytes,
+			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'read_bytes')
+		},
+		{
+			key: 'reads',
+			label: 'Reads',
+			kind: 'count',
+			title: 'Top IO groups by reads over time',
+			scoreFn: (entry) => entry.reads,
+			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'reads')
+		},
+		{
+			key: 'write_bytes',
+			label: 'Write Bytes',
+			kind: 'bytes',
+			title: 'Top IO groups by write bytes over time',
+			scoreFn: (entry) => entry.writeBytes,
+			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'write_bytes')
+		},
+		{
+			key: 'writes',
+			label: 'Writes',
+			kind: 'count',
+			title: 'Top IO groups by writes over time',
+			scoreFn: (entry) => entry.writes,
+			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'writes')
+		},
+		{
+			key: 'extend_bytes',
+			label: 'Extend Bytes',
+			kind: 'bytes',
+			title: 'Top IO groups by extend bytes over time',
+			scoreFn: (entry) => entry.extendBytes,
+			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'extend_bytes')
+		},
+		{
+			key: 'extends',
+			label: 'Extends',
+			kind: 'count',
+			title: 'Top IO groups by extends over time',
+			scoreFn: (entry) => entry.extends,
+			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'extends')
+		},
+		{
+			key: 'hits',
+			label: 'Hits',
+			kind: 'count',
+			title: 'Top IO groups by hits over time',
+			scoreFn: (entry) => entry.hits,
+			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'hits')
+		},
+		{
+			key: 'evictions',
+			label: 'Evictions',
+			kind: 'count',
+			title: 'Top IO groups by evictions over time',
+			scoreFn: (entry) => entry.evictions,
+			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'evictions')
+		},
+		{
+			key: 'fsyncs',
+			label: 'FSyncs',
+			kind: 'count',
+			title: 'Top IO groups by fsyncs over time',
+			scoreFn: (entry) => entry.fsyncs,
+			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'fsyncs')
+		}
+	]);
 
 	return {
 		key: 'io',
@@ -707,10 +892,10 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 			metricCard('evictions', 'Evictions', 'count', sum(entries.map((entry) => entry.evictions))),
 			metricCard('fsyncs', 'FSyncs', 'count', sum(entries.map((entry) => entry.fsyncs)))
 		],
-		chartTitle: 'Top IO groups by bytes over time',
-		chartSeries: buildMultiSeries(topGroups.map((entry) => ({ key: entry.key, label: entry.label, rows: entry.rows })), runStartMs, (row) =>
-			sum([toNumber(row.read_bytes), toNumber(row.write_bytes), toNumber(row.extend_bytes)])
-		),
+		chartTitle: chartMetrics[0]?.title ?? 'Top IO groups by read bytes over time',
+		chartSeries: chartMetrics[0]?.series ?? [],
+		chartMetrics,
+		defaultChartMetricKey: chartMetrics[0]?.key,
 		tableTitle: 'Top IO groups',
 		tableColumns: [
 			{ key: 'group', label: 'Group', kind: 'text' },
@@ -778,6 +963,40 @@ function buildUserTablesSection(rows: SnapshotRow[], runStartMs: number): Teleme
 		};
 	});
 	const topTables = topEntries(entries, (entry) => entry.writes);
+	const chartMetrics = buildGroupedMetricCharts(entries, runStartMs, [
+		{
+			key: 'writes',
+			label: 'Writes',
+			kind: 'count',
+			title: 'Top tables by writes over time',
+			scoreFn: (entry) => entry.writes,
+			seriesValueAt: (groupRows, index) => sumDeltaAt(groupRows, index, ['n_tup_ins', 'n_tup_upd', 'n_tup_del'])
+		},
+		{
+			key: 'seq_scan_ratio',
+			label: 'Seq Scan Ratio',
+			kind: 'percent',
+			title: 'Top tables by seq scan ratio over time',
+			scoreFn: (entry) => entry.seqScanRatio,
+			seriesValueAt: (groupRows, index) => ratioAt(groupRows, index, 'seq_scan', ['seq_scan', 'idx_scan'])
+		},
+		{
+			key: 'hot_update_ratio',
+			label: 'HOT Update Ratio',
+			kind: 'percent',
+			title: 'Top tables by HOT update ratio over time',
+			scoreFn: (entry) => entry.hotRatio,
+			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'n_tup_hot_upd'), deltaAt(groupRows, index, 'n_tup_upd'))
+		},
+		{
+			key: 'dead_tuple_growth',
+			label: 'Dead Tuple Growth',
+			kind: 'count',
+			title: 'Top tables by dead tuple growth over time',
+			scoreFn: (entry) => entry.deadTupleGrowth,
+			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'n_dead_tup')
+		}
+	]);
 
 	return {
 		key: 'user_tables',
@@ -789,10 +1008,10 @@ function buildUserTablesSection(rows: SnapshotRow[], runStartMs: number): Teleme
 			metricCard('avg_hot_ratio', 'Avg HOT Ratio', 'percent', safeRatio(sum(entries.map((entry) => entry.hotRatio)), entries.length || null)),
 			metricCard('dead_tuple_growth', 'Dead Tuple Growth', 'count', sum(entries.map((entry) => entry.deadTupleGrowth)))
 		],
-		chartTitle: 'Top tables by writes over time',
-		chartSeries: buildMultiSeries(topTables.map((entry) => ({ key: entry.key, label: entry.label, rows: entry.rows })), runStartMs, (row) =>
-			sum([toNumber(row.n_tup_ins), toNumber(row.n_tup_upd), toNumber(row.n_tup_del)])
-		),
+		chartTitle: chartMetrics[0]?.title ?? 'Top tables by writes over time',
+		chartSeries: chartMetrics[0]?.series ?? [],
+		chartMetrics,
+		defaultChartMetricKey: chartMetrics[0]?.key,
 		tableTitle: 'Top tables by writes',
 		tableColumns: [
 			{ key: 'table', label: 'Table', kind: 'text' },
@@ -845,6 +1064,40 @@ function buildUserIndexesSection(rows: SnapshotRow[], runStartMs: number): Telem
 		};
 	});
 	const topIndexes = topEntries(entries, (entry) => entry.idxScans);
+	const chartMetrics = buildGroupedMetricCharts(entries, runStartMs, [
+		{
+			key: 'idx_scans',
+			label: 'Idx Scans',
+			kind: 'count',
+			title: 'Top indexes by scans over time',
+			scoreFn: (entry) => entry.idxScans,
+			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'idx_scan')
+		},
+		{
+			key: 'idx_tup_read',
+			label: 'Tuples Read',
+			kind: 'count',
+			title: 'Top indexes by tuples read over time',
+			scoreFn: (entry) => entry.idxRead,
+			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'idx_tup_read')
+		},
+		{
+			key: 'idx_tup_fetch',
+			label: 'Tuples Fetch',
+			kind: 'count',
+			title: 'Top indexes by tuples fetched over time',
+			scoreFn: (entry) => entry.idxFetch,
+			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'idx_tup_fetch')
+		},
+		{
+			key: 'selectivity',
+			label: 'Selectivity',
+			kind: 'percent',
+			title: 'Top indexes by selectivity over time',
+			scoreFn: (entry) => entry.selectivity,
+			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'idx_tup_fetch'), deltaAt(groupRows, index, 'idx_tup_read'))
+		}
+	]);
 
 	return {
 		key: 'user_indexes',
@@ -856,8 +1109,10 @@ function buildUserIndexesSection(rows: SnapshotRow[], runStartMs: number): Telem
 			metricCard('tuples_fetched', 'Tuples Fetched', 'count', sum(entries.map((entry) => entry.idxFetch))),
 			metricCard('unused_indexes', 'Unused Indexes', 'count', entries.filter((entry) => entry.unused).length)
 		],
-		chartTitle: 'Top indexes by scans over time',
-		chartSeries: buildMultiSeries(topIndexes.map((entry) => ({ key: entry.key, label: entry.label, rows: entry.rows })), runStartMs, (row) => toNumber(row.idx_scan)),
+		chartTitle: chartMetrics[0]?.title ?? 'Top indexes by scans over time',
+		chartSeries: chartMetrics[0]?.series ?? [],
+		chartMetrics,
+		defaultChartMetricKey: chartMetrics[0]?.key,
 		tableTitle: 'Top indexes by scans',
 		tableColumns: [
 			{ key: 'index', label: 'Index', kind: 'text' },
@@ -911,6 +1166,48 @@ function buildStatioUserTablesSection(rows: SnapshotRow[], runStartMs: number): 
 		};
 	});
 	const topTables = topEntries(entries, (entry) => entry.heapActivity);
+	const chartMetrics = buildGroupedMetricCharts(entries, runStartMs, [
+		{
+			key: 'heap_activity',
+			label: 'Heap Activity',
+			kind: 'count',
+			title: 'Top tables by heap activity over time',
+			scoreFn: (entry) => entry.heapActivity,
+			seriesValueAt: (groupRows, index) => sumDeltaAt(groupRows, index, ['heap_blks_read', 'heap_blks_hit'])
+		},
+		{
+			key: 'heap_hits',
+			label: 'Heap Hits',
+			kind: 'count',
+			title: 'Top tables by heap hits over time',
+			scoreFn: (entry) => entry.heapHits,
+			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'heap_blks_hit')
+		},
+		{
+			key: 'heap_reads',
+			label: 'Heap Reads',
+			kind: 'count',
+			title: 'Top tables by heap reads over time',
+			scoreFn: (entry) => entry.heapReads,
+			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'heap_blks_read')
+		},
+		{
+			key: 'heap_hit_ratio',
+			label: 'Heap Hit Ratio',
+			kind: 'percent',
+			title: 'Top tables by heap hit ratio over time',
+			scoreFn: (entry) => entry.heapHitRatio,
+			seriesValueAt: (groupRows, index) => ratioAt(groupRows, index, 'heap_blks_hit', ['heap_blks_hit', 'heap_blks_read'])
+		},
+		{
+			key: 'toast_reads',
+			label: 'TOAST Reads',
+			kind: 'count',
+			title: 'Top tables by TOAST reads over time',
+			scoreFn: (entry) => entry.toasts,
+			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'toast_blks_read')
+		}
+	]);
 
 	return {
 		key: 'statio_user_tables',
@@ -923,10 +1220,10 @@ function buildStatioUserTablesSection(rows: SnapshotRow[], runStartMs: number): 
 			metricCard('heap_hit_ratio', 'Heap Hit Ratio', 'percent', safeRatio(sum(entries.map((entry) => entry.heapHitRatio)), entries.length || null)),
 			metricCard('toast_reads', 'TOAST Reads', 'count', sum(entries.map((entry) => entry.toasts)))
 		],
-		chartTitle: 'Top tables by heap activity over time',
-		chartSeries: buildMultiSeries(topTables.map((entry) => ({ key: entry.key, label: entry.label, rows: entry.rows })), runStartMs, (row) =>
-			sum([toNumber(row.heap_blks_read), toNumber(row.heap_blks_hit)])
-		),
+		chartTitle: chartMetrics[0]?.title ?? 'Top tables by heap activity over time',
+		chartSeries: chartMetrics[0]?.series ?? [],
+		chartMetrics,
+		defaultChartMetricKey: chartMetrics[0]?.key,
 		tableTitle: 'Top tables by heap activity',
 		tableColumns: [
 			{ key: 'table', label: 'Table', kind: 'text' },
@@ -977,6 +1274,24 @@ function buildStatioUserIndexesSection(rows: SnapshotRow[], runStartMs: number):
 		};
 	});
 	const topIndexes = topEntries(entries, (entry) => entry.idxReads);
+	const chartMetrics = buildGroupedMetricCharts(entries, runStartMs, [
+		{
+			key: 'idx_blks_read',
+			label: 'Idx Blocks Read',
+			kind: 'count',
+			title: 'Top indexes by block reads over time',
+			scoreFn: (entry) => entry.idxReads,
+			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'idx_blks_read')
+		},
+		{
+			key: 'idx_hit_ratio',
+			label: 'Idx Hit Ratio',
+			kind: 'percent',
+			title: 'Top indexes by hit ratio over time',
+			scoreFn: (entry) => entry.idxHitRatio,
+			seriesValueAt: (groupRows, index) => ratioAt(groupRows, index, 'idx_blks_hit', ['idx_blks_hit', 'idx_blks_read'])
+		}
+	]);
 
 	return {
 		key: 'statio_user_indexes',
@@ -986,8 +1301,10 @@ function buildStatioUserIndexesSection(rows: SnapshotRow[], runStartMs: number):
 			metricCard('index_reads', 'Index Block Reads', 'count', sum(entries.map((entry) => entry.idxReads))),
 			metricCard('index_hit_ratio', 'Index Hit Ratio', 'percent', safeRatio(sum(entries.map((entry) => entry.idxHitRatio)), entries.length || null))
 		],
-		chartTitle: 'Top indexes by block reads over time',
-		chartSeries: buildMultiSeries(topIndexes.map((entry) => ({ key: entry.key, label: entry.label, rows: entry.rows })), runStartMs, (row) => toNumber(row.idx_blks_read)),
+		chartTitle: chartMetrics[0]?.title ?? 'Top indexes by block reads over time',
+		chartSeries: chartMetrics[0]?.series ?? [],
+		chartMetrics,
+		defaultChartMetricKey: chartMetrics[0]?.key,
 		tableTitle: 'Top indexes by block reads',
 		tableColumns: [
 			{ key: 'index', label: 'Index', kind: 'text' },

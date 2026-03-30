@@ -30,6 +30,19 @@ function createDb() {
       temp_bytes INTEGER,
       deadlocks INTEGER
     );
+    CREATE TABLE snap_pg_stat_database_conflicts (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL,
+      _collected_at TEXT NOT NULL,
+      _phase TEXT NOT NULL,
+      datname TEXT,
+      confl_tablespace INTEGER,
+      confl_lock INTEGER,
+      confl_snapshot INTEGER,
+      confl_bufferpin INTEGER,
+      confl_deadlock INTEGER,
+      confl_active_logicalslot INTEGER
+    );
     CREATE TABLE snap_pg_stat_user_tables (
       _id INTEGER PRIMARY KEY AUTOINCREMENT,
       _run_id INTEGER NOT NULL,
@@ -132,6 +145,16 @@ function seedRun(db: Database.Database) {
 	// These rows should be ignored because telemetry must use benchmark_runs.database.
 	insertDbRow.run(1, '2026-03-30T05:57:38Z', 'pre', 'changed_db', 1000, 0, 100, 100, 0, 0);
 	insertDbRow.run(1, '2026-03-30T05:58:59Z', 'post', 'changed_db', 3000, 0, 300, 100, 0, 0);
+
+	const insertConflictRow = db.prepare(`
+    INSERT INTO snap_pg_stat_database_conflicts (
+      _run_id, _collected_at, _phase, datname, confl_tablespace, confl_lock,
+      confl_snapshot, confl_bufferpin, confl_deadlock, confl_active_logicalslot
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+	insertConflictRow.run(1, '2026-03-30T05:57:59Z', 'bench', 'benchmark', 0, 2, 1, 0, 0, 0);
+	insertConflictRow.run(1, '2026-03-30T05:58:19Z', 'bench', 'benchmark', 1, 3, 3, 2, 1, 1);
 
 	const insertTableRow = db.prepare(`
     INSERT INTO snap_pg_stat_user_tables (_run_id, _collected_at, _phase, schemaname, relname, seq_scan, idx_scan, n_tup_ins, n_tup_upd, n_tup_del, n_tup_hot_upd, n_dead_tup)
@@ -250,8 +273,34 @@ describe('buildRunTelemetry', () => {
 	it('reports PG18 WAL and IO metrics without legacy WAL timing columns', () => {
 		const telemetry = buildRunTelemetry(db, 1, ['bench']);
 		const wal = telemetry.sections.find((section) => section.key === 'wal');
+		const database = telemetry.sections.find((section) => section.key === 'database');
+		const conflicts = telemetry.sections.find((section) => section.key === 'database_conflicts');
 		const io = telemetry.sections.find((section) => section.key === 'io');
 
+		expect(database?.chartSeries.map((series) => series.label)).toEqual([
+			'transactions',
+			'commits',
+			'rollbacks',
+			'blocks read',
+			'blocks hit',
+			'temp bytes',
+			'deadlocks'
+		]);
+		expect(conflicts?.chartSeries.map((series) => series.label)).toEqual([
+			'total conflicts',
+			'lock',
+			'snapshot',
+			'deadlock',
+			'tablespace',
+			'buffer pin',
+			'logical slot'
+		]);
+		expect(wal?.chartSeries.map((series) => series.label)).toEqual([
+			'wal bytes',
+			'wal records',
+			'full page images',
+			'wal buffers full'
+		]);
 		expect(wal?.summary.map((card) => card.key)).toEqual([
 			'wal_bytes',
 			'wal_bytes_per_tx',
@@ -274,6 +323,17 @@ describe('buildRunTelemetry', () => {
 			['extend_bytes', 16384],
 			['evictions', 3],
 			['fsyncs', 1]
+		]);
+		expect(io?.chartMetrics?.map((metric) => metric.key)).toEqual([
+			'read_bytes',
+			'reads',
+			'write_bytes',
+			'writes',
+			'extend_bytes',
+			'extends',
+			'hits',
+			'evictions',
+			'fsyncs'
 		]);
 		expect(io?.tableRows).toEqual([
 			{
@@ -314,6 +374,7 @@ describe('buildRunTelemetry', () => {
 	it('surfaces cached heap activity in statio user tables even when heap reads stay at zero', () => {
 		const telemetry = buildRunTelemetry(db, 1, ['bench']);
 		const statioTables = telemetry.sections.find((section) => section.key === 'statio_user_tables');
+		const userTables = telemetry.sections.find((section) => section.key === 'user_tables');
 
 		expect(statioTables?.summary.map((card) => [card.key, card.value])).toEqual([
 			['heap_activity', 250],
@@ -340,6 +401,12 @@ describe('buildRunTelemetry', () => {
 				heap_hit_ratio: 1,
 				toast_reads: 0
 			}
+		]);
+		expect(userTables?.chartMetrics?.map((metric) => metric.key)).toEqual([
+			'writes',
+			'seq_scan_ratio',
+			'hot_update_ratio',
+			'dead_tuple_growth'
 		]);
 	});
 });

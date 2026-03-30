@@ -7,12 +7,14 @@
     series,
     title,
     markers = [],
-    originMs = null
+    originMs = null,
+    showAllSeriesByDefault = false
   }: {
     series: ChartSeries[];
     title: string;
     markers?: Marker[];
     originMs?: number | null;
+    showAllSeriesByDefault?: boolean;
   } = $props();
 
   const ML = 60, MR = 20, MT = 8, MB = 28;
@@ -20,7 +22,11 @@
   const IW = W - ML - MR;
   const IH = H - MT - MB;
 
-  const allPts = $derived(series.flatMap(s => s.points));
+  let hiddenSeries = $state<string[]>([]);
+  let lastSeriesSignature = $state('');
+
+  const visibleSeries = $derived(series.filter(s => !hiddenSeries.includes(s.label)));
+  const allPts = $derived(visibleSeries.flatMap(s => s.points));
   const markerTs = $derived(markers.map(m => m.t).filter(t => !isNaN(t)));
   const tMin = $derived(allPts.length ? Math.min(...allPts.map(p => p.t), ...markerTs) : 0);
   const tMax = $derived(allPts.length ? Math.max(...allPts.map(p => p.t), ...markerTs) : 1);
@@ -32,8 +38,26 @@
   // Sorted unique timestamps for snap-to-data-point
   const uniqueTimes = $derived.by(() => {
     const s = new Set<number>();
-    for (const sr of series) for (const p of sr.points) s.add(p.t);
+    for (const sr of visibleSeries) for (const p of sr.points) s.add(p.t);
     return [...s].sort((a, b) => a - b);
+  });
+
+  $effect(() => {
+    const signature = series.map((s) => s.label).join('\u001f');
+    if (signature !== lastSeriesSignature) {
+      lastSeriesSignature = signature;
+      hiddenSeries = showAllSeriesByDefault ? [] : series.slice(1).map((s) => s.label);
+      hoveredTime = null;
+      hoveredSeries = null;
+    }
+  });
+
+  $effect(() => {
+    const labels = new Set(series.map((s) => s.label));
+    const nextHidden = hiddenSeries.filter((label) => labels.has(label));
+    if (nextHidden.join('\u001f') !== hiddenSeries.join('\u001f')) hiddenSeries = nextHidden;
+    if (hoveredSeries && !visibleSeries.some((s) => s.label === hoveredSeries)) hoveredSeries = null;
+    if (visibleSeries.length === 0) hoveredTime = null;
   });
 
   function tx(t: number) { return ((t - tMin) / tRange) * IW; }
@@ -72,6 +96,14 @@
   let tooltipX = $state(0);
   let tooltipY = $state(0);
 
+  function toggleSeries(label: string) {
+    if (hiddenSeries.includes(label)) {
+      hiddenSeries = hiddenSeries.filter((item) => item !== label);
+      return;
+    }
+    hiddenSeries = [...hiddenSeries, label];
+  }
+
   function snapTime(t: number): number | null {
     if (!uniqueTimes.length) return null;
     return uniqueTimes.reduce((n, x) => Math.abs(x - t) < Math.abs(n - t) ? x : n);
@@ -94,7 +126,7 @@
     // Find nearest series by y-proximity (threshold: 22 viewBox units)
     if (hoveredTime !== null) {
       let minDist = 22, nearest: string | null = null;
-      for (const sr of series) {
+      for (const sr of visibleSeries) {
         const pt = sr.points.find(p => p.t === hoveredTime);
         if (!pt) continue;
         const dist = Math.abs(ty(pt.v) - chartY);
@@ -113,7 +145,7 @@
 
   const tooltipRows = $derived.by(() => {
     if (hoveredTime === null) return [];
-    return series
+    return visibleSeries
       .map(sr => ({ color: sr.color, label: sr.label, v: sr.points.find(p => p.t === hoveredTime)?.v ?? null }))
       .filter(r => r.v !== null)
       .sort((a, b) => (b.v ?? 0) - (a.v ?? 0)) as { color: string; label: string; v: number }[];
@@ -121,8 +153,8 @@
 
   // Series ordered so highlighted series renders last (on top)
   const orderedSeries = $derived.by(() => {
-    if (!hoveredSeries) return series;
-    return [...series.filter(s => s.label !== hoveredSeries), ...series.filter(s => s.label === hoveredSeries)];
+    if (!hoveredSeries) return visibleSeries;
+    return [...visibleSeries.filter(s => s.label !== hoveredSeries), ...visibleSeries.filter(s => s.label === hoveredSeries)];
   });
 </script>
 
@@ -131,15 +163,25 @@
     <span class="chart-title">{title}</span>
     <span class="chart-legend">
       {#each series as s}
-        <span class="leg-item">
+        {@const hidden = hiddenSeries.includes(s.label)}
+        <button
+          type="button"
+          class="leg-item"
+          class:hidden={hidden}
+          aria-pressed={!hidden}
+          title={hidden ? `Show ${s.label}` : `Hide ${s.label}`}
+          onclick={() => toggleSeries(s.label)}
+        >
           <span class="leg-dot" style="background:{s.color}"></span>
           {s.label}
-        </span>
+        </button>
       {/each}
     </span>
   </div>
 
-  {#if allPts.length === 0}
+  {#if series.length > 0 && visibleSeries.length === 0}
+    <div class="no-data">All series hidden</div>
+  {:else if allPts.length === 0}
     <div class="no-data">No data</div>
   {:else}
     <svg bind:this={svgEl} role="img" aria-label={title} width="100%" viewBox="0 0 {W} {H}" preserveAspectRatio="none"
@@ -230,7 +272,20 @@
   .chart-header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 6px; flex-wrap: wrap; }
   .chart-title { font-size: 12px; font-weight: 700; color: #333; font-family: monospace; }
   .chart-legend { display: flex; gap: 10px; flex-wrap: wrap; }
-  .leg-item { display: flex; align-items: center; gap: 4px; font-size: 11px; color: #555; }
+  .leg-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: #555;
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    padding: 2px 6px;
+    cursor: pointer;
+  }
+  .leg-item:hover { background: #f7f7f7; border-color: #e3e3e3; }
+  .leg-item.hidden { opacity: 0.45; }
   .leg-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .no-data { font-size: 12px; color: #aaa; padding: 20px 0; text-align: center; }
 

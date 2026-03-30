@@ -29,6 +29,14 @@
     points: TelemetrySeriesPoint[];
   }
 
+  interface TelemetryChartMetric {
+    key: string;
+    label: string;
+    kind: TelemetryValueKind;
+    title: string;
+    series: TelemetrySeries[];
+  }
+
   interface TelemetryMarker {
     t: number;
     label: string;
@@ -43,6 +51,8 @@
     summary: TelemetryCard[];
     chartTitle: string;
     chartSeries: TelemetrySeries[];
+    chartMetrics?: TelemetryChartMetric[];
+    defaultChartMetricKey?: string;
     tableTitle: string;
     tableColumns: TelemetryTableColumn[];
     tableRows: Record<string, unknown>[];
@@ -74,9 +84,17 @@
   let loading = $state(false);
   let error = $state('');
   let selectedPhases = $state<TelemetryPhase[]>([...DEFAULT_PHASES]);
+  let selectedChartMetrics = $state<Record<string, string>>({});
   let openInfoKey = $state<string | null>(null);
   let requestSeq = 0;
   const phaseKey = $derived(selectedPhases.join(','));
+  const chartMetricSignature = $derived(
+    telemetry
+      ? telemetry.sections
+          .map((section) => `${section.key}:${section.defaultChartMetricKey ?? ''}:${section.chartMetrics?.map((metric) => metric.key).join(',') ?? ''}`)
+          .join('|')
+      : ''
+  );
 
   async function loadTelemetry() {
     const seq = ++requestSeq;
@@ -128,6 +146,16 @@
     if (event.key === 'Escape') openInfoKey = null;
   }
 
+  function setChartMetric(sectionKey: string, metricKey: string) {
+    selectedChartMetrics = { ...selectedChartMetrics, [sectionKey]: metricKey };
+  }
+
+  function getActiveChartMetric(section: TelemetrySection): TelemetryChartMetric | null {
+    if (!section.chartMetrics?.length) return null;
+    const selected = selectedChartMetrics[section.key] ?? section.defaultChartMetricKey ?? section.chartMetrics[0].key;
+    return section.chartMetrics.find((metric) => metric.key === selected) ?? section.chartMetrics[0];
+  }
+
   function formatNumber(value: number, maxFractionDigits = 2): string {
     return value.toLocaleString(undefined, {
       minimumFractionDigits: Number.isInteger(value) ? 0 : Math.min(1, maxFractionDigits),
@@ -171,6 +199,24 @@
     if (!active) return;
     phaseKey;
     void loadTelemetry();
+  });
+
+  $effect(() => {
+    chartMetricSignature;
+    if (!telemetry) return;
+    const next = { ...selectedChartMetrics };
+    let changed = false;
+    for (const section of telemetry.sections) {
+      if (!section.chartMetrics?.length) continue;
+      const current = next[section.key];
+      if (current && section.chartMetrics.some((metric) => metric.key === current)) continue;
+      const fallback = section.defaultChartMetricKey ?? section.chartMetrics[0].key;
+      if (next[section.key] !== fallback) {
+        next[section.key] = fallback;
+        changed = true;
+      }
+    }
+    if (changed) selectedChartMetrics = next;
   });
 </script>
 
@@ -247,6 +293,7 @@
           </div>
 
           {#if section.status === 'ok'}
+            {@const activeChartMetric = getActiveChartMetric(section)}
             <div class="summary-grid">
               {#each section.summary as card}
                 {@const infoKey = getInfoKey(section.key, card.key)}
@@ -277,11 +324,28 @@
               {/each}
             </div>
 
+            {#if section.chartMetrics && section.chartMetrics.length > 0}
+              <div class="chart-metric-toolbar">
+                <span class="chart-metric-label">Metric</span>
+                <div class="chart-metric-list">
+                  {#each section.chartMetrics as metric}
+                    <button
+                      type="button"
+                      class="chart-metric-chip"
+                      class:active={activeChartMetric?.key === metric.key}
+                      onclick={() => setChartMetric(section.key, metric.key)}
+                    >{metric.label}</button>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+
             <LineChart
-              title={section.chartTitle}
-              series={section.chartSeries}
+              title={activeChartMetric?.title ?? section.chartTitle}
+              series={activeChartMetric?.series ?? section.chartSeries}
               markers={telemetry.markers}
               originMs={originMs}
+              showAllSeriesByDefault={!!activeChartMetric}
             />
 
             {#if section.tableRows.length > 0}
@@ -459,6 +523,37 @@
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
     gap: 8px;
+  }
+  .chart-metric-toolbar {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .chart-metric-label {
+    font-size: 11px;
+    color: #666;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .chart-metric-list {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .chart-metric-chip {
+    border: 1px solid #d9d9d9;
+    background: #fff;
+    color: #666;
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .chart-metric-chip.active {
+    background: #0f172a;
+    border-color: #0f172a;
+    color: #fff;
   }
   .table-block { display: flex; flex-direction: column; gap: 8px; }
   .table-title { font-size: 12px; font-weight: 700; color: #444; text-transform: uppercase; }
