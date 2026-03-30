@@ -27,3 +27,4 @@ data/mybench.db-shm
 .claude/settings.local.json
 
 sample-plan/
+scripts/
