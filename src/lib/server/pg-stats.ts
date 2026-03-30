@@ -6,6 +6,7 @@ import { getPgStatStatementsSqliteType } from './pg-stat-statements-schema';
 export const SNAP_TABLE_MAP: Record<string, string> = {
 	pg_stat_database: 'snap_pg_stat_database',
 	pg_stat_bgwriter: 'snap_pg_stat_bgwriter',
+	pg_stat_checkpointer: 'snap_pg_stat_checkpointer',
 	pg_stat_user_tables: 'snap_pg_stat_user_tables',
 	pg_stat_user_indexes: 'snap_pg_stat_user_indexes',
 	pg_statio_user_tables: 'snap_pg_statio_user_tables',

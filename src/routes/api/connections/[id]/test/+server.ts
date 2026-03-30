@@ -53,6 +53,9 @@ export const POST: RequestHandler = async ({ params, request }) => {
 			if (versionNum < 160000) {
 				disable.run(server.id, 'pg_stat_io');
 			}
+			if (versionNum < 170000) {
+				disable.run(server.id, 'pg_stat_checkpointer');
+			}
 		});
 		doInsert();
 	} catch (_err) {

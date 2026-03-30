@@ -26,6 +26,162 @@ function createSnapPgStatStatementsTableSql(): string {
   `;
 }
 
+function createSnapPgStatBgwriterTableSql(tableName = 'snap_pg_stat_bgwriter', phaseColumnSql = `_phase TEXT NOT NULL DEFAULT 'bench'`): string {
+	return `
+    CREATE TABLE ${tableName} (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL,
+      ${phaseColumnSql},
+      buffers_clean INTEGER,
+      maxwritten_clean INTEGER,
+      buffers_alloc INTEGER,
+      stats_reset TEXT
+    )
+  `;
+}
+
+function createSnapPgStatCheckpointerTableSql(tableName = 'snap_pg_stat_checkpointer', phaseColumnSql = `_phase TEXT NOT NULL DEFAULT 'bench'`): string {
+	return `
+    CREATE TABLE ${tableName} (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL,
+      ${phaseColumnSql},
+      num_timed INTEGER,
+      num_requested INTEGER,
+      restartpoints_timed INTEGER,
+      restartpoints_req INTEGER,
+      restartpoints_done INTEGER,
+      write_time REAL,
+      sync_time REAL,
+      buffers_written INTEGER,
+      stats_reset TEXT
+    )
+  `;
+}
+
+function tableExists(db: Database.Database, tableName: string): boolean {
+	return !!db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`).get(tableName);
+}
+
+function migrateBgwriterAndCheckpointerTables(db: Database.Database): void {
+	const bgwriterMigrationId = 'snap_bgwriter_checkpointer_v1';
+	const migrated = db.prepare(`SELECT id FROM schema_migrations WHERE id = ?`).get(bgwriterMigrationId);
+	if (migrated) return;
+
+	if (tableExists(db, 'snap_pg_stat_bgwriter')) {
+		const tempTable = 'snap_pg_stat_bgwriter__next';
+		db.exec(`DROP TABLE IF EXISTS ${tempTable}`);
+		db.exec(createSnapPgStatBgwriterTableSql(tempTable));
+
+		const existingCols = new Set(
+			(db.prepare(`PRAGMA table_info(snap_pg_stat_bgwriter)`).all() as { name: string }[]).map((col) => col.name)
+		);
+		const targetCols: string[] = [];
+		const sourceExprs: string[] = [];
+		const copyColumn = (target: string, source = target) => {
+			if (existingCols.has(source)) {
+				targetCols.push(target);
+				sourceExprs.push(source);
+			}
+		};
+
+		copyColumn('_run_id');
+		copyColumn('_collected_at');
+		if (existingCols.has('_phase')) {
+			targetCols.push('_phase');
+			sourceExprs.push('_phase');
+		} else if (existingCols.has('_is_baseline')) {
+			targetCols.push('_phase');
+			sourceExprs.push(`CASE WHEN _is_baseline = 1 THEN 'pre' ELSE 'bench' END`);
+		}
+		copyColumn('buffers_clean');
+		copyColumn('maxwritten_clean');
+		copyColumn('buffers_alloc');
+		copyColumn('stats_reset');
+
+		if (targetCols.length > 0) {
+			db.exec(`
+        INSERT INTO ${tempTable} (${targetCols.join(', ')})
+        SELECT ${sourceExprs.join(', ')}
+        FROM snap_pg_stat_bgwriter
+      `);
+		}
+
+		db.exec(`
+      DROP TABLE snap_pg_stat_bgwriter;
+      ALTER TABLE ${tempTable} RENAME TO snap_pg_stat_bgwriter;
+    `);
+	} else {
+		db.exec(createSnapPgStatBgwriterTableSql());
+	}
+
+	db.exec(createSnapPgStatCheckpointerTableSql().replace('CREATE TABLE ', 'CREATE TABLE IF NOT EXISTS '));
+	db.prepare(`INSERT INTO schema_migrations (id) VALUES (?)`).run(bgwriterMigrationId);
+}
+
+function migrateBgwriterQueriesAndMetrics(db: Database.Database): void {
+	const migrationId = 'bgwriter_metric_queries_v1';
+	const migrated = db.prepare(`SELECT id FROM schema_migrations WHERE id = ?`).get(migrationId);
+	if (migrated) return;
+
+	db.prepare(`
+    UPDATE metrics
+    SET name = ?, description = ?, sql = ?
+    WHERE is_builtin = 1 AND name = ?
+  `).run(
+		'BGWriter activity',
+		'Background writer cleaning and buffer allocation activity over time.',
+		`SELECT _collected_at, buffers_clean, maxwritten_clean, buffers_alloc
+FROM snap_pg_stat_bgwriter
+WHERE _run_id = ? AND _phase = 'bench'
+ORDER BY _collected_at`,
+		'Checkpoint activity'
+	);
+
+	db.prepare(`
+    UPDATE metrics
+    SET name = ?, description = ?, sql = ?
+    WHERE is_builtin = 1 AND name = ?
+  `).run(
+		'BGWriter clean pressure',
+		'Background writer cleaning output and maxwritten events over time.',
+		`SELECT _collected_at, buffers_clean, maxwritten_clean, buffers_alloc
+FROM snap_pg_stat_bgwriter
+WHERE _run_id = ? AND _phase = 'bench'
+ORDER BY _collected_at`,
+		'Buffer writes: bgwriter vs backends'
+	);
+
+	db.prepare(`
+    UPDATE saved_queries
+    SET name = ?, sql = ?
+    WHERE decision_id IS NULL AND name = ?
+  `).run(
+		'BGWriter stats',
+		`SELECT buffers_clean, maxwritten_clean, buffers_alloc, stats_reset
+FROM snap_pg_stat_bgwriter WHERE _run_id = ? ORDER BY _collected_at DESC LIMIT 1`,
+		'Checkpoint write time'
+	);
+
+	db.prepare(`INSERT INTO schema_migrations (id) VALUES (?)`).run(migrationId);
+}
+
+function backfillPgStatCheckpointerSelections(db: Database.Database): void {
+	const migrationId = 'pg_stat_checkpointer_selection_v1';
+	const migrated = db.prepare(`SELECT id FROM schema_migrations WHERE id = ?`).get(migrationId);
+	if (migrated) return;
+
+	db.exec(`
+    INSERT OR IGNORE INTO pg_stat_table_selections (server_id, table_name, enabled)
+    SELECT id, 'pg_stat_checkpointer', 1
+    FROM pg_servers
+  `);
+
+	db.prepare(`INSERT INTO schema_migrations (id) VALUES (?)`).run(migrationId);
+}
+
 export function getDb(): Database.Database {
 	if (!_db) {
 		_db = new Database(DB_PATH);
@@ -217,6 +373,7 @@ function migrate(db: Database.Database) {
       DROP TABLE IF EXISTS snap_pg_stat_replication;
       DROP TABLE IF EXISTS snap_pg_stat_subscription;
       DROP TABLE IF EXISTS snap_pg_stat_subscription_stats;
+      DROP TABLE IF EXISTS snap_pg_stat_checkpointer;
 
       -- pg_stat_database (PG16)
       CREATE TABLE snap_pg_stat_database (
@@ -236,18 +393,11 @@ function migrate(db: Database.Database) {
         stats_reset TEXT
       );
 
-      -- pg_stat_bgwriter (PG16)
-      CREATE TABLE snap_pg_stat_bgwriter (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL,
-        _is_baseline INTEGER NOT NULL DEFAULT 0,
-        checkpoints_timed INTEGER, checkpoints_req INTEGER,
-        checkpoint_write_time REAL, checkpoint_sync_time REAL,
-        buffers_checkpoint INTEGER, buffers_clean INTEGER, maxwritten_clean INTEGER,
-        buffers_backend INTEGER, buffers_backend_fsync INTEGER, buffers_alloc INTEGER,
-        stats_reset TEXT
-      );
+      -- pg_stat_bgwriter
+      ${createSnapPgStatBgwriterTableSql('snap_pg_stat_bgwriter', '_is_baseline INTEGER NOT NULL DEFAULT 0')};
+
+      -- pg_stat_checkpointer
+      ${createSnapPgStatCheckpointerTableSql('snap_pg_stat_checkpointer', '_is_baseline INTEGER NOT NULL DEFAULT 0')};
 
       -- pg_stat_user_tables (PG16)
       CREATE TABLE snap_pg_stat_user_tables (
@@ -463,6 +613,7 @@ function migrate(db: Database.Database) {
       DROP TABLE IF EXISTS snap_pg_stat_replication;
       DROP TABLE IF EXISTS snap_pg_stat_subscription;
       DROP TABLE IF EXISTS snap_pg_stat_subscription_stats;
+      DROP TABLE IF EXISTS snap_pg_stat_checkpointer;
 
       CREATE TABLE snap_pg_stat_database (
         _id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -477,15 +628,8 @@ function migrate(db: Database.Database) {
         session_time REAL, active_time REAL, idle_in_transaction_time REAL,
         sessions INTEGER, sessions_abandoned INTEGER, sessions_fatal INTEGER, sessions_killed INTEGER, stats_reset TEXT
       );
-      CREATE TABLE snap_pg_stat_bgwriter (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
-        checkpoints_timed INTEGER, checkpoints_req INTEGER,
-        checkpoint_write_time REAL, checkpoint_sync_time REAL,
-        buffers_checkpoint INTEGER, buffers_clean INTEGER, maxwritten_clean INTEGER,
-        buffers_backend INTEGER, buffers_backend_fsync INTEGER, buffers_alloc INTEGER, stats_reset TEXT
-      );
+      ${createSnapPgStatBgwriterTableSql()};
+      ${createSnapPgStatCheckpointerTableSql()};
       CREATE TABLE snap_pg_stat_user_tables (
         _id INTEGER PRIMARY KEY AUTOINCREMENT,
         _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
@@ -648,6 +792,7 @@ function migrate(db: Database.Database) {
 		db.exec(createSnapPgStatStatementsTableSql());
 		db.prepare(`INSERT INTO schema_migrations (id) VALUES ('snap_pg_stat_statements_v2')`).run();
 	}
+	migrateBgwriterAndCheckpointerTables(db);
 
 	const designCols = (db.prepare(`PRAGMA table_info(designs)`).all() as { name: string }[]).map(c => c.name);
 	if (!designCols.includes('pre_collect_secs')) db.exec(`ALTER TABLE designs ADD COLUMN pre_collect_secs INTEGER NOT NULL DEFAULT 0`);
@@ -831,17 +976,16 @@ WHERE _run_id = ? AND _phase = 'bench'
 ORDER BY _collected_at`, 0, p++);
 
 			// ── Checkpoint & BGWriter ────────────────────────────────────
-			ins.run('Checkpoint activity', 'Checkpoint & BGWriter',
-				'Forced (req) vs scheduled (timed) checkpoints. High req count = buffer pressure.',
-				`SELECT _collected_at, checkpoints_timed, checkpoints_req,
-  buffers_checkpoint, checkpoint_write_time, checkpoint_sync_time
+			ins.run('BGWriter activity', 'Checkpoint & BGWriter',
+				'Background writer cleaning and buffer allocation activity over time.',
+				`SELECT _collected_at, buffers_clean, maxwritten_clean, buffers_alloc
 FROM snap_pg_stat_bgwriter
 WHERE _run_id = ? AND _phase = 'bench'
 ORDER BY _collected_at`, 0, p++);
 
-			ins.run('Buffer writes: bgwriter vs backends', 'Checkpoint & BGWriter',
-				'buffers_backend > 0 means backends are evicting dirty buffers themselves, stalling queries.',
-				`SELECT _collected_at, buffers_clean, buffers_backend, buffers_alloc, maxwritten_clean
+			ins.run('BGWriter clean pressure', 'Checkpoint & BGWriter',
+				'Background writer cleaning output and maxwritten events over time.',
+				`SELECT _collected_at, buffers_clean, maxwritten_clean, buffers_alloc
 FROM snap_pg_stat_bgwriter
 WHERE _run_id = ? AND _phase = 'bench'
 ORDER BY _collected_at`, 0, p++);
@@ -909,13 +1053,16 @@ FROM snap_pg_stat_user_tables WHERE _run_id = ?
 ORDER BY _collected_at DESC LIMIT 10`
 			);
 			insert.run(
-				'Checkpoint write time',
-				`SELECT checkpoint_write_time, checkpoint_sync_time, checkpoints_req, checkpoints_timed
+				'BGWriter stats',
+				`SELECT buffers_clean, maxwritten_clean, buffers_alloc, stats_reset
 FROM snap_pg_stat_bgwriter WHERE _run_id = ? ORDER BY _collected_at DESC LIMIT 1`
 			);
 		});
 		seedMany();
 	}
+
+	migrateBgwriterQueriesAndMetrics(db);
+	backfillPgStatCheckpointerSelections(db);
 }
 
 export default getDb;

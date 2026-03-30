@@ -385,4 +385,49 @@ describe('Import endpoint logic', () => {
 			expect(cols.find((col) => col.name === 'query')?.type).toBe('TEXT');
 		}
 	});
+
+	it('imports snap_pg_stat_checkpointer rows and preserves phase metadata', () => {
+		const resultWithCheckpointer: ImportResult = {
+			run: { status: 'completed', started_at: '2025-01-01T00:00:00Z', finished_at: '2025-01-01T00:01:00Z' },
+			snapshots: {
+				snap_pg_stat_checkpointer: [
+					{
+						_collected_at: '2025-01-01T00:00:30Z',
+						_phase: 'post',
+						num_timed: 2,
+						num_requested: 1,
+						buffers_written: 512,
+						write_time: 7.25
+					}
+				]
+			}
+		};
+
+		const result = importRun(db, 1, resultWithCheckpointer);
+		expect('run_id' in result).toBe(true);
+		if ('run_id' in result) {
+			const rows = db.prepare(`
+				SELECT _run_id, _collected_at, _phase, num_timed, num_requested, buffers_written, write_time
+				FROM snap_pg_stat_checkpointer
+				WHERE _run_id = ?
+			`).all(result.run_id) as {
+				_run_id: number;
+				_collected_at: string;
+				_phase: string;
+				num_timed: string;
+				num_requested: string;
+				buffers_written: string;
+				write_time: string;
+			}[];
+
+			expect(rows).toHaveLength(1);
+			expect(rows[0]._run_id).toBe(result.run_id);
+			expect(rows[0]._collected_at).toBe('2025-01-01T00:00:30Z');
+			expect(rows[0]._phase).toBe('post');
+			expect(Number(rows[0].num_timed)).toBe(2);
+			expect(Number(rows[0].num_requested)).toBe(1);
+			expect(Number(rows[0].buffers_written)).toBe(512);
+			expect(Number(rows[0].write_time)).toBeCloseTo(7.25);
+		}
+	});
 });

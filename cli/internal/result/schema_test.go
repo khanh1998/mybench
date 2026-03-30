@@ -94,6 +94,50 @@ func TestResultJSONHasSnapshots(t *testing.T) {
 	}
 }
 
+func TestResultJSONHasCheckpointerSnapshots(t *testing.T) {
+	r := &Result{
+		Version:       1,
+		DesignID:      3,
+		RunnerVersion: "0.1.0",
+		Run: RunSummary{
+			Status:    "completed",
+			StartedAt: "2024-01-01T00:00:00Z",
+		},
+		Snapshots: map[string][]SnapshotRow{
+			"snap_pg_stat_checkpointer": {
+				{
+					"_collected_at":   "2024-01-01T00:00:05Z",
+					"_phase":          "bench",
+					"num_timed":       float64(2),
+					"num_requested":   float64(1),
+					"buffers_written": float64(512),
+				},
+			},
+		},
+	}
+
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("unexpected marshal error: %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unexpected unmarshal error: %v", err)
+	}
+
+	snapshots := decoded["snapshots"].(map[string]any)
+	rows := snapshots["snap_pg_stat_checkpointer"].([]any)
+	row := rows[0].(map[string]any)
+
+	if row["_phase"] != "bench" {
+		t.Errorf("expected _phase=bench, got %v", row["_phase"])
+	}
+	if row["buffers_written"] != float64(512) {
+		t.Errorf("expected buffers_written=512, got %v", row["buffers_written"])
+	}
+}
+
 func TestResultJSONOmitsEmptyFields(t *testing.T) {
 	r := &Result{
 		Version:       1,

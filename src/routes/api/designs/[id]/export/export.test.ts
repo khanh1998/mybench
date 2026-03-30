@@ -91,6 +91,31 @@ function createTestDb() {
       _phase TEXT,
       datid INTEGER, datname TEXT, xact_commit INTEGER
     );
+    CREATE TABLE snap_pg_stat_bgwriter (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER,
+      _collected_at TEXT NOT NULL,
+      _phase TEXT NOT NULL DEFAULT 'bench',
+      buffers_clean INTEGER,
+      maxwritten_clean INTEGER,
+      buffers_alloc INTEGER,
+      stats_reset TEXT
+    );
+    CREATE TABLE snap_pg_stat_checkpointer (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER,
+      _collected_at TEXT NOT NULL,
+      _phase TEXT NOT NULL DEFAULT 'bench',
+      num_timed INTEGER,
+      num_requested INTEGER,
+      restartpoints_timed INTEGER,
+      restartpoints_req INTEGER,
+      restartpoints_done INTEGER,
+      write_time REAL,
+      sync_time REAL,
+      buffers_written INTEGER,
+      stats_reset TEXT
+    );
     CREATE TABLE snap_pg_stat_statements (
       _id INTEGER PRIMARY KEY AUTOINCREMENT,
       _run_id INTEGER,
@@ -112,7 +137,8 @@ const EXCLUDED_SNAP_COLS = new Set(['_id', '_run_id', '_collected_at', '_phase',
 
 const SNAP_TABLE_MAP: Record<string, string> = {
 	pg_stat_database: 'snap_pg_stat_database',
-	pg_stat_bgwriter: 'snap_pg_stat_bgwriter'
+	pg_stat_bgwriter: 'snap_pg_stat_bgwriter',
+	pg_stat_checkpointer: 'snap_pg_stat_checkpointer'
 };
 
 function exportPlan(db: Database.Database, designId: number) {
@@ -236,6 +262,8 @@ function seedDb(db: Database.Database) {
 	db.prepare(`INSERT INTO pgbench_scripts (id, step_id, position, name, weight, script) VALUES (1, 3, 0, 'main', 100, 'SELECT 1;')`).run();
 	db.prepare(`INSERT INTO design_params (id, design_id, position, name, value) VALUES (1, 1, 0, 'scale', '10')`).run();
 	db.prepare(`INSERT INTO pg_stat_table_selections (server_id, table_name, enabled) VALUES (1, 'pg_stat_database', 1)`).run();
+	db.prepare(`INSERT INTO pg_stat_table_selections (server_id, table_name, enabled) VALUES (1, 'pg_stat_bgwriter', 1)`).run();
+	db.prepare(`INSERT INTO pg_stat_table_selections (server_id, table_name, enabled) VALUES (1, 'pg_stat_checkpointer', 1)`).run();
 }
 
 // ---------------------------------------------------------------------------
@@ -317,6 +345,24 @@ describe('Export endpoint logic', () => {
 		expect(snapTable!.columns).toContain('queryid');
 		expect(snapTable!.columns).toContain('calls');
 		expect(snapTable!.columns).toContain('query');
+	});
+
+	it('exports corrected bgwriter columns and the new checkpointer table', () => {
+		const plan = exportPlan(db, 1);
+		const bgwriter = plan!.enabled_snap_tables.find((table) => table.pg_view_name === 'pg_stat_bgwriter');
+		const checkpointer = plan!.enabled_snap_tables.find((table) => table.pg_view_name === 'pg_stat_checkpointer');
+		expect(bgwriter?.columns).toEqual(['buffers_clean', 'maxwritten_clean', 'buffers_alloc', 'stats_reset']);
+		expect(checkpointer?.columns).toEqual([
+			'num_timed',
+			'num_requested',
+			'restartpoints_timed',
+			'restartpoints_req',
+			'restartpoints_done',
+			'write_time',
+			'sync_time',
+			'buffers_written',
+			'stats_reset'
+		]);
 	});
 
 	it('returns null for a non-existent design ID', () => {

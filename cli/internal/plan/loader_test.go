@@ -1,8 +1,62 @@
 package plan
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
+
+func TestReadPlan_WithPgStatCheckpointerSnapTable(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "plan.json")
+	data := []byte(`{
+		"version": 1,
+		"exported_at": "2026-03-30T00:00:00Z",
+		"design_id": 42,
+		"design_name": "checkpointer",
+		"server": {
+			"host": "localhost",
+			"port": 5432,
+			"username": "postgres",
+			"password": "",
+			"database": "bench",
+			"ssl": false
+		},
+		"run_settings": {
+			"snapshot_interval_seconds": 15,
+			"pre_collect_secs": 0,
+			"post_collect_secs": 60
+		},
+		"params": [],
+		"steps": [],
+		"enabled_snap_tables": [
+			{
+				"pg_view_name": "pg_stat_checkpointer",
+				"snap_table_name": "snap_pg_stat_checkpointer",
+				"columns": ["num_timed", "num_requested", "buffers_written", "stats_reset"]
+			}
+		]
+	}`)
+
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatalf("writing plan file: %v", err)
+	}
+
+	p, err := ReadPlan(path)
+	if err != nil {
+		t.Fatalf("unexpected ReadPlan error: %v", err)
+	}
+
+	if len(p.EnabledSnapTables) != 1 {
+		t.Fatalf("expected 1 enabled snap table, got %d", len(p.EnabledSnapTables))
+	}
+	if got := p.EnabledSnapTables[0].PgViewName; got != "pg_stat_checkpointer" {
+		t.Fatalf("expected pg_stat_checkpointer, got %q", got)
+	}
+	if got := p.EnabledSnapTables[0].SnapTableName; got != "snap_pg_stat_checkpointer" {
+		t.Fatalf("expected snap_pg_stat_checkpointer, got %q", got)
+	}
+}
 
 func TestApplyParamOverrides_ReplaceExisting(t *testing.T) {
 	p := &Plan{
