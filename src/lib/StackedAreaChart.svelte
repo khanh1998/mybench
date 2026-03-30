@@ -8,14 +8,21 @@
     rawRows = [],
     title,
     markers = [],
-    originMs = null
+    originMs = null,
+    showDetailToggle = true,
   }: {
     series: ChartSeries[];
     rawRows?: RawRow[];
     title: string;
     markers?: Marker[];
     originMs?: number | null;
+    showDetailToggle?: boolean;
   } = $props();
+
+  // Map typeKey → series color so broad-mode tooltip matches chart polygons
+  const seriesColorMap = $derived(
+    Object.fromEntries(series.map(s => [s.label, s.color]))
+  );
 
   const ML = 60, MR = 20, MT = 8, MB = 28;
   const W = 520, H = 190;
@@ -112,14 +119,22 @@
       const atTime = rawRows.filter(r => r.t === hoveredTime);
       const total = atTime.reduce((s, r) => s + r.v, 0);
       if (tooltipGranularity === 'detail') {
+        // When typeKey === eventKey (e.g. session state chart), just show typeKey
         return atTime
-          .map(r => ({ color: r.color, label: `${r.typeKey}:${r.eventKey}`, v: r.v, pct: total > 0 ? Math.round(r.v / total * 100) : 0 }))
+          .map(r => ({
+            color: r.color,
+            label: r.typeKey === r.eventKey ? r.typeKey : `${r.typeKey}:${r.eventKey}`,
+            v: r.v,
+            pct: total > 0 ? Math.round(r.v / total * 100) : 0
+          }))
           .sort((a, b) => b.v - a.v);
       } else {
+        // Broad: aggregate by type, use series color so it matches chart polygon
         const byType = new Map<string, { color: string; v: number }>();
         for (const r of atTime) {
+          const seriesColor = seriesColorMap[r.typeKey] ?? r.color;
           const ex = byType.get(r.typeKey);
-          if (ex) ex.v += r.v; else byType.set(r.typeKey, { color: r.color, v: r.v });
+          if (ex) ex.v += r.v; else byType.set(r.typeKey, { color: seriesColor, v: r.v });
         }
         return [...byType.entries()]
           .map(([typeKey, { color, v }]) => ({ color, label: typeKey, v, pct: total > 0 ? Math.round(v / total * 100) : 0 }))
@@ -146,7 +161,7 @@
         <span class="leg-item"><span class="leg-dot" style="background:{s.color}"></span>{s.label}</span>
       {/each}
     </span>
-    {#if rawRows.length > 0}
+    {#if rawRows.length > 0 && showDetailToggle}
       <div class="gran-toggle">
         <button class:active={tooltipGranularity === 'detail'} onclick={() => tooltipGranularity = 'detail'}>Detail</button>
         <button class:active={tooltipGranularity === 'broad'} onclick={() => tooltipGranularity = 'broad'}>Broad</button>

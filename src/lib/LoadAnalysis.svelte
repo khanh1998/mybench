@@ -29,7 +29,16 @@
     total_plan_time: number; delta_temp_blks_read: number; delta_wal_bytes: number;
     snapshot_count: number; bench_secs: number;
   }
-  interface LockRow    { _collected_at: string; blocked_pid: number; blocked_query: string; blocked_user: string; blocking_pid: number; blocking_query: string; blocking_user: string; locktype: string; held_mode: string; requested_mode: string; }
+  // Lock tree row: blocking → blocked pairs with occurrence count
+  interface LockPairRow {
+    blocked_pid: number; blocked_query: string | null; blocked_state: string | null;
+    blocking_pid: number; blocking_query: string | null; blocking_state: string | null;
+    locktype: string; requested_mode: string; held_mode: string; times_seen: number;
+  }
+  interface LockNode {
+    pid: number; query: string; state: string;
+    children: Array<{ pid: number; query: string; state: string; locktype: string; requested_mode: string; held_mode: string; times_seen: number; }>;
+  }
   interface TotalAasRow { _collected_at: string; total_active: number; }
 
   // ── Hue-rotation color system ──────────────────────────────────────────────
@@ -81,7 +90,7 @@
   let sessionData= $state<Record<number, SessionRow[]>>({});
   let waitsData  = $state<Record<number, WaitRow[]>>({});
   let sqlData    = $state<Record<number, SqlRow[]>>({});
-  let locksData  = $state<Record<number, LockRow[]>>({});
+  let locksData  = $state<Record<number, LockPairRow[]>>({});
   let hasSql     = $state<Record<number, boolean>>({});
 
   let sqlSort    = $state<{ col: keyof SqlRow; asc: boolean }>({ col: 'delta_exec_time', asc: false });
@@ -230,16 +239,43 @@
       hasSql = { ...hasSql, [rid]: !sqlRes.error && sqlRes.rows.length > 0 };
       sqlData = { ...sqlData, [rid]: sqlRes.error ? [] : (sqlRes.rows as unknown as SqlRow[]) };
 
-      // Lock conflicts
+      // Lock tree from raw pg_locks snapshots — compute blocking pairs in SQLite
       const lockRes = await queryApi(
-        `SELECT _collected_at, blocked_pid, blocked_query, blocked_user,
-                blocking_pid, blocking_query, blocking_user, locktype, held_mode, requested_mode
-         FROM snap_pg_lock_conflicts
-         WHERE _run_id = ? AND ${clause}
-         ORDER BY _collected_at DESC LIMIT 100`,
-        [rid, ...pParams]
+        `WITH pairs AS (
+           SELECT b.pid as blocked_pid, bl.pid as blocking_pid,
+                  b.locktype, b.mode as requested_mode, bl.mode as held_mode,
+                  COUNT(*) as times_seen
+           FROM snap_pg_locks b
+           JOIN snap_pg_locks bl
+             ON b._run_id = bl._run_id AND b._collected_at = bl._collected_at
+             AND b.locktype = bl.locktype
+             AND (b.database = bl.database OR (b.database IS NULL AND bl.database IS NULL))
+             AND (b.relation = bl.relation OR (b.relation IS NULL AND bl.relation IS NULL))
+             AND (b.page = bl.page OR (b.page IS NULL AND bl.page IS NULL))
+             AND (b.tuple = bl.tuple OR (b.tuple IS NULL AND bl.tuple IS NULL))
+             AND (b.transactionid = bl.transactionid OR (b.transactionid IS NULL AND bl.transactionid IS NULL))
+             AND (b.classid = bl.classid OR (b.classid IS NULL AND bl.classid IS NULL))
+             AND (b.objid = bl.objid OR (b.objid IS NULL AND bl.objid IS NULL))
+             AND b.pid != bl.pid
+             AND b.granted = 0 AND bl.granted = 1
+           WHERE b._run_id = ? AND ${clause.replace(/_phase/g, 'b._phase')}
+           GROUP BY b.pid, bl.pid, b.locktype, b.mode, bl.mode
+         ),
+         latest_act AS (
+           SELECT pid, query, state,
+                  ROW_NUMBER() OVER (PARTITION BY pid ORDER BY _collected_at DESC) as rn
+           FROM snap_pg_stat_activity WHERE _run_id = ?
+         )
+         SELECT p.*,
+                ba.query as blocked_query, ba.state as blocked_state,
+                bla.query as blocking_query, bla.state as blocking_state
+         FROM pairs p
+         LEFT JOIN latest_act ba ON ba.pid = p.blocked_pid AND ba.rn = 1
+         LEFT JOIN latest_act bla ON bla.pid = p.blocking_pid AND bla.rn = 1
+         ORDER BY times_seen DESC`,
+        [rid, ...pParams, rid]
       );
-      locksData = { ...locksData, [rid]: lockRes.error ? [] : (lockRes.rows as unknown as LockRow[]) };
+      locksData = { ...locksData, [rid]: lockRes.error ? [] : (lockRes.rows as unknown as LockPairRow[]) };
     }));
 
     loading = false;
@@ -366,8 +402,14 @@
     if (v >= 1e3) return (v / 1e3).toFixed(1) + 'K/s';
     return v.toFixed(1) + '/s';
   }
-  function sqlColVal(row: SqlRow, col: string): string {
-    const secs = Number(row.bench_secs || 0);
+  /** Derive bench duration from RunMeta timestamps (more reliable than SQL delta for single-snapshot runs). */
+  function runBenchSecs(run: RunMeta): number {
+    if (!run.bench_started_at) return 0;
+    const end = run.post_started_at ? new Date(run.post_started_at) : new Date();
+    return Math.max((end.getTime() - new Date(run.bench_started_at).getTime()) / 1000, 1);
+  }
+
+  function sqlColVal(row: SqlRow, col: string, secs: number): string {
     if (sqlMode === 'persec') {
       if (col === 'delta_calls') return perSec(Number(row.delta_calls), secs);
       if (col === 'delta_exec_time') return perSec(Number(row.delta_exec_time), secs);
@@ -391,6 +433,43 @@
   }
 
   const anyLocks = $derived(runs.some(r => (locksData[r.id] ?? []).length > 0));
+
+  function buildLockTree(pairs: LockPairRow[]): LockNode[] {
+    const blockers = new Map<number, LockNode>();
+    // Collect all unique blockers
+    for (const p of pairs) {
+      if (!blockers.has(p.blocking_pid)) {
+        blockers.set(p.blocking_pid, {
+          pid: p.blocking_pid,
+          query: p.blocking_query ?? '(unknown)',
+          state: p.blocking_state ?? '—',
+          children: []
+        });
+      }
+    }
+    // Add blocked sessions as children
+    for (const p of pairs) {
+      const node = blockers.get(p.blocking_pid)!;
+      // Avoid duplicates (same blocked_pid can appear multiple times with different lock types)
+      const exists = node.children.some(c => c.pid === p.blocked_pid && c.locktype === p.locktype);
+      if (!exists) {
+        node.children.push({
+          pid: p.blocked_pid,
+          query: p.blocked_query ?? '(unknown)',
+          state: p.blocked_state ?? 'waiting',
+          locktype: p.locktype,
+          requested_mode: p.requested_mode,
+          held_mode: p.held_mode,
+          times_seen: p.times_seen
+        });
+      }
+    }
+    // Return only root blockers (not themselves blocked by someone else)
+    const blockedPids = new Set(pairs.map(p => p.blocked_pid));
+    const roots = [...blockers.values()].filter(n => !blockedPids.has(n.pid));
+    // If there are chains (A blocks B blocks C), include all blockers sorted by total blockees
+    return roots.length > 0 ? roots : [...blockers.values()];
+  }
   const anySql   = $derived(runs.some(r => hasSql[r.id]));
 
   // ── Paging ─────────────────────────────────────────────────────────────────
@@ -485,7 +564,7 @@
       fallback,
       deltaCalls: Number(row.delta_calls ?? 0),
       deltaRows: Number(row.delta_rows ?? 0),
-      benchSecs: Number(row.bench_secs ?? 0),
+      benchSecs: runBenchSecs(run),
       meanExecMs: Number(row.mean_exec_time ?? 0),
       maxExecMs: Number(row.max_exec_time ?? 0),
       stddevMs: Number(row.stddev_exec_time ?? 0),
@@ -578,7 +657,7 @@
       {@const rawRows = buildSessionRawRows(run)}
       <div>
         {#if isCompare}<div class="run-label" style="color:{run.color}">{run.label}</div>{/if}
-        <StackedAreaChart {series} {rawRows} title="Session states" markers={buildMarkers(run)} originMs={origin(run)} />
+        <StackedAreaChart {series} {rawRows} title="Session states" markers={buildMarkers(run)} originMs={origin(run)} showDetailToggle={false} />
       </div>
     {/each}
   </div>
@@ -673,6 +752,7 @@
           {@const pageRows = pagedSql(run.id)}
           {@const totalTime = totalExecTime(sqlData[run.id] ?? [])}
           {@const totalPages = sqlPageCount(run.id)}
+          {@const runSecs = runBenchSecs(run)}
           <div class="sql-panel">
             {#if isCompare}<div class="run-label" style="color:{run.color}">{run.label}</div>{/if}
             <table class="data-table sql-table">
@@ -682,17 +762,21 @@
                   <th class="sortable" onclick={() => setSqlSort('delta_calls')}>
                     {sqlMode === 'persec' ? 'Calls/s' : 'Calls'} {sqlSort.col === 'delta_calls' ? (sqlSort.asc ? '▲' : '▼') : ''}
                   </th>
+                  {#if sqlMode === 'total'}
                   <th class="sortable" onclick={() => setSqlSort('delta_exec_time')}>
-                    {sqlMode === 'persec' ? 'Time/s' : 'Total Time'} {sqlSort.col === 'delta_exec_time' ? (sqlSort.asc ? '▲' : '▼') : ''}
+                    Total Time {sqlSort.col === 'delta_exec_time' ? (sqlSort.asc ? '▲' : '▼') : ''}
                   </th>
-                  <th>% Total</th>
+                  {:else}
+                  <th title="DB time consumed per wall-clock second — higher = more load">DB Load (ms/s)</th>
+                  {/if}
+                  <th title="Share of total DB execution time">% Total</th>
                   <th class="sortable" onclick={() => setSqlSort('cache_hit_pct')}>
                     Cache% {sqlSort.col === 'cache_hit_pct' ? (sqlSort.asc ? '▲' : '▼') : ''}
                   </th>
                   <th class="sortable" onclick={() => setSqlSort('delta_blks_read')}>
                     {sqlMode === 'persec' ? 'Blks/s' : 'Blks Read'} {sqlSort.col === 'delta_blks_read' ? (sqlSort.asc ? '▲' : '▼') : ''}
                   </th>
-                  <th title="Avg latency per call">Avg Lat</th>
+                  <th title="Avg latency per call (both modes)">Avg Lat</th>
                   <th title="Wait profile — click to expand">Profile</th>
                 </tr>
               </thead>
@@ -702,16 +786,17 @@
                   {@const pct = totalTime > 0 ? (execTime / totalTime * 100).toFixed(1) : '0'}
                   <tr>
                     <td class="query-cell" title={row.query_full || row.query_short}>{row.query_short}</td>
-                    <td style="text-align:right">{sqlColVal(row, 'delta_calls')}</td>
-                    <td style="text-align:right">{sqlColVal(row, 'delta_exec_time')}</td>
+                    <td style="text-align:right">{sqlColVal(row, 'delta_calls', runSecs)}</td>
                     <td style="text-align:right">
-                      <div class="pct-bar-wrap">
-                        <div class="pct-bar" style="width:{pct}%"></div>
-                        <span>{pct}%</span>
-                      </div>
+                      {#if sqlMode === 'persec'}
+                        {perSec(Number(row.delta_exec_time), runSecs)}
+                      {:else}
+                        {fmtMs(Number(row.delta_exec_time))}
+                      {/if}
                     </td>
+                    <td style="text-align:right;color:#888">{pct}%</td>
                     <td style="text-align:right">{row.cache_hit_pct != null ? row.cache_hit_pct + '%' : '—'}</td>
-                    <td style="text-align:right">{sqlColVal(row, 'delta_blks_read')}</td>
+                    <td style="text-align:right">{sqlColVal(row, 'delta_blks_read', runSecs)}</td>
                     <td style="text-align:right;font-variant-numeric:tabular-nums">{fmtMs(Number(row.mean_exec_time ?? 0))}</td>
                     <td>
                       <button class="flame-btn" onclick={() => openFlame(run, row)} title="Show wait breakdown">
@@ -747,38 +832,39 @@
   {#if !anyLocks}
     <div class="empty">No lock conflicts detected during this run. 🎉</div>
   {:else}
-    <p class="section-desc">Blocking pairs captured at each snapshot. Each row is a blocked→blocker relationship at that moment.</p>
+    <p class="section-desc">Blocking tree built from pg_locks snapshots. Root = blocker session; indented = blocked sessions.</p>
     {#each runs as run}
-      {@const rows = locksData[run.id] ?? []}
-      {#if rows.length > 0}
+      {@const pairs = locksData[run.id] ?? []}
+      {#if pairs.length > 0}
+        {@const tree = buildLockTree(pairs)}
         <div class="lock-panel">
-          {#if isCompare}<div class="run-label" style="color:{run.color}">{run.label} — {rows.length} conflict event(s)</div>{/if}
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>Time</th>
-                <th>Blocked PID</th>
-                <th>Blocked Query</th>
-                <th>Blocking PID</th>
-                <th>Blocking Query</th>
-                <th>Lock Type</th>
-                <th>Held Mode</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each rows as row}
-                <tr>
-                  <td style="white-space:nowrap;font-size:11px">{fmtTs(row._collected_at)}</td>
-                  <td>{row.blocked_pid}</td>
-                  <td class="query-cell" title={row.blocked_query}>{(row.blocked_query ?? '').substring(0, 60)}</td>
-                  <td>{row.blocking_pid}</td>
-                  <td class="query-cell" title={row.blocking_query}>{(row.blocking_query ?? '').substring(0, 60)}</td>
-                  <td><span class="badge">{row.locktype}</span></td>
-                  <td><span class="badge badge-warn">{row.held_mode}</span></td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
+          {#if isCompare}<div class="run-label" style="color:{run.color}">{run.label}</div>{/if}
+          {#each tree as blocker}
+            <div class="lock-blocker-card">
+              <div class="lock-blocker-header">
+                <span class="lock-pid-badge blocker">PID {blocker.pid}</span>
+                <span class="lock-state-badge" style="background:{blocker.state === 'active' ? '#dcfce7' : '#fef3c7'};color:{blocker.state === 'active' ? '#166534' : '#92400e'}">{blocker.state}</span>
+                <span class="lock-blocking-label">blocking {blocker.children.length} session(s)</span>
+              </div>
+              <div class="lock-blocker-query" title={blocker.query}>{(blocker.query ?? '').substring(0, 200)}</div>
+              <div class="lock-children">
+                {#each blocker.children as child}
+                  <div class="lock-child-row">
+                    <span class="lock-tree-line">└─</span>
+                    <span class="lock-pid-badge blocked">PID {child.pid}</span>
+                    <span class="lock-state-badge" style="background:#fee2e2;color:#991b1b">{child.state}</span>
+                    <span class="lock-mode-info">
+                      waiting for <span class="lock-badge">{child.locktype}</span>
+                      <span class="lock-badge-dim">{child.requested_mode}</span>
+                      <span style="color:#999;font-size:10px">(blocker holds {child.held_mode})</span>
+                    </span>
+                    <span class="lock-times-seen" title="snapshots where this conflict was captured">{child.times_seen}×</span>
+                    <div class="lock-child-query" title={child.query}>{(child.query ?? '').substring(0, 160)}</div>
+                  </div>
+                {/each}
+              </div>
+            </div>
+          {/each}
         </div>
       {/if}
     {/each}
@@ -869,18 +955,36 @@
             {/each}
           </div>
           <!-- Legend -->
-          <div class="flame-legend-title">Wait Profile</div>
+          {@const flameSecs = activeFlame.benchSecs}
+          <div class="flame-legend-title">
+            Wait Profile
+            <span class="flame-mode-btns">
+              <button class:active={sqlMode === 'total'} onclick={() => sqlMode = 'total'}>Total</button>
+              <button class:active={sqlMode === 'persec'} onclick={() => sqlMode = 'persec'}>Per sec</button>
+            </span>
+          </div>
           <div class="flame-legend">
             {#each activeFlame.items as item}
+              {@const pct = total > 0 ? (item.seconds / total * 100).toFixed(0) : '0'}
               <div class="flame-leg-row">
                 <span class="flame-leg-dot" style="background:{item.color}"></span>
                 <span class="flame-leg-label">{item.wtype}{item.wevent !== 'running' && item.wevent !== item.wtype ? ':' + item.wevent : ''}</span>
-                <span class="flame-leg-val">{item.seconds.toFixed(2)}s</span>
+                <span class="flame-leg-pct">{pct}%</span>
+                <span class="flame-leg-val">
+                  {#if sqlMode === 'persec' && flameSecs > 0}
+                    {(item.seconds / flameSecs).toFixed(3)}s/s
+                  {:else}
+                    {item.seconds.toFixed(2)}s
+                  {/if}
+                </span>
               </div>
             {/each}
           </div>
           <div class="flame-footer">
             Total exec time: {fmtMs(activeFlame.totalExecMs)}
+            {#if sqlMode === 'persec' && flameSecs > 0}
+              &nbsp;·&nbsp; {(activeFlame.totalExecMs / 1000 / flameSecs).toFixed(3)}s/s
+            {/if}
           </div>
         {/if}
       {/if}
@@ -904,7 +1008,23 @@
   .chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
   .waits-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
   .sql-panels { display: flex; flex-direction: column; gap: 16px; }
-  .lock-panel { margin-bottom: 16px; overflow-x: auto; }
+  .lock-panel { margin-bottom: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .lock-blocker-card { border: 1px solid #e8e8e8; border-radius: 6px; padding: 10px 12px; background: #fafafa; }
+  .lock-blocker-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+  .lock-blocking-label { font-size: 11px; color: #888; margin-left: 4px; }
+  .lock-blocker-query { font-family: monospace; font-size: 11px; color: #444; background: #f0f0f0; padding: 4px 8px; border-radius: 4px; white-space: pre-wrap; word-break: break-all; max-height: 60px; overflow: hidden; }
+  .lock-children { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+  .lock-child-row { display: flex; align-items: flex-start; gap: 6px; padding-left: 8px; flex-wrap: wrap; }
+  .lock-tree-line { color: #ccc; font-size: 14px; flex-shrink: 0; margin-top: 1px; }
+  .lock-child-query { flex-basis: 100%; font-family: monospace; font-size: 10px; color: #777; padding: 2px 8px 2px 22px; white-space: pre-wrap; word-break: break-all; }
+  .lock-mode-info { font-size: 11px; color: #555; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+  .lock-times-seen { font-size: 10px; color: #0066cc; font-weight: 600; margin-left: auto; white-space: nowrap; }
+  .lock-pid-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; font-weight: 700; font-family: monospace; }
+  .lock-pid-badge.blocker { background: #e8eeff; color: #0044bb; }
+  .lock-pid-badge.blocked { background: #fee2e2; color: #991b1b; }
+  .lock-state-badge { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 10px; font-weight: 600; }
+  .lock-badge { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 10px; background: #f0f0f0; color: #555; font-weight: 600; }
+  .lock-badge-dim { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 10px; background: #fff3e0; color: #b84d00; font-weight: 600; }
 
   .empty { font-size: 13px; color: #999; padding: 12px 0; }
 
@@ -1000,6 +1120,11 @@
   .flame-leg-row { display: flex; align-items: center; gap: 8px; }
   .flame-leg-dot { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
   .flame-leg-label { flex: 1; font-size: 12px; color: #d1d5db; }
-  .flame-leg-val { font-size: 12px; font-variant-numeric: tabular-nums; color: #f9fafb; font-weight: 600; min-width: 50px; text-align: right; }
+  .flame-leg-pct { font-size: 10px; color: #9ca3af; font-variant-numeric: tabular-nums; min-width: 30px; text-align: right; }
+  .flame-leg-val { font-size: 12px; font-variant-numeric: tabular-nums; color: #f9fafb; font-weight: 600; min-width: 60px; text-align: right; }
+  .flame-legend-title { display: flex; align-items: center; gap: 8px; }
+  .flame-mode-btns { display: flex; border: 1px solid #3a3b50; border-radius: 4px; overflow: hidden; margin-left: auto; }
+  .flame-mode-btns button { background: none; border: none; padding: 2px 8px; font-size: 10px; cursor: pointer; color: #9ca3af; }
+  .flame-mode-btns button.active { background: #3a3b50; color: #e0e0e0; }
   .flame-footer { font-size: 11px; color: #6b7280; margin-top: 14px; padding-top: 10px; border-top: 1px solid #3a3b50; }
 </style>

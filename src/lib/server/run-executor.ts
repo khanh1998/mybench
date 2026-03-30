@@ -1,7 +1,7 @@
 import getDb from '$lib/server/db';
 import { createPool } from '$lib/server/pg-client';
 import {
-	collectLockConflictsSnapshot,
+	collectPgLocksSnapshot,
 	collectPgStatStatementsSnapshot,
 	collectSnapshot,
 	getEnabledTablesForRun,
@@ -114,7 +114,7 @@ export function startRun(designId: number, opts: StartRunOptions = {}): number {
 		const end = Date.now() + durationSecs * 1000;
 		do {
 			await collectSnapshot(pool, runId, tables, phase);
-			await collectLockConflictsSnapshot(pool, runId, phase);
+			await collectPgLocksSnapshot(pool, runId, phase);
 			const wait = Math.min(intervalSecs * 1000, end - Date.now());
 			if (wait > 0) await new Promise(r => setTimeout(r, wait));
 		} while (Date.now() < end);
@@ -208,7 +208,7 @@ export function startRun(designId: number, opts: StartRunOptions = {}): number {
 
 					const timer = setInterval(async () => {
 						await collectSnapshot(pool, runId, enabledTables, 'bench');
-						await collectLockConflictsSnapshot(pool, runId, 'bench');
+						await collectPgLocksSnapshot(pool, runId, 'bench');
 					}, snapshot_interval_seconds * 1000);
 					setSnapshotTimer(runId, timer);
 
@@ -245,7 +245,7 @@ export function startRun(designId: number, opts: StartRunOptions = {}): number {
 						.run(result.command, pgbenchScript, runId, step.id);
 
 					await collectSnapshot(pool, runId, enabledTables, 'bench');
-					await collectLockConflictsSnapshot(pool, runId, 'bench');
+					await collectPgLocksSnapshot(pool, runId, 'bench');
 
 					if (result.tps !== null) {
 						db.prepare(

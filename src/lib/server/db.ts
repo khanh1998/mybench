@@ -710,6 +710,31 @@ function migrate(db: Database.Database) {
     );
   `);
 
+	// Raw pg_locks snapshots (simpler than conflict pairs — tree analysis done in UI)
+	db.exec(`
+    CREATE TABLE IF NOT EXISTS snap_pg_locks (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL,
+      _phase TEXT NOT NULL DEFAULT 'bench',
+      locktype TEXT,
+      database INTEGER,
+      relation INTEGER,
+      page INTEGER,
+      tuple INTEGER,
+      virtualxid TEXT,
+      transactionid TEXT,
+      classid INTEGER,
+      objid INTEGER,
+      objsubid INTEGER,
+      virtualtransaction TEXT,
+      pid INTEGER,
+      mode TEXT,
+      granted INTEGER,
+      fastpath INTEGER
+    );
+  `);
+
 	// Metrics table (library / templates)
 	db.exec(`
     CREATE TABLE IF NOT EXISTS metrics (

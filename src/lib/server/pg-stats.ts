@@ -253,6 +253,45 @@ export async function collectLockConflictsSnapshot(
 	}
 }
 
+/** Raw snapshot of pg_locks — analysis (blocking tree) computed in the UI. */
+export async function collectPgLocksSnapshot(
+	pgPool: pg.Pool,
+	runId: number,
+	phase: 'pre' | 'bench' | 'post'
+): Promise<void> {
+	try {
+		const result = await pgPool.query(`
+			SELECT locktype,
+			       database, relation, page, tuple,
+			       virtualxid, transactionid::text,
+			       classid, objid, objsubid,
+			       virtualtransaction, pid, mode,
+			       granted::int, fastpath::int
+			FROM pg_catalog.pg_locks
+			WHERE pid IS NOT NULL
+		`);
+		if (result.rows.length === 0) return;
+		const db = getDb();
+		const collectedAt = new Date().toISOString();
+		const cols = ['locktype', 'database', 'relation', 'page', 'tuple', 'virtualxid', 'transactionid', 'classid', 'objid', 'objsubid', 'virtualtransaction', 'pid', 'mode', 'granted', 'fastpath'];
+		const insertCols = ['_run_id', '_collected_at', '_phase', ...cols];
+		const placeholders = insertCols.map((_, i) => `@p${i}`).join(', ');
+		const stmt = db.prepare(
+			`INSERT INTO snap_pg_locks (${insertCols.join(', ')}) VALUES (${placeholders})`
+		);
+		const insertMany = db.transaction((rows: Record<string, unknown>[]) => {
+			for (const row of rows) {
+				const params: Record<string, unknown> = { p0: runId, p1: collectedAt, p2: phase };
+				cols.forEach((col, i) => { params[`p${i + 3}`] = row[col] ?? null; });
+				stmt.run(params);
+			}
+		});
+		insertMany(result.rows);
+	} catch (_err) {
+		// pg_locks always exists; ignore errors (e.g. permission issues in some setups)
+	}
+}
+
 export function getEnabledTablesForRun(serverId: number): string[] {
 	const db = getDb();
 	const rows = db
