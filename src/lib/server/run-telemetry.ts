@@ -9,6 +9,7 @@ export interface TelemetryCard {
 	label: string;
 	kind: TelemetryValueKind;
 	value: number | string | boolean | null;
+	infoText?: string;
 }
 
 export interface TelemetryTableColumn {
@@ -75,6 +76,78 @@ interface SnapshotRow {
 
 const COLORS = ['#0066cc', '#e6531d', '#00996b', '#9b36b7', '#cc8800'];
 const ALL_PHASES: TelemetryPhase[] = ['pre', 'bench', 'post'];
+const METRIC_INFO: Partial<Record<string, string>> = {
+	transactions:
+		'Commits plus rollbacks from pg_stat_database. This is the change between the first and last snapshot in the selected phases.',
+	tps:
+		'Database-side transactions per second, calculated as total transactions divided by elapsed time between the first and last pg_stat_database snapshots.',
+	db_tps:
+		'Database-side transactions per second, calculated as total transactions divided by elapsed time between the first and last pg_stat_database snapshots.',
+	buffer_hit_ratio:
+		'Share of block access served from shared buffers instead of disk: blks_hit / (blks_hit + blks_read). Higher is usually better.',
+	temp_bytes:
+		'Bytes written to temporary files during the selected phases. Higher values often mean sorts or hashes spilled to disk.',
+	total_conflicts:
+		'Total recovery conflicts reported by pg_stat_database_conflicts across all tracked conflict types.',
+	lock_conflicts: 'Recovery conflicts caused by locks blocking standby queries.',
+	snapshot_conflicts: 'Recovery conflicts caused by snapshots that would block cleanup or replay.',
+	deadlock_conflicts: 'Recovery conflicts caused by deadlocks during recovery.',
+	wal_bytes: 'Total WAL volume generated, calculated from the pg_stat_wal.wal_bytes delta.',
+	wal_bytes_per_tx:
+		'Average WAL volume per transaction: WAL bytes divided by total transactions. This helps compare write amplification between designs.',
+	wal_per_tx:
+		'Average WAL volume per transaction: WAL bytes divided by total transactions. This helps compare write amplification between designs.',
+	fpi_ratio:
+		'Share of WAL records that were full-page images: wal_fpi / wal_records. Higher values can mean more page rewrites after checkpoints.',
+	wal_buffers_full: 'Number of times WAL insertion had to wait because WAL buffers filled up.',
+	buffers_clean: 'Buffers written by the background writer outside of checkpoints.',
+	maxwritten_clean:
+		'Number of times the background writer stopped a cleaning cycle because it hit bgwriter_lru_maxpages.',
+	buffers_alloc: 'Shared buffers allocated to new pages.',
+	stats_reset:
+		'Timestamp when PostgreSQL last reset this stats view. Older reset times mean the counters have been accumulating longer.',
+	archived_count: 'Number of WAL segments successfully archived during the selected phases.',
+	failed_count: 'Number of WAL segments that failed to archive during the selected phases.',
+	last_archived_time: 'Timestamp of the most recent successful WAL archive seen in the selected snapshots.',
+	last_failed_time: 'Timestamp of the most recent failed WAL archive attempt seen in the selected snapshots.',
+	reads: 'Total read operations reported by pg_stat_io across the selected IO groups.',
+	read_bytes: 'Total bytes read, summed from pg_stat_io.read_bytes across the selected phases.',
+	writes: 'Total write operations reported by pg_stat_io across the selected IO groups.',
+	write_bytes: 'Total bytes written, summed from pg_stat_io.write_bytes across the selected phases.',
+	extend_bytes: 'Bytes written while extending relation files. This often reflects table or index growth.',
+	evictions: 'Buffers evicted from cache by PostgreSQL across the selected IO groups.',
+	fsyncs: 'Number of fsync calls reported by pg_stat_io.',
+	total_writes:
+		'Rows inserted, updated, or deleted across user tables. Calculated as n_tup_ins + n_tup_upd + n_tup_del deltas.',
+	avg_seq_ratio:
+		'Average share of scans that were sequential instead of index-backed across tracked user tables: seq_scan / (seq_scan + idx_scan).',
+	avg_hot_ratio:
+		'Average share of updates that qualified as HOT updates across tracked user tables: n_tup_hot_upd / n_tup_upd.',
+	dead_tuple_growth: 'Net increase in dead tuples across user tables between the first and last snapshot.',
+	total_index_scans: 'Total number of index scans across tracked user indexes.',
+	tuples_read: 'Tuples returned from index entries before heap visibility checks, from idx_tup_read.',
+	tuples_fetched: 'Heap tuples fetched through index scans, from idx_tup_fetch.',
+	unused_indexes: 'Tracked indexes with zero scans during the selected phases.',
+	heap_activity: 'Heap block activity for user tables, calculated as heap_blks_read + heap_blks_hit.',
+	heap_hits: 'Heap blocks found in shared buffers for user tables.',
+	heap_reads: 'Heap blocks read from disk for user tables.',
+	heap_hit_ratio:
+		'Average share of heap block access served from cache across tracked tables: heap_blks_hit / (heap_blks_hit + heap_blks_read).',
+	toast_reads: 'TOAST blocks read from disk for user tables.',
+	index_reads: 'Index blocks read from disk across tracked user indexes.',
+	index_hit_ratio:
+		'Average share of index block access served from cache across tracked indexes.',
+	num_requested:
+		'Checkpoints requested before the normal schedule, often because PostgreSQL hit WAL pressure.',
+	requested_checkpoints:
+		'Checkpoints requested before the normal schedule, often because PostgreSQL hit WAL pressure.',
+	num_timed: 'Checkpoints started by the regular checkpoint_timeout schedule.',
+	write_time:
+		'Total time PostgreSQL spent writing buffers during checkpoints, shown as the delta of pg_stat_checkpointer.write_time.',
+	sync_time:
+		'Total time PostgreSQL spent syncing checkpoint files to disk, shown as the delta of pg_stat_checkpointer.sync_time.',
+	deadlocks: 'Number of deadlocks reported by pg_stat_database during the selected phases.'
+};
 
 function parsePhases(phases?: string[]): TelemetryPhase[] {
 	const unique = new Set<TelemetryPhase>();
@@ -152,7 +225,7 @@ function makeMetricRows(metrics: Array<{ metric: string; value: unknown; kind?: 
 }
 
 function metricCard(key: string, label: string, kind: TelemetryValueKind, value: number | string | boolean | null): TelemetryCard {
-	return { key, label, kind, value };
+	return { key, label, kind, value, infoText: METRIC_INFO[key] };
 }
 
 function relPoint(row: SnapshotRow, runStartMs: number, value: number): TelemetrySeriesPoint | null {

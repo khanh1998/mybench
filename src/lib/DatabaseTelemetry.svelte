@@ -9,6 +9,7 @@
     label: string;
     kind: TelemetryValueKind;
     value: number | string | boolean | null;
+    infoText?: string;
   }
 
   interface TelemetryTableColumn {
@@ -73,6 +74,7 @@
   let loading = $state(false);
   let error = $state('');
   let selectedPhases = $state<TelemetryPhase[]>([...DEFAULT_PHASES]);
+  let openInfoKey = $state<string | null>(null);
   let requestSeq = 0;
   const phaseKey = $derived(selectedPhases.join(','));
 
@@ -106,6 +108,24 @@
     } else {
       selectedPhases = [...selectedPhases, phase];
     }
+  }
+
+  function getInfoKey(scope: string, cardKey: string): string {
+    return `${scope}:${cardKey}`;
+  }
+
+  function toggleInfo(infoKey: string) {
+    openInfoKey = openInfoKey === infoKey ? null : infoKey;
+  }
+
+  function handleWindowClick(event: MouseEvent) {
+    const target = event.target;
+    if (target instanceof Element && target.closest('.metric-info')) return;
+    openInfoKey = null;
+  }
+
+  function handleWindowKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape') openInfoKey = null;
   }
 
   function formatNumber(value: number, maxFractionDigits = 2): string {
@@ -154,6 +174,8 @@
   });
 </script>
 
+<svelte:window onclick={handleWindowClick} onkeydown={handleWindowKeydown} />
+
 <div class="card telemetry-card">
   <div class="telemetry-toolbar">
     <div>
@@ -183,8 +205,29 @@
   {:else if telemetry}
     <div class="hero-grid">
       {#each telemetry.heroCards as card}
+        {@const infoKey = getInfoKey('hero', card.key)}
         <div class="hero-card">
-          <div class="hero-label">{card.label}</div>
+          <div class="metric-card-top">
+            <div class="hero-label">{card.label}</div>
+            {#if card.infoText}
+              <div class="metric-info">
+                <button
+                  type="button"
+                  class="metric-info-btn"
+                  aria-label={`Explain ${card.label}`}
+                  title={`Explain ${card.label}`}
+                  aria-expanded={openInfoKey === infoKey}
+                  onclick={() => toggleInfo(infoKey)}
+                >i</button>
+                {#if openInfoKey === infoKey}
+                  <div class="metric-popover" role="note">
+                    <div class="metric-popover-title">{card.label}</div>
+                    <p>{card.infoText}</p>
+                  </div>
+                {/if}
+              </div>
+            {/if}
+          </div>
           <div class="hero-value">{formatValue(card.value, card.kind)}</div>
         </div>
       {/each}
@@ -206,8 +249,29 @@
           {#if section.status === 'ok'}
             <div class="summary-grid">
               {#each section.summary as card}
+                {@const infoKey = getInfoKey(section.key, card.key)}
                 <div class="summary-card">
-                  <div class="summary-label">{card.label}</div>
+                  <div class="metric-card-top">
+                    <div class="summary-label">{card.label}</div>
+                    {#if card.infoText}
+                      <div class="metric-info">
+                        <button
+                          type="button"
+                          class="metric-info-btn"
+                          aria-label={`Explain ${card.label}`}
+                          title={`Explain ${card.label}`}
+                          aria-expanded={openInfoKey === infoKey}
+                          onclick={() => toggleInfo(infoKey)}
+                        >i</button>
+                        {#if openInfoKey === infoKey}
+                          <div class="metric-popover" role="note">
+                            <div class="metric-popover-title">{card.label}</div>
+                            <p>{card.infoText}</p>
+                          </div>
+                        {/if}
+                      </div>
+                    {/if}
+                  </div>
                   <div class="summary-value">{formatValue(card.value, card.kind)}</div>
                 </div>
               {/each}
@@ -292,6 +356,13 @@
     border-radius: 8px;
     padding: 10px 12px;
     background: #fafafa;
+    position: relative;
+  }
+  .metric-card-top {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    align-items: flex-start;
   }
   .hero-label, .summary-label {
     font-size: 11px;
@@ -299,6 +370,62 @@
     text-transform: uppercase;
     font-weight: 700;
     margin-bottom: 4px;
+  }
+  .metric-info {
+    position: relative;
+    flex: 0 0 auto;
+  }
+  .metric-info-btn {
+    list-style: none;
+    width: 20px;
+    height: 20px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid #d7deea;
+    border-radius: 999px;
+    background: #fff;
+    color: #49617a;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    user-select: none;
+    line-height: 1;
+    padding: 0;
+  }
+  .metric-info-btn:hover {
+    background: #f5f9ff;
+    border-color: #b8cee9;
+  }
+  .metric-info-btn[aria-expanded='true'] {
+    background: #edf4ff;
+    border-color: #99bbe8;
+    color: #174a85;
+  }
+  .metric-popover {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    z-index: 10;
+    width: min(280px, calc(100vw - 64px));
+    padding: 10px 12px;
+    border: 1px solid #dbe4f0;
+    border-radius: 10px;
+    background: #fff;
+    box-shadow: 0 10px 28px rgba(30, 41, 59, 0.16);
+  }
+  .metric-popover-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: #22324a;
+    margin-bottom: 6px;
+  }
+  .metric-popover p {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.45;
+    color: #4a5565;
+    text-transform: none;
   }
   .hero-value { font-size: 18px; font-weight: 700; color: #222; }
   .summary-value { font-size: 14px; font-weight: 700; color: #222; }

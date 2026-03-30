@@ -216,6 +216,17 @@ describe('buildRunTelemetry', () => {
 		expect(hitRatio?.value).toBeCloseTo(0.9);
 	});
 
+	it('adds explainer text to hero and summary cards', () => {
+		const telemetry = buildRunTelemetry(db, 1, ['bench']);
+		const heroTransactions = telemetry.heroCards.find((card) => card.key === 'transactions');
+		const walPerTx = telemetry.sections
+			.find((section) => section.key === 'wal')
+			?.summary.find((card) => card.key === 'wal_bytes_per_tx');
+
+		expect(heroTransactions?.infoText).toContain('Commits plus rollbacks');
+		expect(walPerTx?.infoText).toContain('Average WAL volume per transaction');
+	});
+
 	it('ranks the top five user tables and reports populated checkpointer telemetry', () => {
 		const telemetry = buildRunTelemetry(db, 1, ['bench']);
 		const userTables = telemetry.sections.find((section) => section.key === 'user_tables');
