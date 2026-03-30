@@ -160,6 +160,7 @@ func runPgbenchStep(
 	// Stop ticker and take final snapshot.
 	ticker.Stop()
 	_ = collectOnce(ctx, pool, opts.Plan.EnabledSnapTables, "bench", snapshots)
+	collectPgLocksOnce(ctx, pool, "bench", snapshots)
 
 	if runErr != nil {
 		return res, fmt.Errorf("pgbench exited with error: %w", runErr)

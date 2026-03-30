@@ -24,6 +24,30 @@
     Object.fromEntries(series.map(s => [s.label, s.color]))
   );
 
+  // Declared early so detailSeries / activeSeries can reference it
+  let tooltipGranularity = $state<'detail' | 'broad'>('detail');
+
+  // Per-event series derived from rawRows (used in detail mode)
+  const detailSeries = $derived.by((): ChartSeries[] => {
+    if (!rawRows.length) return series;
+    const map = new Map<string, { label: string; color: string; pts: Map<number, number> }>();
+    for (const r of rawRows) {
+      const key = r.typeKey === r.eventKey ? r.typeKey : `${r.typeKey}:${r.eventKey}`;
+      if (!map.has(key)) map.set(key, { label: key, color: r.color, pts: new Map() });
+      const entry = map.get(key)!;
+      entry.pts.set(r.t, (entry.pts.get(r.t) ?? 0) + r.v);
+    }
+    return [...map.values()].map(v => ({
+      label: v.label, color: v.color,
+      points: [...v.pts.entries()].map(([t, v]) => ({ t, v }))
+    }));
+  });
+
+  // Which series to render: detail mode uses per-event series, broad mode uses aggregated series
+  const activeSeries = $derived(
+    tooltipGranularity === 'detail' && rawRows.length > 0 ? detailSeries : series
+  );
+
   const ML = 60, MR = 20, MT = 8, MB = 28;
   const W = 520, H = 190;
   const IW = W - ML - MR;
@@ -31,7 +55,7 @@
 
   const allTimes = $derived.by(() => {
     const s = new Set<number>();
-    for (const sr of series) for (const p of sr.points) s.add(p.t);
+    for (const sr of activeSeries) for (const p of sr.points) s.add(p.t);
     for (const m of markers) if (!isNaN(m.t)) s.add(m.t);
     return [...s].sort((a, b) => a - b);
   });
@@ -41,12 +65,12 @@
   const tRange = $derived(tMax - tMin || 1);
 
   const stacked = $derived.by(() => {
-    if (!series.length || !allTimes.length) return { bottoms: [] as number[][], tops: [] as number[][], vMax: 1 };
-    const maps = series.map(s => new Map(s.points.map(p => [p.t, p.v])));
+    if (!activeSeries.length || !allTimes.length) return { bottoms: [] as number[][], tops: [] as number[][], vMax: 1 };
+    const maps = activeSeries.map(s => new Map(s.points.map(p => [p.t, p.v])));
     const n = allTimes.length;
     const bottoms: number[][] = [], tops: number[][] = [];
     const run = new Array<number>(n).fill(0);
-    for (let i = 0; i < series.length; i++) {
+    for (let i = 0; i < activeSeries.length; i++) {
       bottoms.push([...run]);
       for (let j = 0; j < n; j++) run[j] += maps[i].get(allTimes[j]) ?? 0;
       tops.push([...run]);
@@ -54,7 +78,7 @@
     return { bottoms, tops, vMax: Math.max(...run, 1) };
   });
 
-  const hasData = $derived(series.some(s => s.points.length > 0));
+  const hasData = $derived(activeSeries.some(s => s.points.length > 0));
 
   function tx(t: number) { return ((t - tMin) / tRange) * IW; }
   function ty(v: number) { return IH - (v / stacked.vMax) * IH; }
@@ -90,7 +114,6 @@
   let hoveredTime: number | null = $state(null);
   let tooltipX = $state(0);
   let tooltipY = $state(0);
-  let tooltipGranularity = $state<'detail' | 'broad'>('detail');
 
   function snapTime(t: number): number | null {
     if (!allTimes.length) return null;
@@ -141,9 +164,9 @@
           .sort((a, b) => b.v - a.v);
       }
     } else {
-      // Fallback: use series directly
-      const total = series.reduce((s, sr) => s + (sr.points.find(p => p.t === hoveredTime)?.v ?? 0), 0);
-      return series.map(sr => {
+      // Fallback: use activeSeries directly
+      const total = activeSeries.reduce((s, sr) => s + (sr.points.find(p => p.t === hoveredTime)?.v ?? 0), 0);
+      return activeSeries.map(sr => {
         const v = sr.points.find(p => p.t === hoveredTime)?.v ?? 0;
         return { color: sr.color, label: sr.label, v, pct: total > 0 ? Math.round(v / total * 100) : 0 };
       }).sort((a, b) => b.v - a.v);
@@ -157,7 +180,7 @@
   <div class="chart-header">
     <span class="chart-title">{title}</span>
     <span class="chart-legend">
-      {#each series as s}
+      {#each activeSeries as s}
         <span class="leg-item"><span class="leg-dot" style="background:{s.color}"></span>{s.label}</span>
       {/each}
     </span>
@@ -189,7 +212,7 @@
           <text x={f * IW} y={IH + 14} text-anchor="middle" font-size="10" fill="#999">{fmtRelTime(f * tRange)}</text>
         {/each}
         <!-- Stacked polygons -->
-        {#each series as s, i}
+        {#each activeSeries as s, i}
           {#if stacked.bottoms.length && stacked.tops.length}
             <polygon
               points={polyPts(stacked.tops[i], stacked.bottoms[i])}
@@ -213,7 +236,7 @@
           {#if stacked.tops.length}
             {@const j = allTimes.indexOf(hoveredTime!)}
             {#if j >= 0}
-              {#each series as s, i}
+              {#each activeSeries as s, i}
                 <circle cx={crosshairX} cy={ty(stacked.tops[i][j])} r="3.5"
                         fill={s.color} stroke="#fff" stroke-width="1.5" pointer-events="none" />
               {/each}

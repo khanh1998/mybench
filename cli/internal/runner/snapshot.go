@@ -57,6 +57,7 @@ func (s *SnapshotTicker) Start(ctx context.Context) {
 				if err := collectOnce(ctx, s.pool, s.snapTables, s.phase, s.snapshots); err != nil {
 					fmt.Printf("warning: snapshot collection error: %v\n", err)
 				}
+				collectPgLocksOnce(ctx, s.pool, s.phase, s.snapshots)
 			}
 		}
 	}()

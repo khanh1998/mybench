@@ -240,6 +240,7 @@ func runCollectStep(
 		if err := collectOnce(ctx, pool, opts.Plan.EnabledSnapTables, phase, snapshots); err != nil {
 			return err
 		}
+		collectPgLocksOnce(ctx, pool, phase, snapshots)
 
 		remaining := time.Until(deadline)
 		if remaining <= 0 {

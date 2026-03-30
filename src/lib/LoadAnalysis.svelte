@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import StackedAreaChart from '$lib/StackedAreaChart.svelte';
   import LineChart from '$lib/LineChart.svelte';
+  import { buildLockTree, MAX_LOCK_DEPTH, type LockPairRow, type LockWaitInfo, type LockNode } from '$lib/lock-tree';
 
   interface RunMeta {
     id: number;
@@ -29,16 +30,17 @@
     total_plan_time: number; delta_temp_blks_read: number; delta_wal_bytes: number;
     snapshot_count: number; bench_secs: number;
   }
-  // Lock tree row: blocking → blocked pairs with occurrence count
-  interface LockPairRow {
-    blocked_pid: number; blocked_query: string | null; blocked_state: string | null;
-    blocking_pid: number; blocking_query: string | null; blocking_state: string | null;
-    locktype: string; requested_mode: string; held_mode: string; times_seen: number;
+  interface ActiveLockNode { node: LockNode; runLabel: string; }
+  interface ContentionRow {
+    resource: string;
+    locktype?: string; // present when granularity = 'all'
+    mode?: string;     // present when granularity = 'table+mode' | 'all'
+    lock_wait: number; lock_hold: number; pid_wait: number; pid_hold: number;
   }
-  interface LockNode {
-    pid: number; query: string; state: string;
-    children: Array<{ pid: number; query: string; state: string; locktype: string; requested_mode: string; held_mode: string; times_seen: number; }>;
+  interface LockSummaryRow {
+    total_held: number; total_waited: number; distinct_pids: number; waiting_pids: number; snapshot_count: number;
   }
+  interface LockTimeRow { _collected_at: string; waiting_pids: number; holding_pids: number; }
   interface TotalAasRow { _collected_at: string; total_active: number; }
 
   // ── Hue-rotation color system ──────────────────────────────────────────────
@@ -97,9 +99,80 @@
   let sqlMode    = $state<'total' | 'persec'>('total');
   let vcpuCount  = $state<number>(4);
 
+  let expandedLockNodes       = $state<Set<string>>(new Set());
+  let activeLockNode          = $state<ActiveLockNode | null>(null);
+  let lockSort                = $state<'times_seen' | 'pid'>('times_seen');
+  let contentionGranularity   = $state<'all' | 'table' | 'table+mode'>('table+mode');
+  let contentionData          = $state<Record<number, ContentionRow[]>>({});
+  let lockSummary             = $state<Record<number, LockSummaryRow | null>>({});
+  let lockTimeData            = $state<Record<number, LockTimeRow[]>>({});
+
+  function toggleLockNode(key: string) {
+    const next = new Set(expandedLockNodes);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    expandedLockNodes = next;
+  }
+
+  function nodeHeat(n: LockNode): number {
+    return n.waitInfo?.times_seen ?? n.children.length;
+  }
+  function sortLockNodes(nodes: LockNode[], by: 'times_seen' | 'pid'): LockNode[] {
+    return [...nodes]
+      .sort((a, b) => by === 'pid' ? a.pid - b.pid : nodeHeat(b) - nodeHeat(a))
+      .map(n => ({ ...n, children: sortLockNodes(n.children, by) }));
+  }
+
   const isCompare = $derived(runs.length > 1);
 
   // ── Queries ────────────────────────────────────────────────────────────────
+  // loadContention is separate so it can be re-run when granularity changes
+  async function loadContention() {
+    // 'all' uses the summary cards (lockSummary), no per-resource breakdown needed
+    if (contentionGranularity === 'all') {
+      contentionData = {};
+      return;
+    }
+    const p = showPhaseFilter ? localPhases : phases;
+    const { clause, params: pParams } = phaseClause(p);
+    const gran = contentionGranularity;
+    const extraCols = gran === 'table' ? '' : ', l.mode';
+    const groupBy   = gran === 'table' ? 'resource' : 'resource, l.mode';
+
+    await Promise.all(runs.map(async (run) => {
+      const rid = run.id;
+      const res = await queryApi(
+        `SELECT
+           CASE l.locktype
+             WHEN 'transactionid' THEN 'transaction'
+             WHEN 'virtualxid'    THEN 'virtual xid'
+             ELSE COALESCE(t.schemaname || '.' || t.relname, l.locktype)
+           END as resource
+           ${extraCols},
+           SUM(CASE WHEN l.granted = 0 THEN 1 ELSE 0 END) as lock_wait,
+           SUM(CASE WHEN l.granted = 1 THEN 1 ELSE 0 END) as lock_hold,
+           COUNT(DISTINCT CASE WHEN l.granted = 0 THEN l.pid END) as pid_wait,
+           COUNT(DISTINCT CASE WHEN l.granted = 1 THEN l.pid END) as pid_hold
+         FROM snap_pg_locks l
+         LEFT JOIN (
+           SELECT DISTINCT relid, schemaname, relname
+           FROM snap_pg_stat_user_tables WHERE _run_id = ?
+         ) t ON t.relid = l.relation
+         WHERE l._run_id = ? AND ${clause.replace(/_phase/g, 'l._phase')}
+         GROUP BY ${groupBy}
+         HAVING lock_wait > 0
+         ORDER BY lock_wait DESC
+         LIMIT 30`,
+        [rid, rid, ...pParams]
+      );
+      contentionData = { ...contentionData, [rid]: res.error ? [] : (res.rows as unknown as ContentionRow[]) };
+    }));
+  }
+
+  $effect(() => {
+    contentionGranularity; // track reactive dependency
+    if (Object.keys(lockSummary).length > 0) loadContention();
+  });
+
   function phaseClause(p: string[]): { clause: string; params: string[] } {
     if (p.length === 0) return { clause: '_phase = ?', params: ['bench'] };
     if (p.length === 1) return { clause: '_phase = ?', params: p };
@@ -276,8 +349,35 @@
         [rid, ...pParams, rid]
       );
       locksData = { ...locksData, [rid]: lockRes.error ? [] : (lockRes.rows as unknown as LockPairRow[]) };
+
+      // Overall lock summary (totals — independent of granularity)
+      const summaryRes = await queryApi(
+        `SELECT
+           SUM(CASE WHEN granted = 1 THEN 1 ELSE 0 END) as total_held,
+           SUM(CASE WHEN granted = 0 THEN 1 ELSE 0 END) as total_waited,
+           COUNT(DISTINCT pid) as distinct_pids,
+           COUNT(DISTINCT CASE WHEN granted = 0 THEN pid END) as waiting_pids,
+           COUNT(DISTINCT _collected_at) as snapshot_count
+         FROM snap_pg_locks
+         WHERE _run_id = ? AND ${clause}`,
+        [rid, ...pParams]
+      );
+      lockSummary = { ...lockSummary, [rid]: (summaryRes.error || !summaryRes.rows[0]) ? null : (summaryRes.rows[0] as unknown as LockSummaryRow) };
+
+      // Lock activity over time (waiting vs holding PIDs per snapshot)
+      const lockTimeRes = await queryApi(
+        `SELECT _collected_at,
+           COUNT(DISTINCT CASE WHEN granted = 0 THEN pid END) as waiting_pids,
+           COUNT(DISTINCT CASE WHEN granted = 1 THEN pid END) as holding_pids
+         FROM snap_pg_locks
+         WHERE _run_id = ? AND ${clause}
+         GROUP BY _collected_at ORDER BY _collected_at`,
+        [rid, ...pParams]
+      );
+      lockTimeData = { ...lockTimeData, [rid]: lockTimeRes.error ? [] : (lockTimeRes.rows as unknown as LockTimeRow[]) };
     }));
 
+    await loadContention();
     loading = false;
   }
 
@@ -424,6 +524,15 @@
     return new Date(iso).toLocaleTimeString();
   }
 
+  function buildLockTimeSeries(run: RunMeta) {
+    const rows = lockTimeData[run.id] ?? [];
+    const org = origin(run);
+    return [
+      { label: 'Waiting PIDs', color: '#d63300', points: rows.map(r => ({ t: toMs(r._collected_at, org), v: Number(r.waiting_pids) })) },
+      { label: 'Holding PIDs', color: '#0066cc', points: rows.map(r => ({ t: toMs(r._collected_at, org), v: Number(r.holding_pids) })) }
+    ];
+  }
+
   function totalExecTime(rows: SqlRow[]): number {
     return rows.reduce((s, r) => s + Number(r.delta_exec_time ?? 0), 0);
   }
@@ -434,42 +543,6 @@
 
   const anyLocks = $derived(runs.some(r => (locksData[r.id] ?? []).length > 0));
 
-  function buildLockTree(pairs: LockPairRow[]): LockNode[] {
-    const blockers = new Map<number, LockNode>();
-    // Collect all unique blockers
-    for (const p of pairs) {
-      if (!blockers.has(p.blocking_pid)) {
-        blockers.set(p.blocking_pid, {
-          pid: p.blocking_pid,
-          query: p.blocking_query ?? '(unknown)',
-          state: p.blocking_state ?? '—',
-          children: []
-        });
-      }
-    }
-    // Add blocked sessions as children
-    for (const p of pairs) {
-      const node = blockers.get(p.blocking_pid)!;
-      // Avoid duplicates (same blocked_pid can appear multiple times with different lock types)
-      const exists = node.children.some(c => c.pid === p.blocked_pid && c.locktype === p.locktype);
-      if (!exists) {
-        node.children.push({
-          pid: p.blocked_pid,
-          query: p.blocked_query ?? '(unknown)',
-          state: p.blocked_state ?? 'waiting',
-          locktype: p.locktype,
-          requested_mode: p.requested_mode,
-          held_mode: p.held_mode,
-          times_seen: p.times_seen
-        });
-      }
-    }
-    // Return only root blockers (not themselves blocked by someone else)
-    const blockedPids = new Set(pairs.map(p => p.blocked_pid));
-    const roots = [...blockers.values()].filter(n => !blockedPids.has(n.pid));
-    // If there are chains (A blocks B blocks C), include all blockers sorted by total blockees
-    return roots.length > 0 ? roots : [...blockers.values()];
-  }
   const anySql   = $derived(runs.some(r => hasSql[r.id]));
 
   // ── Paging ─────────────────────────────────────────────────────────────────
@@ -827,44 +900,156 @@
 </div>
 
 <!-- ── Section 5: Lock Analysis ──────────────────────────────────────────── -->
+
+{#snippet lockNodeRow(node: LockNode, runId: number, depth: number, parentKey: string, idx: number)}
+  {@const key = `${parentKey}/${node.pid}`}
+  {@const hasChildren = node.children.length > 0}
+  {@const isExpanded = expandedLockNodes.has(key)}
+  {@const stateBg = node.waitInfo ? '#fee2e2' : node.state === 'active' ? '#dcfce7' : '#fef3c7'}
+  {@const stateColor = node.waitInfo ? '#991b1b' : node.state === 'active' ? '#166534' : '#92400e'}
+  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+  <div
+    class="lock-node-row"
+    style:padding-left="{depth * 18 + 6}px"
+    onclick={() => activeLockNode = { node, runLabel: String(runId) }}
+    title="Click for details"
+  >
+    <!-- level index -->
+    <span class="lock-idx">{idx + 1}</span>
+    <!-- toggle arrow -->
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <span
+      class="lock-toggle-btn"
+      onclick={(e) => { e.stopPropagation(); if (hasChildren) toggleLockNode(key); }}
+      style:cursor={hasChildren ? 'pointer' : 'default'}
+      style:color={hasChildren ? '#555' : '#ddd'}
+    >{#if hasChildren}{isExpanded ? '▼' : '▶'}{:else}·{/if}</span>
+
+    <span class="lock-pid-badge {node.waitInfo ? 'blocked' : 'blocker'}">PID {node.pid}</span>
+    <span class="lock-state-badge" style:background={stateBg} style:color={stateColor}>{node.state}</span>
+
+    {#if node.waitInfo}
+      <span class="lock-mode-info">
+        waiting for <span class="lock-badge">{node.waitInfo.locktype}</span>
+        <span class="lock-badge-dim">{node.waitInfo.requested_mode}</span>
+        <span class="lock-held-dim">(holds {node.waitInfo.held_mode})</span>
+      </span>
+      <span class="lock-times-seen" title="snapshots where this conflict was captured">{node.waitInfo.times_seen}×</span>
+    {:else if hasChildren}
+      <span class="lock-blocking-label">blocking {node.children.length} session(s)</span>
+    {/if}
+
+    <div class="lock-node-query">{(node.query ?? '').substring(0, 140)}</div>
+  </div>
+  {#if isExpanded && hasChildren}
+    {#each node.children as child, ci}
+      {@render lockNodeRow(child, runId, depth + 1, key, ci)}
+    {/each}
+  {/if}
+{/snippet}
+
 <div class="section">
   <h4 class="section-title">Lock Analysis</h4>
   {#if !anyLocks}
     <div class="empty">No lock conflicts detected during this run. 🎉</div>
   {:else}
-    <p class="section-desc">Blocking tree built from pg_locks snapshots. Root = blocker session; indented = blocked sessions.</p>
+    <div class="lock-sort-bar">
+      <span class="lock-sort-label">Sort tree:</span>
+      <button class="lock-sort-btn" class:active={lockSort === 'times_seen'} onclick={() => lockSort = 'times_seen'}>by duration</button>
+      <button class="lock-sort-btn" class:active={lockSort === 'pid'} onclick={() => lockSort = 'pid'}>by PID</button>
+    </div>
     {#each runs as run}
       {@const pairs = locksData[run.id] ?? []}
-      {#if pairs.length > 0}
-        {@const tree = buildLockTree(pairs)}
+      {@const contention = contentionData[run.id] ?? []}
+      {@const summary = lockSummary[run.id] ?? null}
+      {#if pairs.length > 0 || contention.length > 0}
+        {@const tree = sortLockNodes(buildLockTree(pairs), lockSort)}
         <div class="lock-panel">
           {#if isCompare}<div class="run-label" style="color:{run.color}">{run.label}</div>{/if}
-          {#each tree as blocker}
-            <div class="lock-blocker-card">
-              <div class="lock-blocker-header">
-                <span class="lock-pid-badge blocker">PID {blocker.pid}</span>
-                <span class="lock-state-badge" style="background:{blocker.state === 'active' ? '#dcfce7' : '#fef3c7'};color:{blocker.state === 'active' ? '#166534' : '#92400e'}">{blocker.state}</span>
-                <span class="lock-blocking-label">blocking {blocker.children.length} session(s)</span>
+
+          <!-- Lock activity time-series chart -->
+          {#if buildLockTimeSeries(run).some(s => s.points.length > 1)}
+            <div style="margin-bottom:12px">
+              <LineChart series={buildLockTimeSeries(run)} title="Lock Activity (PIDs over time)" originMs={origin(run)} />
+            </div>
+          {/if}
+
+          <div class="lock-layout">
+
+            <!-- ── Left: blocking chain tree ── -->
+            <div class="lock-chain-col">
+              <div class="lock-subsec-title">
+                Lock Chain
+                <span class="lock-subsec-hint">ordered by {lockSort === 'times_seen' ? 'duration' : 'PID'} · max depth {MAX_LOCK_DEPTH}</span>
               </div>
-              <div class="lock-blocker-query" title={blocker.query}>{(blocker.query ?? '').substring(0, 200)}</div>
-              <div class="lock-children">
-                {#each blocker.children as child}
-                  <div class="lock-child-row">
-                    <span class="lock-tree-line">└─</span>
-                    <span class="lock-pid-badge blocked">PID {child.pid}</span>
-                    <span class="lock-state-badge" style="background:#fee2e2;color:#991b1b">{child.state}</span>
-                    <span class="lock-mode-info">
-                      waiting for <span class="lock-badge">{child.locktype}</span>
-                      <span class="lock-badge-dim">{child.requested_mode}</span>
-                      <span style="color:#999;font-size:10px">(blocker holds {child.held_mode})</span>
-                    </span>
-                    <span class="lock-times-seen" title="snapshots where this conflict was captured">{child.times_seen}×</span>
-                    <div class="lock-child-query" title={child.query}>{(child.query ?? '').substring(0, 160)}</div>
-                  </div>
+              <div class="lock-tree">
+                {#each tree as root, ri}
+                  {@render lockNodeRow(root, run.id, 0, String(run.id), ri)}
                 {/each}
               </div>
             </div>
-          {/each}
+
+            <!-- ── Right: contention summary ── -->
+            <div class="lock-summary-col">
+              {#if summary}
+                <div class="ct-gran-bar">
+                  <span class="lock-sort-label">View:</span>
+                  <button class="lock-sort-btn" class:active={contentionGranularity === 'all'} onclick={() => contentionGranularity = 'all'}>Overview</button>
+                  <button class="lock-sort-btn" class:active={contentionGranularity === 'table'} onclick={() => contentionGranularity = 'table'}>By Table</button>
+                  <button class="lock-sort-btn" class:active={contentionGranularity === 'table+mode'} onclick={() => contentionGranularity = 'table+mode'}>Table + Mode</button>
+                </div>
+
+                {#if contentionGranularity === 'all'}
+                  <div class="lock-stat-grid">
+                    <div class="lsg-cell">
+                      <span class="lsg-label">Total Waits</span>
+                      <span class="lsg-val lsg-hot">{summary.total_waited}</span>
+                    </div>
+                    <div class="lsg-cell">
+                      <span class="lsg-label">Total Held</span>
+                      <span class="lsg-val">{summary.total_held}</span>
+                    </div>
+                    <div class="lsg-cell">
+                      <span class="lsg-label">Waiting PIDs</span>
+                      <span class="lsg-val lsg-hot">{summary.waiting_pids}</span>
+                    </div>
+                    <div class="lsg-cell">
+                      <span class="lsg-label">All PIDs</span>
+                      <span class="lsg-val">{summary.distinct_pids}</span>
+                    </div>
+                    <div class="lsg-cell" style="grid-column:span 2">
+                      <span class="lsg-label">Contention Rate</span>
+                      <span class="lsg-val">{summary.total_held + summary.total_waited > 0 ? Math.round(summary.total_waited / (summary.total_held + summary.total_waited) * 100) : 0}% of lock observations were waits</span>
+                    </div>
+                  </div>
+                {:else if contention.length > 0}
+                  <div class="ct-table">
+                    <div class="ct-header" class:ct-has-mode={contentionGranularity === 'table+mode'}>
+                      <span>Resource</span>
+                      {#if contentionGranularity === 'table+mode'}<span>Mode</span>{/if}
+                      <span title="Lock wait observations">Wait</span>
+                      <span title="Lock held observations">Hold</span>
+                      <span title="Distinct PIDs waiting">PIDs Wait</span>
+                      <span title="Distinct PIDs holding">PIDs Hold</span>
+                    </div>
+                    {#each contention as r}
+                      <div class="ct-row" class:ct-has-mode={contentionGranularity === 'table+mode'}>
+                        <span class="ct-resource"><span class="ct-resname">{r.resource}</span></span>
+                        {#if contentionGranularity === 'table+mode'}<span class="ct-mode">{r.mode ?? '—'}</span>{/if}
+                        <span class="ct-waited-num">{r.lock_wait}</span>
+                        <span class="ct-held-num">{r.lock_hold}</span>
+                        <span class="ct-pids-num ct-pids-wait">{r.pid_wait}</span>
+                        <span class="ct-pids-num">{r.pid_hold}</span>
+                      </div>
+                    {/each}
+                  </div>
+                {:else}
+                  <div class="empty" style="font-size:11px">Loading breakdown…</div>
+                {/if}
+              {/if}
+            </div>
+
+          </div>
         </div>
       {/if}
     {/each}
@@ -992,6 +1177,34 @@
   </div>
 {/if}
 
+<!-- ── Lock Detail Popup ─────────────────────────────────────────────────── -->
+{#if activeLockNode}
+  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
+  <div role="dialog" aria-modal="true" class="flame-overlay" onclick={() => activeLockNode = null}>
+    <div role="document" class="lock-detail-modal" onclick={e => e.stopPropagation()}>
+      <div class="flame-modal-header">
+        <span class="flame-modal-title">Lock Detail — PID {activeLockNode.node.pid}</span>
+        <button class="flame-close" onclick={() => activeLockNode = null}>✕</button>
+      </div>
+      <div class="lock-detail-grid">
+        <div class="ldg-row"><span class="ldg-label">PID</span><span class="ldg-val">{activeLockNode.node.pid}</span></div>
+        <div class="ldg-row"><span class="ldg-label">State</span><span class="ldg-val">{activeLockNode.node.state}</span></div>
+        {#if activeLockNode.node.waitInfo}
+          <div class="ldg-row"><span class="ldg-label">Lock Type</span><span class="ldg-val">{activeLockNode.node.waitInfo.locktype}</span></div>
+          <div class="ldg-row"><span class="ldg-label">Requested Mode</span><span class="ldg-val">{activeLockNode.node.waitInfo.requested_mode}</span></div>
+          <div class="ldg-row"><span class="ldg-label">Held Mode (blocker)</span><span class="ldg-val">{activeLockNode.node.waitInfo.held_mode}</span></div>
+          <div class="ldg-row"><span class="ldg-label">Times Seen</span><span class="ldg-val">{activeLockNode.node.waitInfo.times_seen}× across snapshots</span></div>
+        {:else}
+          <div class="ldg-row"><span class="ldg-label">Role</span><span class="ldg-val">Root blocker</span></div>
+        {/if}
+        <div class="ldg-row"><span class="ldg-label">Blocking</span><span class="ldg-val">{activeLockNode.node.children.length} direct session(s)</span></div>
+      </div>
+      <div class="ldg-label" style="margin: 8px 0 4px">Full Query</div>
+      <div class="flame-query-full">{activeLockNode.node.query}</div>
+    </div>
+  </div>
+{/if}
+
 <style>
   .phase-filter { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
   .phase-label { font-size: 12px; font-weight: 600; color: #555; }
@@ -1008,23 +1221,98 @@
   .chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
   .waits-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
   .sql-panels { display: flex; flex-direction: column; gap: 16px; }
-  .lock-panel { margin-bottom: 16px; display: flex; flex-direction: column; gap: 12px; }
-  .lock-blocker-card { border: 1px solid #e8e8e8; border-radius: 6px; padding: 10px 12px; background: #fafafa; }
-  .lock-blocker-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
-  .lock-blocking-label { font-size: 11px; color: #888; margin-left: 4px; }
-  .lock-blocker-query { font-family: monospace; font-size: 11px; color: #444; background: #f0f0f0; padding: 4px 8px; border-radius: 4px; white-space: pre-wrap; word-break: break-all; max-height: 60px; overflow: hidden; }
-  .lock-children { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
-  .lock-child-row { display: flex; align-items: flex-start; gap: 6px; padding-left: 8px; flex-wrap: wrap; }
-  .lock-tree-line { color: #ccc; font-size: 14px; flex-shrink: 0; margin-top: 1px; }
-  .lock-child-query { flex-basis: 100%; font-family: monospace; font-size: 10px; color: #777; padding: 2px 8px 2px 22px; white-space: pre-wrap; word-break: break-all; }
+  /* ── Lock sort bar ── */
+  .lock-sort-bar { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; }
+  .lock-sort-label { font-size: 11px; color: #888; }
+  .lock-sort-btn { background: none; border: 1px solid #ddd; border-radius: 3px; padding: 2px 10px; font-size: 11px; cursor: pointer; color: #555; }
+  .lock-sort-btn:hover { background: #f0f4ff; }
+  .lock-sort-btn.active { background: #0066cc; color: #fff; border-color: #0066cc; }
+
+  /* ── Lock layout: tree left, summary right ── */
+  .lock-panel { margin-bottom: 16px; }
+  .lock-layout { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+  .lock-chain-col { flex: 1.6; min-width: 260px; }
+  .lock-summary-col { flex: 1; min-width: 260px; }
+  .lock-subsec-title { font-size: 12px; font-weight: 700; color: #333; margin-bottom: 8px; }
+  .lock-subsec-hint { font-size: 10px; color: #aaa; font-weight: normal; margin-left: 6px; }
+
+  /* ── Tree rows ── */
+  .lock-tree { border: 1px solid #e8e8e8; border-radius: 6px; overflow: hidden; }
+  .lock-node-row {
+    display: flex; align-items: flex-start; gap: 6px; flex-wrap: wrap;
+    padding: 5px 10px 5px 6px;
+    border-bottom: 1px solid #f3f3f3;
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+  .lock-node-row:last-child { border-bottom: none; }
+  .lock-node-row:hover { background: #f0f4ff; }
+  .lock-idx { font-size: 9px; color: #ccc; font-family: monospace; min-width: 14px; text-align: right; flex-shrink: 0; margin-top: 3px; }
+  .lock-toggle-btn { flex-shrink: 0; font-size: 10px; width: 14px; text-align: center; margin-top: 2px; user-select: none; }
+  .lock-blocking-label { font-size: 11px; color: #888; }
+  .lock-node-query { flex-basis: 100%; font-family: monospace; font-size: 10px; color: #888; padding: 1px 0 0 34px; white-space: pre-wrap; word-break: break-all; }
   .lock-mode-info { font-size: 11px; color: #555; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+  .lock-held-dim { font-size: 10px; color: #999; }
   .lock-times-seen { font-size: 10px; color: #0066cc; font-weight: 600; margin-left: auto; white-space: nowrap; }
-  .lock-pid-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; font-weight: 700; font-family: monospace; }
+  .lock-pid-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; font-weight: 700; font-family: monospace; flex-shrink: 0; }
   .lock-pid-badge.blocker { background: #e8eeff; color: #0044bb; }
   .lock-pid-badge.blocked { background: #fee2e2; color: #991b1b; }
-  .lock-state-badge { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 10px; font-weight: 600; }
+  .lock-state-badge { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 10px; font-weight: 600; flex-shrink: 0; }
   .lock-badge { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 10px; background: #f0f0f0; color: #555; font-weight: 600; }
   .lock-badge-dim { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 10px; background: #fff3e0; color: #b84d00; font-weight: 600; }
+
+  /* ── Contention overview stats grid ── */
+  .lock-stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; margin-bottom: 4px; }
+  .lsg-cell { background: #f7f7f7; border: 1px solid #ececec; border-radius: 5px; padding: 6px 9px; display: flex; flex-direction: column; gap: 2px; }
+  .lsg-label { font-size: 10px; color: #999; text-transform: uppercase; letter-spacing: 0.03em; }
+  .lsg-val { font-size: 15px; font-weight: 700; color: #222; font-variant-numeric: tabular-nums; }
+  .lsg-val.lsg-hot { color: #cc2200; }
+
+  /* ── Granularity toggle ── */
+  .ct-gran-bar { display: flex; align-items: center; gap: 6px; margin: 10px 0 6px; }
+
+  /* ── Contention table — columns vary by granularity ── */
+  .ct-table { font-size: 11px; border: 1px solid #e8e8e8; border-radius: 5px; overflow: hidden; }
+  /* base: by-table — resource | wait | hold | pid_wait | pid_hold */
+  .ct-header,
+  .ct-row {
+    display: grid;
+    grid-template-columns: 2.4fr 1fr 0.8fr 0.8fr 0.8fr;
+    gap: 4px; padding: 4px 6px; align-items: center;
+  }
+  /* table+mode — add mode column */
+  .ct-header.ct-has-mode,
+  .ct-row.ct-has-mode {
+    grid-template-columns: 2fr 1.4fr 1fr 0.8fr 0.8fr 0.8fr;
+  }
+  .ct-header { background: #f7f7f7; font-weight: 600; color: #666; border-bottom: 1px solid #e8e8e8; }
+  .ct-row { border-bottom: 1px solid #f3f3f3; }
+  .ct-row:last-child { border-bottom: none; }
+  .ct-row:hover { background: #fafafa; }
+  .ct-resource { display: flex; align-items: center; gap: 4px; min-width: 0; }
+  .ct-resname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #333; font-family: monospace; font-size: 10px; font-weight: 600; }
+  .ct-type { display: flex; }
+  .ct-mode { color: #555; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 10px; }
+  .ct-waited-cell { display: flex; align-items: center; gap: 4px; }
+  .ct-bar-bg { flex: 1; height: 6px; background: #f0f0f0; border-radius: 3px; overflow: hidden; min-width: 16px; }
+  .ct-bar { height: 100%; background: #d63300; border-radius: 3px; }
+  .ct-waited-num { color: #cc2200; font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .ct-held-num { color: #666; font-variant-numeric: tabular-nums; }
+  .ct-pids-num { color: #888; text-align: center; font-variant-numeric: tabular-nums; }
+  .ct-pids-wait { color: #cc2200; font-weight: 600; }
+
+  /* Lock detail modal */
+  .lock-detail-modal {
+    background: #1e1f2e; color: #e0e0e0;
+    border: 1px solid #3a3b50; border-radius: 10px;
+    padding: 20px 22px; min-width: 340px; max-width: 520px; width: 95%;
+    max-height: 80vh; overflow-y: auto;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+  }
+  .lock-detail-grid { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+  .ldg-row { display: flex; gap: 8px; align-items: baseline; font-size: 12px; }
+  .ldg-label { color: #6b7280; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; min-width: 130px; flex-shrink: 0; }
+  .ldg-val { color: #e0e0e0; font-family: monospace; font-size: 12px; }
 
   .empty { font-size: 13px; color: #999; padding: 12px 0; }
 

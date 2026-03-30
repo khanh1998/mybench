@@ -194,65 +194,6 @@ export async function collectPgStatStatementsSnapshot(
 	}
 }
 
-export async function collectLockConflictsSnapshot(
-	pgPool: pg.Pool,
-	runId: number,
-	phase: 'pre' | 'bench' | 'post'
-): Promise<void> {
-	try {
-		const result = await pgPool.query(`
-			SELECT
-			  blocked_locks.pid         AS blocked_pid,
-			  blocked_act.query         AS blocked_query,
-			  blocked_act.usename       AS blocked_user,
-			  blocking_locks.pid        AS blocking_pid,
-			  blocking_act.query        AS blocking_query,
-			  blocking_act.usename      AS blocking_user,
-			  blocked_locks.locktype    AS locktype,
-			  blocking_locks.mode       AS held_mode,
-			  blocked_locks.mode        AS requested_mode
-			FROM pg_catalog.pg_locks AS blocked_locks
-			JOIN pg_catalog.pg_stat_activity AS blocked_act  ON blocked_act.pid  = blocked_locks.pid
-			JOIN pg_catalog.pg_locks AS blocking_locks
-			  ON  blocking_locks.locktype  = blocked_locks.locktype
-			  AND blocking_locks.relation  IS NOT DISTINCT FROM blocked_locks.relation
-			  AND blocking_locks.page      IS NOT DISTINCT FROM blocked_locks.page
-			  AND blocking_locks.tuple     IS NOT DISTINCT FROM blocked_locks.tuple
-			  AND blocking_locks.virtualxid      IS NOT DISTINCT FROM blocked_locks.virtualxid
-			  AND blocking_locks.transactionid   IS NOT DISTINCT FROM blocked_locks.transactionid
-			  AND blocking_locks.classid   IS NOT DISTINCT FROM blocked_locks.classid
-			  AND blocking_locks.objid     IS NOT DISTINCT FROM blocked_locks.objid
-			  AND blocking_locks.objsubid  IS NOT DISTINCT FROM blocked_locks.objsubid
-			  AND blocking_locks.pid != blocked_locks.pid
-			JOIN pg_catalog.pg_stat_activity AS blocking_act ON blocking_act.pid = blocking_locks.pid
-			WHERE NOT blocked_locks.granted
-			  AND blocking_locks.granted
-		`);
-		if (result.rows.length === 0) return;
-
-		const db = getDb();
-		const collectedAt = new Date().toISOString();
-		const cols = ['blocked_pid', 'blocked_query', 'blocked_user', 'blocking_pid', 'blocking_query', 'blocking_user', 'locktype', 'held_mode', 'requested_mode'];
-		const insertCols = ['_run_id', '_collected_at', '_phase', ...cols];
-		const placeholders = insertCols.map((_, i) => `@p${i}`).join(', ');
-		const stmt = db.prepare(
-			`INSERT INTO snap_pg_lock_conflicts (${insertCols.join(', ')}) VALUES (${placeholders})`
-		);
-		const insertMany = db.transaction((rows: Record<string, unknown>[]) => {
-			for (const row of rows) {
-				const params: Record<string, unknown> = { p0: runId, p1: collectedAt, p2: phase };
-				cols.forEach((col, i) => {
-					params[`p${i + 3}`] = row[col] ?? null;
-				});
-				stmt.run(params);
-			}
-		});
-		insertMany(result.rows);
-	} catch (_err) {
-		// Lock conflict collection is best-effort; permission errors or no locks = fine
-	}
-}
-
 /** Raw snapshot of pg_locks — analysis (blocking tree) computed in the UI. */
 export async function collectPgLocksSnapshot(
 	pgPool: pg.Pool,
