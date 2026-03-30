@@ -293,6 +293,7 @@ function detectAvailablePhases(db: Database.Database, runId: number, databaseNam
 		{ table: 'snap_pg_stat_database_conflicts', datnameColumn: 'datname' },
 		{ table: 'snap_pg_stat_wal' },
 		{ table: 'snap_pg_stat_bgwriter' },
+		{ table: 'snap_pg_stat_checkpointer' },
 		{ table: 'snap_pg_stat_archiver' },
 		{ table: 'snap_pg_stat_io' },
 		{ table: 'snap_pg_stat_user_tables' },
@@ -483,11 +484,9 @@ function buildWalSection(rows: SnapshotRow[], runStartMs: number, transactions: 
 }
 
 function buildBgwriterSection(rows: SnapshotRow[], runStartMs: number): TelemetrySection {
-	const checkpointsTimed = delta(rows, 'checkpoints_timed');
-	const checkpointsReq = delta(rows, 'checkpoints_req');
 	const buffersClean = delta(rows, 'buffers_clean');
-	const buffersBackend = delta(rows, 'buffers_backend');
-	const backendWriteRatio = safeRatio(buffersBackend, sum([buffersBackend, buffersClean]));
+	const maxwrittenClean = delta(rows, 'maxwritten_clean');
+	const buffersAlloc = delta(rows, 'buffers_alloc');
 
 	if (rows.length === 0) {
 		return {
@@ -496,7 +495,7 @@ function buildBgwriterSection(rows: SnapshotRow[], runStartMs: number): Telemetr
 			status: 'no_data',
 			reason: 'No pg_stat_bgwriter snapshots were collected for the selected phases.',
 			summary: [],
-			chartTitle: 'Checkpoint activity',
+			chartTitle: 'Background writer buffers',
 			chartSeries: [],
 			tableTitle: 'BGWriter metrics',
 			tableColumns: [],
@@ -509,15 +508,16 @@ function buildBgwriterSection(rows: SnapshotRow[], runStartMs: number): Telemetr
 		label: 'BGWriter',
 		status: 'ok',
 		summary: [
-			metricCard('checkpoints_req', 'Requested Checkpoints', 'count', checkpointsReq),
-			metricCard('checkpoints_timed', 'Timed Checkpoints', 'count', checkpointsTimed),
-			metricCard('forced_ratio', 'Forced Checkpoint Ratio', 'percent', safeRatio(checkpointsReq, sum([checkpointsReq, checkpointsTimed]))),
-			metricCard('backend_write_ratio', 'Backend Write Ratio', 'percent', backendWriteRatio)
+			metricCard('buffers_clean', 'Buffers Clean', 'count', buffersClean),
+			metricCard('maxwritten_clean', 'Maxwritten Clean', 'count', maxwrittenClean),
+			metricCard('buffers_alloc', 'Buffers Alloc', 'count', buffersAlloc),
+			metricCard('stats_reset', 'Stats Reset', 'text', latestText(rows, 'stats_reset'))
 		],
-		chartTitle: 'Checkpoint activity over time',
+		chartTitle: 'Background writer activity over time',
 		chartSeries: buildMetricSeries(rows, runStartMs, [
-			{ label: 'requested', valueFn: (row) => toNumber(row.checkpoints_req) },
-			{ label: 'timed', valueFn: (row) => toNumber(row.checkpoints_timed) }
+			{ label: 'buffers clean', valueFn: (row) => toNumber(row.buffers_clean) },
+			{ label: 'buffers alloc', valueFn: (row) => toNumber(row.buffers_alloc) },
+			{ label: 'maxwritten clean', valueFn: (row) => toNumber(row.maxwritten_clean) }
 		]),
 		tableTitle: 'BGWriter metrics',
 		tableColumns: [
@@ -525,15 +525,10 @@ function buildBgwriterSection(rows: SnapshotRow[], runStartMs: number): Telemetr
 			{ key: 'value', label: 'Value' }
 		],
 		tableRows: makeMetricRows([
-			{ metric: 'Requested checkpoints', value: checkpointsReq, kind: 'count' },
-			{ metric: 'Timed checkpoints', value: checkpointsTimed, kind: 'count' },
-			{ metric: 'Checkpoint write time (ms)', value: delta(rows, 'checkpoint_write_time'), kind: 'duration_ms' },
-			{ metric: 'Checkpoint sync time (ms)', value: delta(rows, 'checkpoint_sync_time'), kind: 'duration_ms' },
-			{ metric: 'Buffers checkpoint', value: delta(rows, 'buffers_checkpoint'), kind: 'count' },
 			{ metric: 'Buffers clean', value: buffersClean, kind: 'count' },
-			{ metric: 'Buffers backend', value: buffersBackend, kind: 'count' },
-			{ metric: 'Buffers alloc', value: delta(rows, 'buffers_alloc'), kind: 'count' },
-			{ metric: 'Maxwritten clean', value: delta(rows, 'maxwritten_clean'), kind: 'count' }
+			{ metric: 'Maxwritten clean', value: maxwrittenClean, kind: 'count' },
+			{ metric: 'Buffers alloc', value: buffersAlloc, kind: 'count' },
+			{ metric: 'Stats reset', value: latestText(rows, 'stats_reset'), kind: 'text' }
 		])
 	};
 }
@@ -818,7 +813,7 @@ function buildStatioUserTablesSection(rows: SnapshotRow[], runStartMs: number): 
 			status: 'no_data',
 			reason: 'No pg_statio_user_tables snapshots were collected for the selected phases.',
 			summary: [],
-			chartTitle: 'Top tables by heap reads',
+			chartTitle: 'Top tables by heap activity',
 			chartSeries: [],
 			tableTitle: 'Top tables',
 			tableColumns: [],
@@ -830,37 +825,48 @@ function buildStatioUserTablesSection(rows: SnapshotRow[], runStartMs: number): 
 	const entries = [...grouped.entries()].map(([relname, bucket]) => {
 		const heapReads = delta(bucket, 'heap_blks_read');
 		const heapHits = delta(bucket, 'heap_blks_hit');
+		const heapActivity = sum([heapReads, heapHits]);
 		return {
 			key: relname,
 			label: relname,
 			rows: bucket,
+			heapActivity,
 			heapReads,
+			heapHits,
 			heapHitRatio: safeRatio(heapHits, sum([heapHits, heapReads])),
 			toasts: delta(bucket, 'toast_blks_read')
 		};
 	});
-	const topTables = topEntries(entries, (entry) => entry.heapReads);
+	const topTables = topEntries(entries, (entry) => entry.heapActivity);
 
 	return {
 		key: 'statio_user_tables',
 		label: 'Statio User Tables',
 		status: 'ok',
 		summary: [
+			metricCard('heap_activity', 'Heap Activity', 'count', sum(entries.map((entry) => entry.heapActivity))),
+			metricCard('heap_hits', 'Heap Hits', 'count', sum(entries.map((entry) => entry.heapHits))),
 			metricCard('heap_reads', 'Heap Reads', 'count', sum(entries.map((entry) => entry.heapReads))),
 			metricCard('heap_hit_ratio', 'Heap Hit Ratio', 'percent', safeRatio(sum(entries.map((entry) => entry.heapHitRatio)), entries.length || null)),
 			metricCard('toast_reads', 'TOAST Reads', 'count', sum(entries.map((entry) => entry.toasts)))
 		],
-		chartTitle: 'Top tables by heap reads over time',
-		chartSeries: buildMultiSeries(topTables.map((entry) => ({ key: entry.key, label: entry.label, rows: entry.rows })), runStartMs, (row) => toNumber(row.heap_blks_read)),
-		tableTitle: 'Top tables by heap reads',
+		chartTitle: 'Top tables by heap activity over time',
+		chartSeries: buildMultiSeries(topTables.map((entry) => ({ key: entry.key, label: entry.label, rows: entry.rows })), runStartMs, (row) =>
+			sum([toNumber(row.heap_blks_read), toNumber(row.heap_blks_hit)])
+		),
+		tableTitle: 'Top tables by heap activity',
 		tableColumns: [
 			{ key: 'table', label: 'Table', kind: 'text' },
+			{ key: 'heap_activity', label: 'Heap Activity', kind: 'count' },
+			{ key: 'heap_hits', label: 'Heap Hits', kind: 'count' },
 			{ key: 'heap_reads', label: 'Heap Reads', kind: 'count' },
 			{ key: 'heap_hit_ratio', label: 'Heap Hit Ratio', kind: 'percent' },
 			{ key: 'toast_reads', label: 'TOAST Reads', kind: 'count' }
 		],
 		tableRows: topTables.map((entry) => ({
 			table: entry.label,
+			heap_activity: entry.heapActivity,
+			heap_hits: entry.heapHits,
 			heap_reads: entry.heapReads,
 			heap_hit_ratio: entry.heapHitRatio,
 			toast_reads: entry.toasts
@@ -923,18 +929,58 @@ function buildStatioUserIndexesSection(rows: SnapshotRow[], runStartMs: number):
 	};
 }
 
-function buildCheckpointerSection(): TelemetrySection {
+function buildCheckpointerSection(rows: SnapshotRow[], runStartMs: number): TelemetrySection {
+	const numTimed = delta(rows, 'num_timed');
+	const numRequested = delta(rows, 'num_requested');
+	const writeTime = delta(rows, 'write_time');
+	const syncTime = delta(rows, 'sync_time');
+
+	if (rows.length === 0) {
+		return {
+			key: 'checkpointer',
+			label: 'Checkpointer',
+			status: 'no_data',
+			reason: 'No pg_stat_checkpointer snapshots were collected for the selected phases.',
+			summary: [],
+			chartTitle: 'Checkpoint activity',
+			chartSeries: [],
+			tableTitle: 'Checkpointer metrics',
+			tableColumns: [],
+			tableRows: []
+		};
+	}
+
 	return {
 		key: 'checkpointer',
 		label: 'Checkpointer',
-		status: 'unsupported',
-		reason: 'This app does not collect snap_pg_stat_checkpointer yet.',
-		summary: [],
-		chartTitle: 'Checkpointer',
-		chartSeries: [],
-		tableTitle: 'Checkpointer',
-		tableColumns: [],
-		tableRows: []
+		status: 'ok',
+		summary: [
+			metricCard('num_requested', 'Requested Checkpoints', 'count', numRequested),
+			metricCard('num_timed', 'Timed Checkpoints', 'count', numTimed),
+			metricCard('write_time', 'Write Time', 'duration_ms', writeTime),
+			metricCard('sync_time', 'Sync Time', 'duration_ms', syncTime)
+		],
+		chartTitle: 'Checkpoint activity over time',
+		chartSeries: buildMetricSeries(rows, runStartMs, [
+			{ label: 'requested', valueFn: (row) => toNumber(row.num_requested) },
+			{ label: 'timed', valueFn: (row) => toNumber(row.num_timed) }
+		]),
+		tableTitle: 'Checkpointer metrics',
+		tableColumns: [
+			{ key: 'metric', label: 'Metric', kind: 'text' },
+			{ key: 'value', label: 'Value' }
+		],
+		tableRows: makeMetricRows([
+			{ metric: 'Requested checkpoints', value: numRequested, kind: 'count' },
+			{ metric: 'Timed checkpoints', value: numTimed, kind: 'count' },
+			{ metric: 'Timed restartpoints', value: delta(rows, 'restartpoints_timed'), kind: 'count' },
+			{ metric: 'Requested restartpoints', value: delta(rows, 'restartpoints_req'), kind: 'count' },
+			{ metric: 'Restartpoints done', value: delta(rows, 'restartpoints_done'), kind: 'count' },
+			{ metric: 'Write time (ms)', value: writeTime, kind: 'duration_ms' },
+			{ metric: 'Sync time (ms)', value: syncTime, kind: 'duration_ms' },
+			{ metric: 'Buffers written', value: delta(rows, 'buffers_written'), kind: 'count' },
+			{ metric: 'Stats reset', value: latestText(rows, 'stats_reset'), kind: 'text' }
+		])
 	};
 }
 
@@ -965,6 +1011,7 @@ export function buildRunTelemetry(db: Database.Database, runId: number, phases?:
 	});
 	const walRows = fetchRows(db, 'snap_pg_stat_wal', runId, selectedPhases);
 	const bgwriterRows = fetchRows(db, 'snap_pg_stat_bgwriter', runId, selectedPhases);
+	const checkpointerRows = fetchRows(db, 'snap_pg_stat_checkpointer', runId, selectedPhases);
 	const archiverRows = fetchRows(db, 'snap_pg_stat_archiver', runId, selectedPhases);
 	const ioRows = fetchRows(db, 'snap_pg_stat_io', runId, selectedPhases);
 	const userTableRows = fetchRows(db, 'snap_pg_stat_user_tables', runId, selectedPhases);
@@ -979,13 +1026,13 @@ export function buildRunTelemetry(db: Database.Database, runId: number, phases?:
 		buildDatabaseConflictsSection(conflictRows, runStartMs),
 		walSection,
 		buildBgwriterSection(bgwriterRows, runStartMs),
+		buildCheckpointerSection(checkpointerRows, runStartMs),
 		buildArchiverSection(archiverRows, runStartMs),
 		buildIoSection(ioRows, runStartMs),
 		buildUserTablesSection(userTableRows, runStartMs),
 		buildUserIndexesSection(userIndexRows, runStartMs),
 		buildStatioUserTablesSection(statioUserTableRows, runStartMs),
-		buildStatioUserIndexesSection(statioUserIndexRows, runStartMs),
-		buildCheckpointerSection()
+		buildStatioUserIndexesSection(statioUserIndexRows, runStartMs)
 	];
 
 	const markers: TelemetryMarker[] = [];
@@ -1001,7 +1048,7 @@ export function buildRunTelemetry(db: Database.Database, runId: number, phases?:
 		metricCard('wal_bytes', 'WAL Bytes', 'bytes', walSection.summary.find((card) => card.key === 'wal_bytes')?.value ?? null),
 		metricCard('wal_per_tx', 'WAL / Tx', 'bytes', walSection.summary.find((card) => card.key === 'wal_bytes_per_tx')?.value ?? null),
 		metricCard('temp_bytes', 'Temp Bytes', 'bytes', databaseSection.summary.find((card) => card.key === 'temp_bytes')?.value ?? null),
-		metricCard('requested_checkpoints', 'Requested Checkpoints', 'count', sections.find((section) => section.key === 'bgwriter')?.summary.find((card) => card.key === 'checkpoints_req')?.value ?? null),
+		metricCard('requested_checkpoints', 'Requested Checkpoints', 'count', sections.find((section) => section.key === 'checkpointer')?.summary.find((card) => card.key === 'num_requested')?.value ?? null),
 		metricCard('deadlocks', 'Deadlocks', 'count', delta(databaseRows, 'deadlocks'))
 	];
 

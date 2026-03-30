@@ -55,6 +55,31 @@ function createDb() {
       wal_bytes REAL,
       wal_buffers_full INTEGER
     );
+    CREATE TABLE snap_pg_stat_bgwriter (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL,
+      _collected_at TEXT NOT NULL,
+      _phase TEXT NOT NULL,
+      buffers_clean INTEGER,
+      maxwritten_clean INTEGER,
+      buffers_alloc INTEGER,
+      stats_reset TEXT
+    );
+    CREATE TABLE snap_pg_stat_checkpointer (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL,
+      _collected_at TEXT NOT NULL,
+      _phase TEXT NOT NULL,
+      num_timed INTEGER,
+      num_requested INTEGER,
+      restartpoints_timed INTEGER,
+      restartpoints_req INTEGER,
+      restartpoints_done INTEGER,
+      write_time REAL,
+      sync_time REAL,
+      buffers_written INTEGER,
+      stats_reset TEXT
+    );
     CREATE TABLE snap_pg_stat_io (
       _id INTEGER PRIMARY KEY AUTOINCREMENT,
       _run_id INTEGER NOT NULL,
@@ -72,6 +97,17 @@ function createDb() {
       hits INTEGER,
       evictions INTEGER,
       fsyncs INTEGER
+    );
+    CREATE TABLE snap_pg_statio_user_tables (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL,
+      _collected_at TEXT NOT NULL,
+      _phase TEXT NOT NULL,
+      schemaname TEXT,
+      relname TEXT,
+      heap_blks_read INTEGER,
+      heap_blks_hit INTEGER,
+      toast_blks_read INTEGER
     );
   `);
 	return db;
@@ -123,12 +159,38 @@ function seedRun(db: Database.Database) {
 	insertWalRow.run(1, '2026-03-30T05:57:59Z', 'bench', 100, 10, 1000, 2);
 	insertWalRow.run(1, '2026-03-30T05:58:19Z', 'bench', 140, 18, 2200, 5);
 
+	const insertBgwriterRow = db.prepare(`
+    INSERT INTO snap_pg_stat_bgwriter (_run_id, _collected_at, _phase, buffers_clean, maxwritten_clean, buffers_alloc, stats_reset)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `);
+	insertBgwriterRow.run(1, '2026-03-30T05:57:59Z', 'bench', 100, 3, 200, '2026-03-30T05:00:00Z');
+	insertBgwriterRow.run(1, '2026-03-30T05:58:19Z', 'bench', 160, 5, 260, '2026-03-30T05:00:00Z');
+
+	const insertCheckpointerRow = db.prepare(`
+    INSERT INTO snap_pg_stat_checkpointer (
+      _run_id, _collected_at, _phase, num_timed, num_requested, restartpoints_timed,
+      restartpoints_req, restartpoints_done, write_time, sync_time, buffers_written, stats_reset
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+	insertCheckpointerRow.run(1, '2026-03-30T05:57:59Z', 'bench', 2, 1, 0, 0, 0, 100, 20, 400, '2026-03-30T05:00:00Z');
+	insertCheckpointerRow.run(1, '2026-03-30T05:58:19Z', 'bench', 5, 3, 1, 1, 1, 180, 35, 520, '2026-03-30T05:00:00Z');
+
 	const insertIoRow = db.prepare(`
     INSERT INTO snap_pg_stat_io (_run_id, _collected_at, _phase, backend_type, object, context, reads, read_bytes, writes, write_bytes, extends, extend_bytes, hits, evictions, fsyncs)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 	insertIoRow.run(1, '2026-03-30T05:57:59Z', 'bench', 'client backend', 'relation', 'normal', 10, 81920, 4, 32768, 1, 8192, 20, 2, 1);
 	insertIoRow.run(1, '2026-03-30T05:58:19Z', 'bench', 'client backend', 'relation', 'normal', 15, 122880, 7, 57344, 3, 24576, 25, 5, 2);
+
+	const insertStatioUserTableRow = db.prepare(`
+    INSERT INTO snap_pg_statio_user_tables (_run_id, _collected_at, _phase, schemaname, relname, heap_blks_read, heap_blks_hit, toast_blks_read)
+    VALUES (?, ?, ?, 'public', ?, ?, ?, ?)
+  `);
+	insertStatioUserTableRow.run(1, '2026-03-30T05:57:59Z', 'bench', 'table_a', 0, 100, 0);
+	insertStatioUserTableRow.run(1, '2026-03-30T05:58:19Z', 'bench', 'table_a', 0, 260, 0);
+	insertStatioUserTableRow.run(1, '2026-03-30T05:57:59Z', 'bench', 'table_b', 0, 50, 0);
+	insertStatioUserTableRow.run(1, '2026-03-30T05:58:19Z', 'bench', 'table_b', 0, 140, 0);
 }
 
 describe('buildRunTelemetry', () => {
@@ -154,7 +216,7 @@ describe('buildRunTelemetry', () => {
 		expect(hitRatio?.value).toBeCloseTo(0.9);
 	});
 
-	it('ranks the top five user tables and reports no_data/unsupported sections', () => {
+	it('ranks the top five user tables and reports populated checkpointer telemetry', () => {
 		const telemetry = buildRunTelemetry(db, 1, ['bench']);
 		const userTables = telemetry.sections.find((section) => section.key === 'user_tables');
 		expect(userTables?.status).toBe('ok');
@@ -165,7 +227,13 @@ describe('buildRunTelemetry', () => {
 		const wal = telemetry.sections.find((section) => section.key === 'wal');
 		const checkpointer = telemetry.sections.find((section) => section.key === 'checkpointer');
 		expect(wal?.status).toBe('ok');
-		expect(checkpointer?.status).toBe('unsupported');
+		expect(checkpointer?.status).toBe('ok');
+		expect(checkpointer?.summary.map((card) => [card.key, card.value])).toEqual([
+			['num_requested', 2],
+			['num_timed', 3],
+			['write_time', 80],
+			['sync_time', 15]
+		]);
 	});
 
 	it('reports PG18 WAL and IO metrics without legacy WAL timing columns', () => {
@@ -208,6 +276,58 @@ describe('buildRunTelemetry', () => {
 				hits: 5,
 				evictions: 3,
 				fsyncs: 1
+			}
+		]);
+	});
+
+	it('uses the checkpointer section for requested checkpoint hero cards and keeps bgwriter schema-specific metrics', () => {
+		const telemetry = buildRunTelemetry(db, 1, ['bench']);
+		const requestedCheckpoints = telemetry.heroCards.find((card) => card.key === 'requested_checkpoints');
+		const bgwriter = telemetry.sections.find((section) => section.key === 'bgwriter');
+
+		expect(requestedCheckpoints?.value).toBe(2);
+		expect(bgwriter?.summary.map((card) => [card.key, card.value])).toEqual([
+			['buffers_clean', 60],
+			['maxwritten_clean', 2],
+			['buffers_alloc', 60],
+			['stats_reset', '2026-03-30T05:00:00Z']
+		]);
+		expect(bgwriter?.tableRows).toEqual([
+			expect.objectContaining({ metric: 'Buffers clean', value: 60 }),
+			expect.objectContaining({ metric: 'Maxwritten clean', value: 2 }),
+			expect.objectContaining({ metric: 'Buffers alloc', value: 60 }),
+			expect.objectContaining({ metric: 'Stats reset', value: '2026-03-30T05:00:00Z' })
+		]);
+	});
+
+	it('surfaces cached heap activity in statio user tables even when heap reads stay at zero', () => {
+		const telemetry = buildRunTelemetry(db, 1, ['bench']);
+		const statioTables = telemetry.sections.find((section) => section.key === 'statio_user_tables');
+
+		expect(statioTables?.summary.map((card) => [card.key, card.value])).toEqual([
+			['heap_activity', 250],
+			['heap_hits', 250],
+			['heap_reads', 0],
+			['heap_hit_ratio', 1],
+			['toast_reads', 0]
+		]);
+		expect(statioTables?.chartTitle).toBe('Top tables by heap activity over time');
+		expect(statioTables?.tableRows).toEqual([
+			{
+				table: 'table_a',
+				heap_activity: 160,
+				heap_hits: 160,
+				heap_reads: 0,
+				heap_hit_ratio: 1,
+				toast_reads: 0
+			},
+			{
+				table: 'table_b',
+				heap_activity: 90,
+				heap_hits: 90,
+				heap_reads: 0,
+				heap_hit_ratio: 1,
+				toast_reads: 0
 			}
 		]);
 	});
