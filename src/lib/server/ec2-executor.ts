@@ -26,7 +26,7 @@ export function startEc2Run(
 	const db = getDb();
 
 	const design = db.prepare('SELECT * FROM designs WHERE id = ?').get(Number(designId)) as
-		| { id: number; name: string; pre_collect_secs: number; post_collect_secs: number }
+		| { id: number; name: string; database: string; pre_collect_secs: number; post_collect_secs: number }
 		| undefined;
 	if (!design) throw new Error(`Design ${designId} not found`);
 
@@ -53,13 +53,14 @@ export function startEc2Run(
 	const insertResult = db
 		.prepare(`
 		INSERT INTO benchmark_runs (
-			design_id, status, started_at,
+			design_id, database, status, started_at,
 			snapshot_interval_seconds, pre_collect_secs, post_collect_secs,
 			name, profile_name, ec2_server_id, ec2_run_token
-		) VALUES (?, 'running', ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 		.run(
 			design.id,
+			design.database,
 			now,
 			opts.snapshot_interval_seconds ?? 30,
 			design.pre_collect_secs,

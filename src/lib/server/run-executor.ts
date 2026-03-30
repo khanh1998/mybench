@@ -89,8 +89,8 @@ export function startRun(designId: number, opts: StartRunOptions = {}): number {
 	}
 
 	const runResult = db.prepare(
-		'INSERT INTO benchmark_runs (design_id, status, snapshot_interval_seconds, pre_collect_secs, post_collect_secs, name, profile_name, run_params, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-	).run(design.id, 'running', snapshot_interval_seconds, preCollectSecs, postCollectSecs, runName, profileName, runParamsJson, new Date().toISOString());
+		'INSERT INTO benchmark_runs (design_id, database, status, snapshot_interval_seconds, pre_collect_secs, post_collect_secs, name, profile_name, run_params, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+	).run(design.id, resolvedDatabase, 'running', snapshot_interval_seconds, preCollectSecs, postCollectSecs, runName, profileName, runParamsJson, new Date().toISOString());
 	const runId = runResult.lastInsertRowid as number;
 
 	const insertStepResult = db.prepare(

@@ -5,6 +5,7 @@ export interface RunnerResultRun {
 	status: string;
 	started_at: string;
 	finished_at: string;
+	database?: string;
 	bench_started_at?: string;
 	post_started_at?: string;
 	snapshot_interval_seconds?: number;
@@ -59,10 +60,13 @@ function normalizeSqliteValue(value: unknown): unknown {
 export function importResultIntoRun(runId: number, result: RunnerResult): void {
 	const db = getDb();
 	const run = result.run;
+	const existingRun = db.prepare('SELECT database FROM benchmark_runs WHERE id = ?').get(runId) as { database: string } | undefined;
+	const resolvedDatabase = run.database ?? existingRun?.database ?? '';
 
 	// Update the benchmark_runs row with result data
 	db.prepare(`
 		UPDATE benchmark_runs SET
+			database = ?,
 			status = ?,
 			started_at = ?,
 			finished_at = ?,
@@ -79,6 +83,7 @@ export function importResultIntoRun(runId: number, result: RunnerResult): void {
 			run_params = ?
 		WHERE id = ?
 	`).run(
+		resolvedDatabase,
 		run.status ?? 'completed',
 		run.started_at ?? new Date().toISOString(),
 		run.finished_at ?? new Date().toISOString(),
@@ -184,17 +189,20 @@ export function importResultIntoRun(runId: number, result: RunnerResult): void {
 export function importRun(designId: number, result: RunnerResult): number {
 	const db = getDb();
 	const run = result.run;
+	const design = db.prepare('SELECT database FROM designs WHERE id = ?').get(Number(designId)) as { database: string } | undefined;
+	const resolvedDatabase = run.database ?? design?.database ?? '';
 
 	const insertResult = db.prepare(`
 		INSERT INTO benchmark_runs (
-			design_id, status, started_at, finished_at,
+			design_id, database, status, started_at, finished_at,
 			bench_started_at, post_started_at,
 			snapshot_interval_seconds, pre_collect_secs, post_collect_secs,
 			tps, latency_avg_ms, latency_stddev_ms, transactions,
 			is_imported, profile_name, run_params
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
 	`).run(
 		Number(designId),
+		resolvedDatabase,
 		run.status ?? 'completed',
 		run.started_at ?? new Date().toISOString(),
 		run.finished_at ?? new Date().toISOString(),

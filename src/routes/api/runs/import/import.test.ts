@@ -38,6 +38,7 @@ function createTestDb() {
     CREATE TABLE benchmark_runs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       design_id INTEGER NOT NULL REFERENCES designs(id) ON DELETE CASCADE,
+      database TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'running',
       started_at TEXT NOT NULL DEFAULT (datetime('now')),
       finished_at TEXT,
@@ -64,6 +65,7 @@ interface ImportResult {
 		status?: string;
 		started_at?: string;
 		finished_at?: string;
+		database?: string;
 		bench_started_at?: string;
 		post_started_at?: string;
 		snapshot_interval_seconds?: number;
@@ -109,14 +111,15 @@ function importRun(
 	const run = result.run;
 	const insertResult = db.prepare(`
 		INSERT INTO benchmark_runs (
-			design_id, status, started_at, finished_at,
+			design_id, database, status, started_at, finished_at,
 			bench_started_at, post_started_at,
 			snapshot_interval_seconds, pre_collect_secs, post_collect_secs,
 			tps, latency_avg_ms, latency_stddev_ms, transactions,
 			is_imported
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
 	`).run(
 		designId,
+		run.database ?? (design as { database: string }).database,
 		run.status ?? 'completed',
 		run.started_at ?? new Date().toISOString(),
 		run.finished_at ?? new Date().toISOString(),
@@ -273,12 +276,13 @@ describe('Import endpoint logic', () => {
 		const result = importRun(db, 1, VALID_RESULT);
 		if ('run_id' in result) {
 			const run = db.prepare('SELECT * FROM benchmark_runs WHERE id = ?').get(result.run_id) as {
-				status: string; tps: number; latency_avg_ms: number; transactions: number;
+				status: string; tps: number; latency_avg_ms: number; transactions: number; database: string;
 			};
 			expect(run.status).toBe('completed');
 			expect(run.tps).toBeCloseTo(279.5);
 			expect(run.latency_avg_ms).toBeCloseTo(107.0);
 			expect(run.transactions).toBe(33498);
+			expect(run.database).toBe('mydb');
 		}
 	});
 

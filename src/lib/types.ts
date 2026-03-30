@@ -72,6 +72,7 @@ export type RunStatus = 'running' | 'completed' | 'failed' | 'stopped';
 export interface BenchmarkRun {
 	id: number;
 	design_id: number;
+	database: string;
 	status: RunStatus;
 	started_at: string;
 	finished_at: string | null;

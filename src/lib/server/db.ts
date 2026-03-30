@@ -89,6 +89,7 @@ function migrate(db: Database.Database) {
     CREATE TABLE IF NOT EXISTS benchmark_runs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       design_id INTEGER NOT NULL REFERENCES designs(id) ON DELETE CASCADE,
+      database TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'running',
       started_at TEXT NOT NULL DEFAULT (datetime('now')),
       finished_at TEXT,
@@ -662,9 +663,17 @@ function migrate(db: Database.Database) {
 	if (!runCols.includes('notes')) db.exec(`ALTER TABLE benchmark_runs ADD COLUMN notes TEXT NOT NULL DEFAULT ''`);
 	if (!runCols.includes('profile_name')) db.exec(`ALTER TABLE benchmark_runs ADD COLUMN profile_name TEXT NOT NULL DEFAULT ''`);
 	if (!runCols.includes('run_params')) db.exec(`ALTER TABLE benchmark_runs ADD COLUMN run_params TEXT NOT NULL DEFAULT ''`);
+	if (!runCols.includes('database')) db.exec(`ALTER TABLE benchmark_runs ADD COLUMN database TEXT NOT NULL DEFAULT ''`);
 	if (!runCols.includes('is_imported')) db.exec(`ALTER TABLE benchmark_runs ADD COLUMN is_imported INTEGER NOT NULL DEFAULT 0`);
 	if (!runCols.includes('ec2_server_id')) db.exec(`ALTER TABLE benchmark_runs ADD COLUMN ec2_server_id INTEGER REFERENCES ec2_servers(id)`);
 	if (!runCols.includes('ec2_run_token')) db.exec(`ALTER TABLE benchmark_runs ADD COLUMN ec2_run_token TEXT`);
+	db.exec(`
+    UPDATE benchmark_runs
+    SET database = COALESCE(NULLIF(database, ''), (
+      SELECT designs.database FROM designs WHERE designs.id = benchmark_runs.design_id
+    ), '')
+    WHERE database = ''
+  `);
 
 	// ec2_servers: migrate key_path → private_key (stores key content instead of path)
 	const ec2Cols = (db.prepare(`PRAGMA table_info(ec2_servers)`).all() as { name: string }[]).map(c => c.name);

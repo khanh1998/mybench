@@ -5,6 +5,7 @@
   import { marked } from 'marked';
   import MarkdownEditor from '$lib/MarkdownEditor.svelte';
   import LoadAnalysis from '$lib/LoadAnalysis.svelte';
+  import DatabaseTelemetry from '$lib/DatabaseTelemetry.svelte';
   import type { PageData } from './$types';
   import { fmtTs, fmtTime } from '$lib/utils';
 
@@ -52,7 +53,7 @@
   let expandedStep = $state<number | null>(null);
   let scrollPending = false;
   let phases: PhaseState[] = $state([]);
-  let activeTab = $state<'overview' | 'load'>('overview');
+  let activeTab = $state<'overview' | 'load' | 'telemetry'>('overview');
   const phaseTimers = new Map<string, ReturnType<typeof setInterval>>();
 
   const pendingLines: string[] = [];
@@ -270,6 +271,10 @@
     disabled={!done}
     title={!done ? 'Available after run completes' : ''}
     onclick={() => activeTab = 'load'}>Load Analysis</button>
+  <button class="tab-btn" class:active={activeTab === 'telemetry'}
+    disabled={!done}
+    title={!done ? 'Available after run completes' : ''}
+    onclick={() => activeTab = 'telemetry'}>Database Telemetry</button>
 </div>
 
 {#if activeTab === 'overview'}
@@ -496,6 +501,8 @@
       showPhaseFilter={true}
     />
   </div>
+{:else if activeTab === 'telemetry'}
+  <DatabaseTelemetry {runId} active={activeTab === 'telemetry' && done} />
 {/if}
 
 <style>
