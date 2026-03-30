@@ -67,11 +67,12 @@
   } = $props();
 
   const PHASES: TelemetryPhase[] = ['pre', 'bench', 'post'];
+  const DEFAULT_PHASES: TelemetryPhase[] = ['bench'];
 
   let telemetry = $state<RunTelemetry | null>(null);
   let loading = $state(false);
   let error = $state('');
-  let selectedPhases = $state<TelemetryPhase[]>([...PHASES]);
+  let selectedPhases = $state<TelemetryPhase[]>([...DEFAULT_PHASES]);
   let requestSeq = 0;
   const phaseKey = $derived(selectedPhases.join(','));
 
