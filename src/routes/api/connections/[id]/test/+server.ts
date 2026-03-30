@@ -44,13 +44,13 @@ export const POST: RequestHandler = async ({ params, request }) => {
 			}
 			// Disable version-incompatible tables
 			if (versionNum < 140000) {
-				disable.run(server.id, 'pg_stat_wal');
 				disable.run(server.id, 'pg_stat_replication_slots');
 			}
 			if (versionNum < 150000) {
 				disable.run(server.id, 'pg_stat_subscription_stats');
 			}
-			if (versionNum < 160000) {
+			if (versionNum < 180000) {
+				disable.run(server.id, 'pg_stat_wal');
 				disable.run(server.id, 'pg_stat_io');
 			}
 			if (versionNum < 170000) {

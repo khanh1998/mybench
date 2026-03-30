@@ -438,10 +438,7 @@ function buildWalSection(rows: SnapshotRow[], runStartMs: number, transactions: 
 	const walBytes = delta(rows, 'wal_bytes');
 	const walRecords = delta(rows, 'wal_records');
 	const walFpi = delta(rows, 'wal_fpi');
-	const walWrite = delta(rows, 'wal_write');
-	const walSync = delta(rows, 'wal_sync');
-	const walWriteTime = delta(rows, 'wal_write_time');
-	const walSyncTime = delta(rows, 'wal_sync_time');
+	const walBuffersFull = delta(rows, 'wal_buffers_full');
 
 	if (rows.length === 0) {
 		return {
@@ -466,7 +463,7 @@ function buildWalSection(rows: SnapshotRow[], runStartMs: number, transactions: 
 			metricCard('wal_bytes', 'WAL Bytes', 'bytes', walBytes),
 			metricCard('wal_bytes_per_tx', 'WAL / Tx', 'bytes', safeRatio(walBytes, transactions)),
 			metricCard('fpi_ratio', 'FPI Ratio', 'percent', safeRatio(walFpi, walRecords)),
-			metricCard('avg_sync_latency', 'Avg Sync Latency', 'duration_ms', safeRatio(walSyncTime, walSync))
+			metricCard('wal_buffers_full', 'WAL Buffers Full', 'count', walBuffersFull)
 		],
 		chartTitle: 'WAL bytes over time',
 		chartSeries: buildCumulativeSeries(rows, 'wal_bytes', runStartMs, (row) => toNumber(row.wal_bytes)),
@@ -480,12 +477,7 @@ function buildWalSection(rows: SnapshotRow[], runStartMs: number, transactions: 
 			{ metric: 'WAL records', value: walRecords, kind: 'count' },
 			{ metric: 'Full page images', value: walFpi, kind: 'count' },
 			{ metric: 'FPI ratio', value: safeRatio(walFpi, walRecords), kind: 'percent' },
-			{ metric: 'WAL writes', value: walWrite, kind: 'count' },
-			{ metric: 'WAL syncs', value: walSync, kind: 'count' },
-			{ metric: 'WAL write time (ms)', value: walWriteTime, kind: 'duration_ms' },
-			{ metric: 'WAL sync time (ms)', value: walSyncTime, kind: 'duration_ms' },
-			{ metric: 'Avg WAL write latency (ms)', value: safeRatio(walWriteTime, walWrite), kind: 'duration_ms' },
-			{ metric: 'Avg WAL sync latency (ms)', value: safeRatio(walSyncTime, walSync), kind: 'duration_ms' }
+			{ metric: 'WAL buffers full', value: walBuffersFull, kind: 'count' }
 		])
 	};
 }
@@ -611,7 +603,8 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 		const [backend_type, object, context] = key.split('|');
 		const readBytes = delta(bucket, 'read_bytes');
 		const writeBytes = delta(bucket, 'write_bytes');
-		const totalBytes = sum([readBytes, writeBytes]);
+		const extendBytes = delta(bucket, 'extend_bytes');
+		const totalBytes = sum([readBytes, writeBytes, extendBytes]);
 		return {
 			key,
 			label: `${backend_type}/${object}/${context}`,
@@ -624,6 +617,8 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 			readBytes,
 			writes: delta(bucket, 'writes'),
 			writeBytes,
+			extends: delta(bucket, 'extends'),
+			extendBytes,
 			hits: delta(bucket, 'hits'),
 			evictions: delta(bucket, 'evictions'),
 			fsyncs: delta(bucket, 'fsyncs')
@@ -640,12 +635,13 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 			metricCard('read_bytes', 'Read Bytes', 'bytes', sum(entries.map((entry) => entry.readBytes))),
 			metricCard('writes', 'Writes', 'count', sum(entries.map((entry) => entry.writes))),
 			metricCard('write_bytes', 'Write Bytes', 'bytes', sum(entries.map((entry) => entry.writeBytes))),
+			metricCard('extend_bytes', 'Extend Bytes', 'bytes', sum(entries.map((entry) => entry.extendBytes))),
 			metricCard('evictions', 'Evictions', 'count', sum(entries.map((entry) => entry.evictions))),
 			metricCard('fsyncs', 'FSyncs', 'count', sum(entries.map((entry) => entry.fsyncs)))
 		],
 		chartTitle: 'Top IO groups by bytes over time',
 		chartSeries: buildMultiSeries(topGroups.map((entry) => ({ key: entry.key, label: entry.label, rows: entry.rows })), runStartMs, (row) =>
-			sum([toNumber(row.read_bytes), toNumber(row.write_bytes)])
+			sum([toNumber(row.read_bytes), toNumber(row.write_bytes), toNumber(row.extend_bytes)])
 		),
 		tableTitle: 'Top IO groups',
 		tableColumns: [
@@ -654,6 +650,8 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 			{ key: 'read_bytes', label: 'Read Bytes', kind: 'bytes' },
 			{ key: 'writes', label: 'Writes', kind: 'count' },
 			{ key: 'write_bytes', label: 'Write Bytes', kind: 'bytes' },
+			{ key: 'extends', label: 'Extends', kind: 'count' },
+			{ key: 'extend_bytes', label: 'Extend Bytes', kind: 'bytes' },
 			{ key: 'hits', label: 'Hits', kind: 'count' },
 			{ key: 'evictions', label: 'Evictions', kind: 'count' },
 			{ key: 'fsyncs', label: 'FSyncs', kind: 'count' }
@@ -664,6 +662,8 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 			read_bytes: entry.readBytes,
 			writes: entry.writes,
 			write_bytes: entry.writeBytes,
+			extends: entry.extends,
+			extend_bytes: entry.extendBytes,
 			hits: entry.hits,
 			evictions: entry.evictions,
 			fsyncs: entry.fsyncs

@@ -45,6 +45,34 @@ function createDb() {
       n_tup_hot_upd INTEGER,
       n_dead_tup INTEGER
     );
+    CREATE TABLE snap_pg_stat_wal (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL,
+      _collected_at TEXT NOT NULL,
+      _phase TEXT NOT NULL,
+      wal_records INTEGER,
+      wal_fpi INTEGER,
+      wal_bytes REAL,
+      wal_buffers_full INTEGER
+    );
+    CREATE TABLE snap_pg_stat_io (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL,
+      _collected_at TEXT NOT NULL,
+      _phase TEXT NOT NULL,
+      backend_type TEXT,
+      object TEXT,
+      context TEXT,
+      reads INTEGER,
+      read_bytes INTEGER,
+      writes INTEGER,
+      write_bytes INTEGER,
+      extends INTEGER,
+      extend_bytes INTEGER,
+      hits INTEGER,
+      evictions INTEGER,
+      fsyncs INTEGER
+    );
   `);
 	return db;
 }
@@ -87,6 +115,20 @@ function seedRun(db: Database.Database) {
 		insertTableRow.run(1, '2026-03-30T05:57:59Z', 'bench', name, seqBase, idxBase, 0, 0, 0, 0, 0);
 		insertTableRow.run(1, '2026-03-30T05:58:19Z', 'bench', name, seqBase + 2, idxBase + 5, insDelta, updDelta, delDelta, hotDelta, deadDelta);
 	}
+
+	const insertWalRow = db.prepare(`
+    INSERT INTO snap_pg_stat_wal (_run_id, _collected_at, _phase, wal_records, wal_fpi, wal_bytes, wal_buffers_full)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `);
+	insertWalRow.run(1, '2026-03-30T05:57:59Z', 'bench', 100, 10, 1000, 2);
+	insertWalRow.run(1, '2026-03-30T05:58:19Z', 'bench', 140, 18, 2200, 5);
+
+	const insertIoRow = db.prepare(`
+    INSERT INTO snap_pg_stat_io (_run_id, _collected_at, _phase, backend_type, object, context, reads, read_bytes, writes, write_bytes, extends, extend_bytes, hits, evictions, fsyncs)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+	insertIoRow.run(1, '2026-03-30T05:57:59Z', 'bench', 'client backend', 'relation', 'normal', 10, 81920, 4, 32768, 1, 8192, 20, 2, 1);
+	insertIoRow.run(1, '2026-03-30T05:58:19Z', 'bench', 'client backend', 'relation', 'normal', 15, 122880, 7, 57344, 3, 24576, 25, 5, 2);
 }
 
 describe('buildRunTelemetry', () => {
@@ -122,7 +164,51 @@ describe('buildRunTelemetry', () => {
 
 		const wal = telemetry.sections.find((section) => section.key === 'wal');
 		const checkpointer = telemetry.sections.find((section) => section.key === 'checkpointer');
-		expect(wal?.status).toBe('no_data');
+		expect(wal?.status).toBe('ok');
 		expect(checkpointer?.status).toBe('unsupported');
+	});
+
+	it('reports PG18 WAL and IO metrics without legacy WAL timing columns', () => {
+		const telemetry = buildRunTelemetry(db, 1, ['bench']);
+		const wal = telemetry.sections.find((section) => section.key === 'wal');
+		const io = telemetry.sections.find((section) => section.key === 'io');
+
+		expect(wal?.summary.map((card) => card.key)).toEqual([
+			'wal_bytes',
+			'wal_bytes_per_tx',
+			'fpi_ratio',
+			'wal_buffers_full'
+		]);
+		expect(wal?.tableRows).toEqual([
+			expect.objectContaining({ metric: 'WAL bytes', value: 1200 }),
+			expect.objectContaining({ metric: 'WAL records', value: 40 }),
+			expect.objectContaining({ metric: 'Full page images', value: 8 }),
+			expect.objectContaining({ metric: 'FPI ratio', value: 0.2 }),
+			expect.objectContaining({ metric: 'WAL buffers full', value: 3 })
+		]);
+
+		expect(io?.summary.map((card) => [card.key, card.value])).toEqual([
+			['reads', 5],
+			['read_bytes', 40960],
+			['writes', 3],
+			['write_bytes', 24576],
+			['extend_bytes', 16384],
+			['evictions', 3],
+			['fsyncs', 1]
+		]);
+		expect(io?.tableRows).toEqual([
+			{
+				group: 'client backend/relation/normal',
+				reads: 5,
+				read_bytes: 40960,
+				writes: 3,
+				write_bytes: 24576,
+				extends: 2,
+				extend_bytes: 16384,
+				hits: 5,
+				evictions: 3,
+				fsyncs: 1
+			}
+		]);
 	});
 });

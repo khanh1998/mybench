@@ -61,6 +61,53 @@ function createSnapPgStatCheckpointerTableSql(tableName = 'snap_pg_stat_checkpoi
   `;
 }
 
+function createSnapPgStatWalTableSql(tableName = 'snap_pg_stat_wal', phaseColumnSql = `_phase TEXT NOT NULL DEFAULT 'bench'`): string {
+	return `
+    CREATE TABLE ${tableName} (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL,
+      ${phaseColumnSql},
+      wal_records INTEGER,
+      wal_fpi INTEGER,
+      wal_bytes REAL,
+      wal_buffers_full INTEGER,
+      stats_reset TEXT
+    )
+  `;
+}
+
+function createSnapPgStatIoTableSql(tableName = 'snap_pg_stat_io', phaseColumnSql = `_phase TEXT NOT NULL DEFAULT 'bench'`): string {
+	return `
+    CREATE TABLE ${tableName} (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL,
+      ${phaseColumnSql},
+      backend_type TEXT,
+      object TEXT,
+      context TEXT,
+      reads INTEGER,
+      read_bytes INTEGER,
+      read_time REAL,
+      writes INTEGER,
+      write_bytes INTEGER,
+      write_time REAL,
+      writebacks INTEGER,
+      writeback_time REAL,
+      extends INTEGER,
+      extend_bytes INTEGER,
+      extend_time REAL,
+      hits INTEGER,
+      evictions INTEGER,
+      reuses INTEGER,
+      fsyncs INTEGER,
+      fsync_time REAL,
+      stats_reset TEXT
+    )
+  `;
+}
+
 function tableExists(db: Database.Database, tableName: string): boolean {
 	return !!db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`).get(tableName);
 }
@@ -179,6 +226,20 @@ function backfillPgStatCheckpointerSelections(db: Database.Database): void {
     FROM pg_servers
   `);
 
+	db.prepare(`INSERT INTO schema_migrations (id) VALUES (?)`).run(migrationId);
+}
+
+function migratePg18WalAndIoTables(db: Database.Database): void {
+	const migrationId = 'snap_pg18_wal_io_v1';
+	const migrated = db.prepare(`SELECT id FROM schema_migrations WHERE id = ?`).get(migrationId);
+	if (migrated) return;
+
+	db.exec(`
+    DROP TABLE IF EXISTS snap_pg_stat_wal;
+    DROP TABLE IF EXISTS snap_pg_stat_io;
+  `);
+	db.exec(createSnapPgStatWalTableSql());
+	db.exec(createSnapPgStatIoTableSql());
 	db.prepare(`INSERT INTO schema_migrations (id) VALUES (?)`).run(migrationId);
 }
 
@@ -502,15 +563,7 @@ function migrate(db: Database.Database) {
       );
 
       -- pg_stat_wal (PG16)
-      CREATE TABLE snap_pg_stat_wal (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL,
-        _is_baseline INTEGER NOT NULL DEFAULT 0,
-        wal_records INTEGER, wal_fpi INTEGER, wal_bytes REAL,
-        wal_buffers_full INTEGER, wal_write INTEGER, wal_sync INTEGER,
-        wal_write_time REAL, wal_sync_time REAL, stats_reset TEXT
-      );
+      ${createSnapPgStatWalTableSql('snap_pg_stat_wal', '_is_baseline INTEGER NOT NULL DEFAULT 0')};
 
       -- pg_stat_replication_slots (PG16)
       CREATE TABLE snap_pg_stat_replication_slots (
@@ -524,17 +577,7 @@ function migrate(db: Database.Database) {
       );
 
       -- pg_stat_io (PG16)
-      CREATE TABLE snap_pg_stat_io (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL,
-        _is_baseline INTEGER NOT NULL DEFAULT 0,
-        backend_type TEXT, object TEXT, context TEXT,
-        reads INTEGER, read_time REAL, writes INTEGER, write_time REAL,
-        writebacks INTEGER, writeback_time REAL, extends INTEGER, extend_time REAL,
-        op_bytes INTEGER, hits INTEGER, evictions INTEGER, reuses INTEGER, fsyncs INTEGER, fsync_time REAL,
-        stats_reset TEXT
-      );
+      ${createSnapPgStatIoTableSql('snap_pg_stat_io', '_is_baseline INTEGER NOT NULL DEFAULT 0')};
 
       -- pg_stat_activity (PG16)
       CREATE TABLE snap_pg_stat_activity (
@@ -699,14 +742,7 @@ function migrate(db: Database.Database) {
         _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
         funcid INTEGER, schemaname TEXT, funcname TEXT, calls INTEGER, total_time REAL, self_time REAL
       );
-      CREATE TABLE snap_pg_stat_wal (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
-        wal_records INTEGER, wal_fpi INTEGER, wal_bytes REAL,
-        wal_buffers_full INTEGER, wal_write INTEGER, wal_sync INTEGER,
-        wal_write_time REAL, wal_sync_time REAL, stats_reset TEXT
-      );
+      ${createSnapPgStatWalTableSql()};
       CREATE TABLE snap_pg_stat_replication_slots (
         _id INTEGER PRIMARY KEY AUTOINCREMENT,
         _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
@@ -715,16 +751,7 @@ function migrate(db: Database.Database) {
         stream_txns INTEGER, stream_count INTEGER, stream_bytes INTEGER,
         total_txns INTEGER, total_bytes INTEGER, stats_reset TEXT
       );
-      CREATE TABLE snap_pg_stat_io (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
-        backend_type TEXT, object TEXT, context TEXT,
-        reads INTEGER, read_time REAL, writes INTEGER, write_time REAL,
-        writebacks INTEGER, writeback_time REAL, extends INTEGER, extend_time REAL,
-        op_bytes INTEGER, hits INTEGER, evictions INTEGER, reuses INTEGER, fsyncs INTEGER, fsync_time REAL,
-        stats_reset TEXT
-      );
+      ${createSnapPgStatIoTableSql()};
       CREATE TABLE snap_pg_stat_activity (
         _id INTEGER PRIMARY KEY AUTOINCREMENT,
         _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
@@ -793,6 +820,7 @@ function migrate(db: Database.Database) {
 		db.prepare(`INSERT INTO schema_migrations (id) VALUES ('snap_pg_stat_statements_v2')`).run();
 	}
 	migrateBgwriterAndCheckpointerTables(db);
+	migratePg18WalAndIoTables(db);
 
 	const designCols = (db.prepare(`PRAGMA table_info(designs)`).all() as { name: string }[]).map(c => c.name);
 	if (!designCols.includes('pre_collect_secs')) db.exec(`ALTER TABLE designs ADD COLUMN pre_collect_secs INTEGER NOT NULL DEFAULT 0`);
