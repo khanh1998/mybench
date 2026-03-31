@@ -50,12 +50,14 @@ function createSnapPgStatCheckpointerTableSql(tableName = 'snap_pg_stat_checkpoi
       ${phaseColumnSql},
       num_timed INTEGER,
       num_requested INTEGER,
+      num_done INTEGER,
       restartpoints_timed INTEGER,
       restartpoints_req INTEGER,
       restartpoints_done INTEGER,
       write_time REAL,
       sync_time REAL,
       buffers_written INTEGER,
+      slru_written INTEGER,
       stats_reset TEXT
     )
   `;
@@ -88,15 +90,15 @@ function createSnapPgStatIoTableSql(tableName = 'snap_pg_stat_io', phaseColumnSq
       object TEXT,
       context TEXT,
       reads INTEGER,
-      read_bytes INTEGER,
+      read_bytes REAL,
       read_time REAL,
       writes INTEGER,
-      write_bytes INTEGER,
+      write_bytes REAL,
       write_time REAL,
       writebacks INTEGER,
       writeback_time REAL,
       extends INTEGER,
-      extend_bytes INTEGER,
+      extend_bytes REAL,
       extend_time REAL,
       hits INTEGER,
       evictions INTEGER,
@@ -106,6 +108,243 @@ function createSnapPgStatIoTableSql(tableName = 'snap_pg_stat_io', phaseColumnSq
       stats_reset TEXT
     )
   `;
+}
+
+function createSnapPgLocksTableSql(tableName = 'snap_pg_locks', phaseColumnSql = `_phase TEXT NOT NULL DEFAULT 'bench'`): string {
+	return `
+    CREATE TABLE ${tableName} (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL,
+      ${phaseColumnSql},
+      locktype TEXT,
+      database INTEGER,
+      relation INTEGER,
+      page INTEGER,
+      tuple INTEGER,
+      virtualxid TEXT,
+      transactionid TEXT,
+      classid INTEGER,
+      objid INTEGER,
+      objsubid INTEGER,
+      virtualtransaction TEXT,
+      pid INTEGER,
+      mode TEXT,
+      granted INTEGER,
+      fastpath INTEGER,
+      waitstart TEXT
+    )
+  `;
+}
+
+function createSupportedSnapTablesSql(phaseColumnSql = `_phase TEXT NOT NULL DEFAULT 'bench'`): string {
+	return `
+      CREATE TABLE snap_pg_stat_database (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL,
+        ${phaseColumnSql},
+        datid INTEGER, datname TEXT, numbackends INTEGER,
+        xact_commit INTEGER, xact_rollback INTEGER, blks_read INTEGER, blks_hit INTEGER,
+        tup_returned INTEGER, tup_fetched INTEGER, tup_inserted INTEGER, tup_updated INTEGER, tup_deleted INTEGER,
+        conflicts INTEGER, temp_files INTEGER, temp_bytes INTEGER,
+        deadlocks INTEGER, checksum_failures INTEGER, checksum_last_failure TEXT,
+        blk_read_time REAL, blk_write_time REAL,
+        session_time REAL, active_time REAL, idle_in_transaction_time REAL,
+        sessions INTEGER, sessions_abandoned INTEGER, sessions_fatal INTEGER, sessions_killed INTEGER,
+        parallel_workers_to_launch INTEGER, parallel_workers_launched INTEGER,
+        stats_reset TEXT
+      );
+
+      ${createSnapPgStatBgwriterTableSql('snap_pg_stat_bgwriter', phaseColumnSql)};
+      ${createSnapPgStatCheckpointerTableSql('snap_pg_stat_checkpointer', phaseColumnSql)};
+
+      CREATE TABLE snap_pg_stat_user_tables (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL,
+        ${phaseColumnSql},
+        relid INTEGER, schemaname TEXT, relname TEXT,
+        seq_scan INTEGER, last_seq_scan TEXT, seq_tup_read INTEGER,
+        idx_scan INTEGER, last_idx_scan TEXT, idx_tup_fetch INTEGER,
+        n_tup_ins INTEGER, n_tup_upd INTEGER, n_tup_del INTEGER,
+        n_tup_hot_upd INTEGER, n_tup_newpage_upd INTEGER,
+        n_live_tup INTEGER, n_dead_tup INTEGER, n_mod_since_analyze INTEGER, n_ins_since_vacuum INTEGER,
+        last_vacuum TEXT, last_autovacuum TEXT, last_analyze TEXT, last_autoanalyze TEXT,
+        vacuum_count INTEGER, autovacuum_count INTEGER, analyze_count INTEGER, autoanalyze_count INTEGER,
+        total_vacuum_time REAL, total_autovacuum_time REAL, total_analyze_time REAL, total_autoanalyze_time REAL
+      );
+
+      CREATE TABLE snap_pg_stat_user_indexes (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL,
+        ${phaseColumnSql},
+        relid INTEGER, indexrelid INTEGER, schemaname TEXT, relname TEXT, indexrelname TEXT,
+        idx_scan INTEGER, last_idx_scan TEXT, idx_tup_read INTEGER, idx_tup_fetch INTEGER
+      );
+
+      CREATE TABLE snap_pg_statio_user_tables (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL,
+        ${phaseColumnSql},
+        relid INTEGER, schemaname TEXT, relname TEXT,
+        heap_blks_read INTEGER, heap_blks_hit INTEGER,
+        idx_blks_read INTEGER, idx_blks_hit INTEGER,
+        toast_blks_read INTEGER, toast_blks_hit INTEGER,
+        tidx_blks_read INTEGER, tidx_blks_hit INTEGER
+      );
+
+      CREATE TABLE snap_pg_statio_user_indexes (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL,
+        ${phaseColumnSql},
+        relid INTEGER, indexrelid INTEGER, schemaname TEXT, relname TEXT, indexrelname TEXT,
+        idx_blks_read INTEGER, idx_blks_hit INTEGER
+      );
+
+      CREATE TABLE snap_pg_statio_user_sequences (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL,
+        ${phaseColumnSql},
+        relid INTEGER, schemaname TEXT, relname TEXT,
+        blks_read INTEGER, blks_hit INTEGER
+      );
+
+      CREATE TABLE snap_pg_stat_database_conflicts (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL,
+        ${phaseColumnSql},
+        datid INTEGER, datname TEXT,
+        confl_tablespace INTEGER, confl_lock INTEGER, confl_snapshot INTEGER,
+        confl_bufferpin INTEGER, confl_deadlock INTEGER, confl_active_logicalslot INTEGER
+      );
+
+      CREATE TABLE snap_pg_stat_archiver (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL,
+        ${phaseColumnSql},
+        archived_count INTEGER, last_archived_wal TEXT, last_archived_time TEXT,
+        failed_count INTEGER, last_failed_wal TEXT, last_failed_time TEXT,
+        stats_reset TEXT
+      );
+
+      CREATE TABLE snap_pg_stat_slru (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL,
+        ${phaseColumnSql},
+        name TEXT, blks_zeroed INTEGER, blks_hit INTEGER, blks_read INTEGER,
+        blks_written INTEGER, blks_exists INTEGER, flushes INTEGER, truncates INTEGER,
+        stats_reset TEXT
+      );
+
+      CREATE TABLE snap_pg_stat_user_functions (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL,
+        ${phaseColumnSql},
+        funcid INTEGER, schemaname TEXT, funcname TEXT,
+        calls INTEGER, total_time REAL, self_time REAL
+      );
+
+      ${createSnapPgStatWalTableSql('snap_pg_stat_wal', phaseColumnSql)};
+
+      CREATE TABLE snap_pg_stat_replication_slots (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL,
+        ${phaseColumnSql},
+        slot_name TEXT, spill_txns INTEGER, spill_count INTEGER, spill_bytes INTEGER,
+        stream_txns INTEGER, stream_count INTEGER, stream_bytes INTEGER,
+        total_txns INTEGER, total_bytes INTEGER, stats_reset TEXT
+      );
+
+      ${createSnapPgStatIoTableSql('snap_pg_stat_io', phaseColumnSql)};
+
+      CREATE TABLE snap_pg_stat_activity (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL,
+        ${phaseColumnSql},
+        datid INTEGER, datname TEXT, pid INTEGER, leader_pid INTEGER,
+        usesysid INTEGER, usename TEXT, application_name TEXT,
+        client_addr TEXT, client_hostname TEXT, client_port INTEGER,
+        backend_start TEXT, xact_start TEXT, query_start TEXT, state_change TEXT,
+        wait_event_type TEXT, wait_event TEXT, state TEXT,
+        backend_xid TEXT, backend_xmin TEXT, query_id INTEGER, query TEXT,
+        backend_type TEXT
+      );
+
+      CREATE TABLE snap_pg_stat_replication (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL,
+        ${phaseColumnSql},
+        pid INTEGER, usesysid INTEGER, usename TEXT, application_name TEXT,
+        client_addr TEXT, client_hostname TEXT, client_port INTEGER,
+        backend_start TEXT, backend_xmin TEXT, state TEXT,
+        sent_lsn TEXT, write_lsn TEXT, flush_lsn TEXT, replay_lsn TEXT,
+        write_lag TEXT, flush_lag TEXT, replay_lag TEXT,
+        sync_priority INTEGER, sync_state TEXT, reply_time TEXT
+      );
+
+      CREATE TABLE snap_pg_stat_subscription (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL,
+        ${phaseColumnSql},
+        subid INTEGER, subname TEXT, worker_type TEXT, pid INTEGER, leader_pid INTEGER, relid INTEGER,
+        received_lsn TEXT, last_msg_send_time TEXT, last_msg_receipt_time TEXT,
+        latest_end_lsn TEXT, latest_end_time TEXT
+      );
+
+      CREATE TABLE snap_pg_stat_subscription_stats (
+        _id INTEGER PRIMARY KEY AUTOINCREMENT,
+        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        _collected_at TEXT NOT NULL,
+        ${phaseColumnSql},
+        subid INTEGER, subname TEXT,
+        apply_error_count INTEGER, sync_error_count INTEGER,
+        confl_insert_exists INTEGER, confl_update_origin_differs INTEGER, confl_update_exists INTEGER,
+        confl_update_missing INTEGER, confl_delete_origin_differs INTEGER, confl_delete_missing INTEGER,
+        confl_multiple_unique_conflicts INTEGER,
+        stats_reset TEXT
+      );
+  `;
+}
+
+function resetSupportedPg18SnapTables(db: Database.Database): void {
+	db.exec(`
+    DROP TABLE IF EXISTS snap_pg_stat_database;
+    DROP TABLE IF EXISTS snap_pg_stat_bgwriter;
+    DROP TABLE IF EXISTS snap_pg_stat_checkpointer;
+    DROP TABLE IF EXISTS snap_pg_stat_user_tables;
+    DROP TABLE IF EXISTS snap_pg_stat_user_indexes;
+    DROP TABLE IF EXISTS snap_pg_statio_user_tables;
+    DROP TABLE IF EXISTS snap_pg_statio_user_indexes;
+    DROP TABLE IF EXISTS snap_pg_statio_user_sequences;
+    DROP TABLE IF EXISTS snap_pg_stat_database_conflicts;
+    DROP TABLE IF EXISTS snap_pg_stat_archiver;
+    DROP TABLE IF EXISTS snap_pg_stat_slru;
+    DROP TABLE IF EXISTS snap_pg_stat_user_functions;
+    DROP TABLE IF EXISTS snap_pg_stat_wal;
+    DROP TABLE IF EXISTS snap_pg_stat_replication_slots;
+    DROP TABLE IF EXISTS snap_pg_stat_io;
+    DROP TABLE IF EXISTS snap_pg_stat_activity;
+    DROP TABLE IF EXISTS snap_pg_stat_replication;
+    DROP TABLE IF EXISTS snap_pg_stat_subscription;
+    DROP TABLE IF EXISTS snap_pg_stat_subscription_stats;
+    DROP TABLE IF EXISTS snap_pg_stat_all_tables;
+    DROP TABLE IF EXISTS snap_pg_stat_all_indexes;
+    DROP TABLE IF EXISTS snap_pg_statio_all_tables;
+  `);
+	db.exec(createSupportedSnapTablesSql());
 }
 
 function tableExists(db: Database.Database, tableName: string): boolean {
@@ -241,6 +480,17 @@ function migratePg18WalAndIoTables(db: Database.Database): void {
 	db.exec(createSnapPgStatWalTableSql());
 	db.exec(createSnapPgStatIoTableSql());
 	db.prepare(`INSERT INTO schema_migrations (id) VALUES (?)`).run(migrationId);
+}
+
+function migratePgLocksWaitstartColumn(db: Database.Database): void {
+	if (!tableExists(db, 'snap_pg_locks')) return;
+
+	const lockCols = (db.prepare(`PRAGMA table_info(snap_pg_locks)`).all() as { name: string }[]).map(
+		(col) => col.name
+	);
+	if (!lockCols.includes('waitstart')) {
+		db.exec(`ALTER TABLE snap_pg_locks ADD COLUMN waitstart TEXT`);
+	}
 }
 
 export function getDb(): Database.Database {
@@ -412,12 +662,13 @@ function migrate(db: Database.Database) {
     applied_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`);
 
-	// Migration: drop and recreate all snap_ tables with correct PG16 schema
+	// Migration: drop and recreate all supported snap tables
 	const snapMigrated = db.prepare(`SELECT id FROM schema_migrations WHERE id = 'snap_pg16_v1'`).get();
 	if (!snapMigrated) {
 		db.exec(`
       DROP TABLE IF EXISTS snap_pg_stat_database;
       DROP TABLE IF EXISTS snap_pg_stat_bgwriter;
+      DROP TABLE IF EXISTS snap_pg_stat_checkpointer;
       DROP TABLE IF EXISTS snap_pg_stat_user_tables;
       DROP TABLE IF EXISTS snap_pg_stat_user_indexes;
       DROP TABLE IF EXISTS snap_pg_statio_user_tables;
@@ -434,201 +685,7 @@ function migrate(db: Database.Database) {
       DROP TABLE IF EXISTS snap_pg_stat_replication;
       DROP TABLE IF EXISTS snap_pg_stat_subscription;
       DROP TABLE IF EXISTS snap_pg_stat_subscription_stats;
-      DROP TABLE IF EXISTS snap_pg_stat_checkpointer;
-
-      -- pg_stat_database (PG16)
-      CREATE TABLE snap_pg_stat_database (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL,
-        _is_baseline INTEGER NOT NULL DEFAULT 0,
-        datid INTEGER, datname TEXT, numbackends INTEGER,
-        xact_commit INTEGER, xact_rollback INTEGER,
-        blks_read INTEGER, blks_hit INTEGER,
-        tup_returned INTEGER, tup_fetched INTEGER, tup_inserted INTEGER, tup_updated INTEGER, tup_deleted INTEGER,
-        conflicts INTEGER, temp_files INTEGER, temp_bytes INTEGER,
-        deadlocks INTEGER, checksum_failures INTEGER, checksum_last_failure TEXT,
-        blk_read_time REAL, blk_write_time REAL,
-        session_time REAL, active_time REAL, idle_in_transaction_time REAL,
-        sessions INTEGER, sessions_abandoned INTEGER, sessions_fatal INTEGER, sessions_killed INTEGER,
-        stats_reset TEXT
-      );
-
-      -- pg_stat_bgwriter
-      ${createSnapPgStatBgwriterTableSql('snap_pg_stat_bgwriter', '_is_baseline INTEGER NOT NULL DEFAULT 0')};
-
-      -- pg_stat_checkpointer
-      ${createSnapPgStatCheckpointerTableSql('snap_pg_stat_checkpointer', '_is_baseline INTEGER NOT NULL DEFAULT 0')};
-
-      -- pg_stat_user_tables (PG16)
-      CREATE TABLE snap_pg_stat_user_tables (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL,
-        _is_baseline INTEGER NOT NULL DEFAULT 0,
-        relid INTEGER, schemaname TEXT, relname TEXT,
-        seq_scan INTEGER, last_seq_scan TEXT, seq_tup_read INTEGER,
-        idx_scan INTEGER, last_idx_scan TEXT, idx_tup_fetch INTEGER,
-        n_tup_ins INTEGER, n_tup_upd INTEGER, n_tup_del INTEGER,
-        n_tup_hot_upd INTEGER, n_tup_newpage_upd INTEGER,
-        n_live_tup INTEGER, n_dead_tup INTEGER, n_mod_since_analyze INTEGER, n_ins_since_vacuum INTEGER,
-        last_vacuum TEXT, last_autovacuum TEXT, last_analyze TEXT, last_autoanalyze TEXT,
-        vacuum_count INTEGER, autovacuum_count INTEGER, analyze_count INTEGER, autoanalyze_count INTEGER
-      );
-
-      -- pg_stat_user_indexes (PG16)
-      CREATE TABLE snap_pg_stat_user_indexes (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL,
-        _is_baseline INTEGER NOT NULL DEFAULT 0,
-        relid INTEGER, indexrelid INTEGER, schemaname TEXT, relname TEXT, indexrelname TEXT,
-        idx_scan INTEGER, last_idx_scan TEXT, idx_tup_read INTEGER, idx_tup_fetch INTEGER
-      );
-
-      -- pg_statio_user_tables (PG16)
-      CREATE TABLE snap_pg_statio_user_tables (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL,
-        _is_baseline INTEGER NOT NULL DEFAULT 0,
-        relid INTEGER, schemaname TEXT, relname TEXT,
-        heap_blks_read INTEGER, heap_blks_hit INTEGER,
-        idx_blks_read INTEGER, idx_blks_hit INTEGER,
-        toast_blks_read INTEGER, toast_blks_hit INTEGER,
-        tidx_blks_read INTEGER, tidx_blks_hit INTEGER
-      );
-
-      -- pg_statio_user_indexes (PG16)
-      CREATE TABLE snap_pg_statio_user_indexes (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL,
-        _is_baseline INTEGER NOT NULL DEFAULT 0,
-        relid INTEGER, indexrelid INTEGER, schemaname TEXT, relname TEXT, indexrelname TEXT,
-        idx_blks_read INTEGER, idx_blks_hit INTEGER
-      );
-
-      -- pg_statio_user_sequences (PG16)
-      CREATE TABLE snap_pg_statio_user_sequences (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL,
-        _is_baseline INTEGER NOT NULL DEFAULT 0,
-        relid INTEGER, schemaname TEXT, relname TEXT,
-        blks_read INTEGER, blks_hit INTEGER
-      );
-
-      -- pg_stat_database_conflicts (PG16)
-      CREATE TABLE snap_pg_stat_database_conflicts (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL,
-        _is_baseline INTEGER NOT NULL DEFAULT 0,
-        datid INTEGER, datname TEXT,
-        confl_tablespace INTEGER, confl_lock INTEGER, confl_snapshot INTEGER,
-        confl_bufferpin INTEGER, confl_deadlock INTEGER, confl_active_logicalslot INTEGER
-      );
-
-      -- pg_stat_archiver (PG16)
-      CREATE TABLE snap_pg_stat_archiver (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL,
-        _is_baseline INTEGER NOT NULL DEFAULT 0,
-        archived_count INTEGER, last_archived_wal TEXT, last_archived_time TEXT,
-        failed_count INTEGER, last_failed_wal TEXT, last_failed_time TEXT,
-        stats_reset TEXT
-      );
-
-      -- pg_stat_slru (PG16)
-      CREATE TABLE snap_pg_stat_slru (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL,
-        _is_baseline INTEGER NOT NULL DEFAULT 0,
-        name TEXT, blks_zeroed INTEGER, blks_hit INTEGER, blks_read INTEGER,
-        blks_written INTEGER, blks_exists INTEGER, flushes INTEGER, truncates INTEGER,
-        stats_reset TEXT
-      );
-
-      -- pg_stat_user_functions (PG16)
-      CREATE TABLE snap_pg_stat_user_functions (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL,
-        _is_baseline INTEGER NOT NULL DEFAULT 0,
-        funcid INTEGER, schemaname TEXT, funcname TEXT,
-        calls INTEGER, total_time REAL, self_time REAL
-      );
-
-      -- pg_stat_wal (PG16)
-      ${createSnapPgStatWalTableSql('snap_pg_stat_wal', '_is_baseline INTEGER NOT NULL DEFAULT 0')};
-
-      -- pg_stat_replication_slots (PG16)
-      CREATE TABLE snap_pg_stat_replication_slots (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL,
-        _is_baseline INTEGER NOT NULL DEFAULT 0,
-        slot_name TEXT, spill_txns INTEGER, spill_count INTEGER, spill_bytes INTEGER,
-        stream_txns INTEGER, stream_count INTEGER, stream_bytes INTEGER,
-        total_txns INTEGER, total_bytes INTEGER, stats_reset TEXT
-      );
-
-      -- pg_stat_io (PG16)
-      ${createSnapPgStatIoTableSql('snap_pg_stat_io', '_is_baseline INTEGER NOT NULL DEFAULT 0')};
-
-      -- pg_stat_activity (PG16)
-      CREATE TABLE snap_pg_stat_activity (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL,
-        _is_baseline INTEGER NOT NULL DEFAULT 0,
-        datid INTEGER, datname TEXT, pid INTEGER, leader_pid INTEGER,
-        usesysid INTEGER, usename TEXT, application_name TEXT,
-        client_addr TEXT, client_hostname TEXT, client_port INTEGER,
-        backend_start TEXT, xact_start TEXT, query_start TEXT, state_change TEXT,
-        wait_event_type TEXT, wait_event TEXT, state TEXT,
-        backend_xid TEXT, backend_xmin TEXT, query_id INTEGER, query TEXT,
-        backend_type TEXT
-      );
-
-      -- pg_stat_replication (PG16)
-      CREATE TABLE snap_pg_stat_replication (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL,
-        _is_baseline INTEGER NOT NULL DEFAULT 0,
-        pid INTEGER, usesysid INTEGER, usename TEXT, application_name TEXT,
-        client_addr TEXT, client_hostname TEXT, client_port INTEGER,
-        backend_start TEXT, backend_xmin TEXT, state TEXT,
-        sent_lsn TEXT, write_lsn TEXT, flush_lsn TEXT, replay_lsn TEXT,
-        write_lag TEXT, flush_lag TEXT, replay_lag TEXT,
-        sync_priority INTEGER, sync_state TEXT, reply_time TEXT
-      );
-
-      -- pg_stat_subscription (PG16) — no worker_type in PG16
-      CREATE TABLE snap_pg_stat_subscription (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL,
-        _is_baseline INTEGER NOT NULL DEFAULT 0,
-        subid INTEGER, subname TEXT,
-        pid INTEGER, leader_pid INTEGER, relid INTEGER,
-        received_lsn TEXT, last_msg_send_time TEXT, last_msg_receipt_time TEXT,
-        latest_end_lsn TEXT, latest_end_time TEXT
-      );
-
-      -- pg_stat_subscription_stats (PG16)
-      CREATE TABLE snap_pg_stat_subscription_stats (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL,
-        _is_baseline INTEGER NOT NULL DEFAULT 0,
-        subid INTEGER, subname TEXT,
-        apply_error_count INTEGER, sync_error_count INTEGER, stats_reset TEXT
-      );
+      ${createSupportedSnapTablesSql('_is_baseline INTEGER NOT NULL DEFAULT 0')}
 
       INSERT INTO schema_migrations (id) VALUES ('snap_pg16_v1');
     `);
@@ -657,137 +714,7 @@ function migrate(db: Database.Database) {
       DROP TABLE IF EXISTS snap_pg_stat_subscription;
       DROP TABLE IF EXISTS snap_pg_stat_subscription_stats;
       DROP TABLE IF EXISTS snap_pg_stat_checkpointer;
-
-      CREATE TABLE snap_pg_stat_database (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
-        datid INTEGER, datname TEXT, numbackends INTEGER,
-        xact_commit INTEGER, xact_rollback INTEGER, blks_read INTEGER, blks_hit INTEGER,
-        tup_returned INTEGER, tup_fetched INTEGER, tup_inserted INTEGER, tup_updated INTEGER, tup_deleted INTEGER,
-        conflicts INTEGER, temp_files INTEGER, temp_bytes INTEGER,
-        deadlocks INTEGER, checksum_failures INTEGER, checksum_last_failure TEXT,
-        blk_read_time REAL, blk_write_time REAL,
-        session_time REAL, active_time REAL, idle_in_transaction_time REAL,
-        sessions INTEGER, sessions_abandoned INTEGER, sessions_fatal INTEGER, sessions_killed INTEGER, stats_reset TEXT
-      );
-      ${createSnapPgStatBgwriterTableSql()};
-      ${createSnapPgStatCheckpointerTableSql()};
-      CREATE TABLE snap_pg_stat_user_tables (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
-        relid INTEGER, schemaname TEXT, relname TEXT,
-        seq_scan INTEGER, last_seq_scan TEXT, seq_tup_read INTEGER,
-        idx_scan INTEGER, last_idx_scan TEXT, idx_tup_fetch INTEGER,
-        n_tup_ins INTEGER, n_tup_upd INTEGER, n_tup_del INTEGER,
-        n_tup_hot_upd INTEGER, n_tup_newpage_upd INTEGER,
-        n_live_tup INTEGER, n_dead_tup INTEGER, n_mod_since_analyze INTEGER, n_ins_since_vacuum INTEGER,
-        last_vacuum TEXT, last_autovacuum TEXT, last_analyze TEXT, last_autoanalyze TEXT,
-        vacuum_count INTEGER, autovacuum_count INTEGER, analyze_count INTEGER, autoanalyze_count INTEGER
-      );
-      CREATE TABLE snap_pg_stat_user_indexes (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
-        relid INTEGER, indexrelid INTEGER, schemaname TEXT, relname TEXT, indexrelname TEXT,
-        idx_scan INTEGER, last_idx_scan TEXT, idx_tup_read INTEGER, idx_tup_fetch INTEGER
-      );
-      CREATE TABLE snap_pg_statio_user_tables (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
-        relid INTEGER, schemaname TEXT, relname TEXT,
-        heap_blks_read INTEGER, heap_blks_hit INTEGER, idx_blks_read INTEGER, idx_blks_hit INTEGER,
-        toast_blks_read INTEGER, toast_blks_hit INTEGER, tidx_blks_read INTEGER, tidx_blks_hit INTEGER
-      );
-      CREATE TABLE snap_pg_statio_user_indexes (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
-        relid INTEGER, indexrelid INTEGER, schemaname TEXT, relname TEXT, indexrelname TEXT,
-        idx_blks_read INTEGER, idx_blks_hit INTEGER
-      );
-      CREATE TABLE snap_pg_statio_user_sequences (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
-        relid INTEGER, schemaname TEXT, relname TEXT, blks_read INTEGER, blks_hit INTEGER
-      );
-      CREATE TABLE snap_pg_stat_database_conflicts (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
-        datid INTEGER, datname TEXT,
-        confl_tablespace INTEGER, confl_lock INTEGER, confl_snapshot INTEGER,
-        confl_bufferpin INTEGER, confl_deadlock INTEGER, confl_active_logicalslot INTEGER
-      );
-      CREATE TABLE snap_pg_stat_archiver (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
-        archived_count INTEGER, last_archived_wal TEXT, last_archived_time TEXT,
-        failed_count INTEGER, last_failed_wal TEXT, last_failed_time TEXT, stats_reset TEXT
-      );
-      CREATE TABLE snap_pg_stat_slru (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
-        name TEXT, blks_zeroed INTEGER, blks_hit INTEGER, blks_read INTEGER,
-        blks_written INTEGER, blks_exists INTEGER, flushes INTEGER, truncates INTEGER, stats_reset TEXT
-      );
-      CREATE TABLE snap_pg_stat_user_functions (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
-        funcid INTEGER, schemaname TEXT, funcname TEXT, calls INTEGER, total_time REAL, self_time REAL
-      );
-      ${createSnapPgStatWalTableSql()};
-      CREATE TABLE snap_pg_stat_replication_slots (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
-        slot_name TEXT, spill_txns INTEGER, spill_count INTEGER, spill_bytes INTEGER,
-        stream_txns INTEGER, stream_count INTEGER, stream_bytes INTEGER,
-        total_txns INTEGER, total_bytes INTEGER, stats_reset TEXT
-      );
-      ${createSnapPgStatIoTableSql()};
-      CREATE TABLE snap_pg_stat_activity (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
-        datid INTEGER, datname TEXT, pid INTEGER, leader_pid INTEGER,
-        usesysid INTEGER, usename TEXT, application_name TEXT,
-        client_addr TEXT, client_hostname TEXT, client_port INTEGER,
-        backend_start TEXT, xact_start TEXT, query_start TEXT, state_change TEXT,
-        wait_event_type TEXT, wait_event TEXT, state TEXT,
-        backend_xid TEXT, backend_xmin TEXT, query_id INTEGER, query TEXT, backend_type TEXT
-      );
-      CREATE TABLE snap_pg_stat_replication (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
-        pid INTEGER, usesysid INTEGER, usename TEXT, application_name TEXT,
-        client_addr TEXT, client_hostname TEXT, client_port INTEGER,
-        backend_start TEXT, backend_xmin TEXT, state TEXT,
-        sent_lsn TEXT, write_lsn TEXT, flush_lsn TEXT, replay_lsn TEXT,
-        write_lag TEXT, flush_lag TEXT, replay_lag TEXT,
-        sync_priority INTEGER, sync_state TEXT, reply_time TEXT
-      );
-      CREATE TABLE snap_pg_stat_subscription (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
-        subid INTEGER, subname TEXT, pid INTEGER, leader_pid INTEGER, relid INTEGER,
-        received_lsn TEXT, last_msg_send_time TEXT, last_msg_receipt_time TEXT,
-        latest_end_lsn TEXT, latest_end_time TEXT
-      );
-      CREATE TABLE snap_pg_stat_subscription_stats (
-        _id INTEGER PRIMARY KEY AUTOINCREMENT,
-        _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-        _collected_at TEXT NOT NULL, _phase TEXT NOT NULL DEFAULT 'bench',
-        subid INTEGER, subname TEXT, apply_error_count INTEGER, sync_error_count INTEGER, stats_reset TEXT
-      );
+      ${createSupportedSnapTablesSql()}
 
       CREATE TABLE IF NOT EXISTS metrics (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -821,6 +748,14 @@ function migrate(db: Database.Database) {
 	}
 	migrateBgwriterAndCheckpointerTables(db);
 	migratePg18WalAndIoTables(db);
+	const snapPg18ResetMigrated = db.prepare(`SELECT id FROM schema_migrations WHERE id = 'snap_pg18_reset_v1'`).get();
+	if (!snapPg18ResetMigrated) {
+		resetSupportedPg18SnapTables(db);
+		db.exec(`DROP TABLE IF EXISTS snap_pg_stat_statements`);
+		db.exec(createSnapPgStatStatementsTableSql());
+		db.prepare(`INSERT INTO schema_migrations (id) VALUES ('snap_pg18_reset_v1')`).run();
+	}
+	migratePgLocksWaitstartColumn(db);
 
 	const designCols = (db.prepare(`PRAGMA table_info(designs)`).all() as { name: string }[]).map(c => c.name);
 	if (!designCols.includes('pre_collect_secs')) db.exec(`ALTER TABLE designs ADD COLUMN pre_collect_secs INTEGER NOT NULL DEFAULT 0`);
@@ -875,29 +810,7 @@ function migrate(db: Database.Database) {
 
 
 	// Raw pg_locks snapshots (simpler than conflict pairs — tree analysis done in UI)
-	db.exec(`
-    CREATE TABLE IF NOT EXISTS snap_pg_locks (
-      _id INTEGER PRIMARY KEY AUTOINCREMENT,
-      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-      _collected_at TEXT NOT NULL,
-      _phase TEXT NOT NULL DEFAULT 'bench',
-      locktype TEXT,
-      database INTEGER,
-      relation INTEGER,
-      page INTEGER,
-      tuple INTEGER,
-      virtualxid TEXT,
-      transactionid TEXT,
-      classid INTEGER,
-      objid INTEGER,
-      objsubid INTEGER,
-      virtualtransaction TEXT,
-      pid INTEGER,
-      mode TEXT,
-      granted INTEGER,
-      fastpath INTEGER
-    );
-  `);
+	db.exec(createSnapPgLocksTableSql().replace('CREATE TABLE ', 'CREATE TABLE IF NOT EXISTS '));
 
 	// Metrics table (library / templates)
 	db.exec(`

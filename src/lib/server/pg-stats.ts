@@ -1,6 +1,5 @@
 import pg from 'pg';
 import getDb from './db';
-import { getPgStatStatementsSqliteType } from './pg-stat-statements-schema';
 
 // Mapping from pg_stat view names to our snap_ table names
 export const SNAP_TABLE_MAP: Record<string, string> = {
@@ -29,6 +28,22 @@ export const ALL_SNAP_TABLES = Object.values(SNAP_TABLE_MAP);
 
 function quoteIdentifier(identifier: string): string {
 	return `"${identifier.replace(/"/g, '""')}"`;
+}
+
+function getSnapshotDataColumns(db: ReturnType<typeof getDb>, tableName: string): string[] {
+	return (db.prepare(`PRAGMA table_info(${tableName})`).all() as { name: string }[])
+		.map((col) => col.name)
+		.filter((name) => !name.startsWith('_'));
+}
+
+function ensureSnapshotSchema(db: ReturnType<typeof getDb>, tableName: string, expectedColumns: string[]): void {
+	const actualColumns = getSnapshotDataColumns(db, tableName);
+	const expected = expectedColumns.join(', ');
+	const actual = actualColumns.join(', ');
+
+	if (expected !== actual) {
+		throw new Error(`snapshot schema mismatch for ${tableName}; expected [${expected}] but found [${actual}]`);
+	}
 }
 
 async function getPgStatStatementsSchema(pool: pg.Pool): Promise<string | null> {
@@ -64,25 +79,9 @@ export async function collectSnapshot(
 
 		try {
 			const result = await pgPool.query(`SELECT * FROM pg_catalog.${tableName}`);
-			if (result.rows.length === 0) continue;
-
 			const cols = result.fields.map((f: pg.FieldDef) => f.name);
-
-			// Ensure snap table exists and has all columns PG returned
-			db.exec(`CREATE TABLE IF NOT EXISTS ${snapTable} (
-				_id INTEGER PRIMARY KEY AUTOINCREMENT,
-				_run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
-				_collected_at TEXT NOT NULL,
-				_phase TEXT NOT NULL DEFAULT 'bench'
-			)`);
-			const existingCols = new Set(
-				(db.prepare(`PRAGMA table_info(${snapTable})`).all() as { name: string }[]).map(r => r.name)
-			);
-			for (const col of cols) {
-				if (!existingCols.has(col)) {
-					db.exec(`ALTER TABLE ${snapTable} ADD COLUMN ${col} TEXT`);
-				}
-			}
+			ensureSnapshotSchema(db, snapTable, cols);
+			if (result.rows.length === 0) continue;
 
 			const insertCols = ['_run_id', '_collected_at', '_phase', ...cols];
 			const placeholders = insertCols.map((_, i) => `@p${i}`).join(', ');
@@ -109,8 +108,8 @@ export async function collectSnapshot(
 			});
 
 			insertMany(result.rows);
-		} catch (_err) {
-			// Skip tables that fail (permissions, etc.)
+		} catch (err) {
+			console.warn(`Skipping ${snapTable} snapshot:`, err instanceof Error ? err.message : String(err));
 		}
 	}
 }
@@ -155,14 +154,7 @@ export async function collectPgStatStatementsSnapshot(
 		const db = getDb();
 		const collectedAt = new Date().toISOString();
 		const cols = result.fields.map((f: pg.FieldDef) => f.name);
-		const existingCols = new Set(
-			(db.prepare(`PRAGMA table_info(snap_pg_stat_statements)`).all() as { name: string }[]).map((r) => r.name)
-		);
-		for (const col of cols) {
-			if (!existingCols.has(col)) {
-				db.exec(`ALTER TABLE snap_pg_stat_statements ADD COLUMN ${col} ${getPgStatStatementsSqliteType(col)}`);
-			}
-		}
+		ensureSnapshotSchema(db, 'snap_pg_stat_statements', cols);
 
 		const insertCols = ['_run_id', '_step_id', '_collected_at', ...cols];
 		const placeholders = insertCols.map((_, i) => `@p${i}`).join(', ');
