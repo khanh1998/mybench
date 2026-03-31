@@ -44,12 +44,12 @@
     resource: string;
     locktype?: string; // present when granularity = 'all'
     mode?: string;     // present when granularity = 'table+mode' | 'all'
-    lock_wait: number; lock_hold: number; pid_wait: number; pid_hold: number;
+    lock_wait: number; lock_block: number; pid_wait: number; pid_block: number;
   }
   interface LockSummaryRow {
-    total_held: number; total_waited: number; distinct_pids: number; waiting_pids: number; snapshot_count: number;
+    total_waited: number; blocking_pairs: number; distinct_pids: number; waiting_pids: number; blocking_pids: number; snapshot_count: number;
   }
-  interface LockTimeRow { _collected_at: string; waiting_pids: number; holding_pids: number; }
+  interface LockTimeRow { _collected_at: string; waiting_pids: number; blocking_pids: number; }
   interface TotalAasRow { _collected_at: string; total_active: number; }
 
   // ── Hue-rotation color system ──────────────────────────────────────────────
@@ -306,6 +306,46 @@
       .map(n => ({ ...n, children: sortLockNodes(n.children, by) }));
   }
 
+  function lockObjectMatch(waitAlias: string, holdAlias: string): string {
+    return `
+      ${waitAlias}._run_id = ${holdAlias}._run_id
+      AND ${waitAlias}._collected_at = ${holdAlias}._collected_at
+      AND ${waitAlias}._phase = ${holdAlias}._phase
+      AND ${waitAlias}.locktype = ${holdAlias}.locktype
+      AND (${waitAlias}.database = ${holdAlias}.database OR (${waitAlias}.database IS NULL AND ${holdAlias}.database IS NULL))
+      AND (${waitAlias}.relation = ${holdAlias}.relation OR (${waitAlias}.relation IS NULL AND ${holdAlias}.relation IS NULL))
+      AND (${waitAlias}.page = ${holdAlias}.page OR (${waitAlias}.page IS NULL AND ${holdAlias}.page IS NULL))
+      AND (${waitAlias}.tuple = ${holdAlias}.tuple OR (${waitAlias}.tuple IS NULL AND ${holdAlias}.tuple IS NULL))
+      AND (${waitAlias}.virtualxid = ${holdAlias}.virtualxid OR (${waitAlias}.virtualxid IS NULL AND ${holdAlias}.virtualxid IS NULL))
+      AND (${waitAlias}.transactionid = ${holdAlias}.transactionid OR (${waitAlias}.transactionid IS NULL AND ${holdAlias}.transactionid IS NULL))
+      AND (${waitAlias}.classid = ${holdAlias}.classid OR (${waitAlias}.classid IS NULL AND ${holdAlias}.classid IS NULL))
+      AND (${waitAlias}.objid = ${holdAlias}.objid OR (${waitAlias}.objid IS NULL AND ${holdAlias}.objid IS NULL))
+      AND (${waitAlias}.objsubid = ${holdAlias}.objsubid OR (${waitAlias}.objsubid IS NULL AND ${holdAlias}.objsubid IS NULL))
+    `;
+  }
+
+  function lockResourceExpr(alias: string): string {
+    return `CASE ${alias}.locktype
+      WHEN 'transactionid' THEN 'transaction'
+      WHEN 'virtualxid' THEN 'virtual xid'
+      ELSE COALESCE(t.schemaname || '.' || t.relname, ${alias}.locktype)
+    END`;
+  }
+
+  function lockConflictExpr(waitModeExpr: string, holdModeExpr: string): string {
+    return `CASE
+      WHEN ${waitModeExpr} = 'AccessShareLock' THEN ${holdModeExpr} IN ('AccessExclusiveLock')
+      WHEN ${waitModeExpr} = 'RowShareLock' THEN ${holdModeExpr} IN ('ExclusiveLock', 'AccessExclusiveLock')
+      WHEN ${waitModeExpr} = 'RowExclusiveLock' THEN ${holdModeExpr} IN ('ShareLock', 'ShareRowExclusiveLock', 'ExclusiveLock', 'AccessExclusiveLock')
+      WHEN ${waitModeExpr} = 'ShareUpdateExclusiveLock' THEN ${holdModeExpr} IN ('ShareUpdateExclusiveLock', 'ShareLock', 'ShareRowExclusiveLock', 'ExclusiveLock', 'AccessExclusiveLock')
+      WHEN ${waitModeExpr} = 'ShareLock' THEN ${holdModeExpr} IN ('RowExclusiveLock', 'ShareUpdateExclusiveLock', 'ShareRowExclusiveLock', 'ExclusiveLock', 'AccessExclusiveLock')
+      WHEN ${waitModeExpr} = 'ShareRowExclusiveLock' THEN ${holdModeExpr} IN ('RowExclusiveLock', 'ShareUpdateExclusiveLock', 'ShareLock', 'ShareRowExclusiveLock', 'ExclusiveLock', 'AccessExclusiveLock')
+      WHEN ${waitModeExpr} = 'ExclusiveLock' THEN ${holdModeExpr} IN ('RowShareLock', 'RowExclusiveLock', 'ShareUpdateExclusiveLock', 'ShareLock', 'ShareRowExclusiveLock', 'ExclusiveLock', 'AccessExclusiveLock')
+      WHEN ${waitModeExpr} = 'AccessExclusiveLock' THEN ${holdModeExpr} IN ('AccessShareLock', 'RowShareLock', 'RowExclusiveLock', 'ShareUpdateExclusiveLock', 'ShareLock', 'ShareRowExclusiveLock', 'ExclusiveLock', 'AccessExclusiveLock')
+      ELSE 1
+    END`;
+  }
+
   const isCompare = $derived(runs.length > 1);
 
   // ── Queries ────────────────────────────────────────────────────────────────
@@ -319,34 +359,80 @@
     const p = showPhaseFilter ? localPhases : phases;
     const { clause, params: pParams } = phaseClause(p);
     const gran = contentionGranularity;
-    const extraCols = gran === 'table' ? '' : ', l.mode';
-    const groupBy   = gran === 'table' ? 'resource' : 'resource, l.mode';
+    const waitModeSelect = gran === 'table' ? 'NULL as mode,' : 'l.mode as mode,';
+    const blockModeSelect = gran === 'table' ? 'NULL as mode,' : 'b.mode as mode,';
+    const extraCols = gran === 'table' ? '' : ', waits.mode';
 
     await Promise.all(runs.map(async (run) => {
       const rid = run.id;
       const res = await queryApi(
-        `SELECT
-           CASE l.locktype
-             WHEN 'transactionid' THEN 'transaction'
-             WHEN 'virtualxid'    THEN 'virtual xid'
-             ELSE COALESCE(t.schemaname || '.' || t.relname, l.locktype)
-           END as resource
-           ${extraCols},
-           SUM(CASE WHEN l.granted = 0 THEN 1 ELSE 0 END) as lock_wait,
-           SUM(CASE WHEN l.granted = 1 THEN 1 ELSE 0 END) as lock_hold,
-           COUNT(DISTINCT CASE WHEN l.granted = 0 THEN l.pid END) as pid_wait,
-           COUNT(DISTINCT CASE WHEN l.granted = 1 THEN l.pid END) as pid_hold
-         FROM snap_pg_locks l
-         LEFT JOIN (
+        `WITH rels AS (
            SELECT DISTINCT relid, schemaname, relname
-           FROM snap_pg_stat_user_tables WHERE _run_id = ?
-         ) t ON t.relid = l.relation
-         WHERE l._run_id = ? AND ${clause.replace(/_phase/g, 'l._phase')}
-         GROUP BY ${groupBy}
-         HAVING lock_wait > 0
-         ORDER BY lock_wait DESC
+           FROM snap_pg_stat_user_tables
+           WHERE _run_id = ?
+         ),
+         waits_detail AS (
+           SELECT
+             ${lockResourceExpr('l')} as resource,
+             ${waitModeSelect}
+             l._collected_at,
+             COUNT(*) as lock_wait,
+             COUNT(DISTINCT l.pid) as pid_wait
+           FROM snap_pg_locks l
+           LEFT JOIN rels t ON t.relid = l.relation
+           WHERE l._run_id = ? AND l.granted = 0 AND ${clause.replace(/_phase/g, 'l._phase')}
+           GROUP BY 1, 2, 3
+         ),
+         waits AS (
+           SELECT
+             resource,
+             mode,
+             SUM(lock_wait) as lock_wait,
+             MAX(pid_wait) as pid_wait
+           FROM waits_detail
+           GROUP BY 1, 2
+         ),
+         blocks_detail AS (
+           SELECT
+             ${lockResourceExpr('b')} as resource,
+             ${blockModeSelect}
+             b._collected_at,
+             COUNT(*) as lock_block,
+             COUNT(DISTINCT bl.pid) as pid_block
+           FROM snap_pg_locks b
+           JOIN snap_pg_locks bl
+             ON ${lockObjectMatch('b', 'bl')}
+             AND b.pid != bl.pid
+             AND b.granted = 0
+             AND bl.granted = 1
+             AND ${lockConflictExpr('b.mode', 'bl.mode')}
+           LEFT JOIN rels t ON t.relid = b.relation
+           WHERE b._run_id = ? AND ${clause.replace(/_phase/g, 'b._phase')}
+           GROUP BY 1, 2, 3
+         ),
+         blocks AS (
+           SELECT
+             resource,
+             mode,
+             SUM(lock_block) as lock_block,
+             MAX(pid_block) as pid_block
+           FROM blocks_detail
+           GROUP BY 1, 2
+         )
+         SELECT
+           waits.resource
+           ${extraCols},
+           waits.lock_wait,
+           COALESCE(blocks.lock_block, 0) as lock_block,
+           waits.pid_wait,
+           COALESCE(blocks.pid_block, 0) as pid_block
+         FROM waits
+         LEFT JOIN blocks
+           ON waits.resource = blocks.resource
+           AND ((waits.mode = blocks.mode) OR (waits.mode IS NULL AND blocks.mode IS NULL))
+         ORDER BY waits.lock_wait DESC, lock_block DESC
          LIMIT 30`,
-        [rid, rid, ...pParams]
+        [rid, rid, ...pParams, rid, ...pParams]
       );
       contentionData = { ...contentionData, [rid]: res.error ? [] : (res.rows as unknown as ContentionRow[]) };
     }));
@@ -498,24 +584,17 @@
 
       // Lock tree from raw pg_locks snapshots — compute blocking pairs in SQLite
       const lockRes = await queryApi(
-        `WITH pairs AS (
-           SELECT b.pid as blocked_pid, bl.pid as blocking_pid,
-                  b.locktype, b.mode as requested_mode, bl.mode as held_mode,
-                  COUNT(*) as times_seen
-           FROM snap_pg_locks b
-           JOIN snap_pg_locks bl
-             ON b._run_id = bl._run_id AND b._collected_at = bl._collected_at
-             AND b.locktype = bl.locktype
-             AND (b.database = bl.database OR (b.database IS NULL AND bl.database IS NULL))
-             AND (b.relation = bl.relation OR (b.relation IS NULL AND bl.relation IS NULL))
-             AND (b.page = bl.page OR (b.page IS NULL AND bl.page IS NULL))
-             AND (b.tuple = bl.tuple OR (b.tuple IS NULL AND bl.tuple IS NULL))
-             AND (b.transactionid = bl.transactionid OR (b.transactionid IS NULL AND bl.transactionid IS NULL))
-             AND (b.classid = bl.classid OR (b.classid IS NULL AND bl.classid IS NULL))
-             AND (b.objid = bl.objid OR (b.objid IS NULL AND bl.objid IS NULL))
-             AND b.pid != bl.pid
-             AND b.granted = 0 AND bl.granted = 1
-           WHERE b._run_id = ? AND ${clause.replace(/_phase/g, 'b._phase')}
+         `WITH pairs AS (
+            SELECT b.pid as blocked_pid, bl.pid as blocking_pid,
+                   b.locktype, b.mode as requested_mode, bl.mode as held_mode,
+                   COUNT(*) as times_seen
+            FROM snap_pg_locks b
+            JOIN snap_pg_locks bl
+              ON ${lockObjectMatch('b', 'bl')}
+              AND b.pid != bl.pid
+              AND b.granted = 0 AND bl.granted = 1
+              AND ${lockConflictExpr('b.mode', 'bl.mode')}
+            WHERE b._run_id = ? AND ${clause.replace(/_phase/g, 'b._phase')}
            GROUP BY b.pid, bl.pid, b.locktype, b.mode, bl.mode
          ),
          latest_act AS (
@@ -537,27 +616,90 @@
 
       // Overall lock summary (totals — independent of granularity)
       const summaryRes = await queryApi(
-        `SELECT
-           SUM(CASE WHEN granted = 1 THEN 1 ELSE 0 END) as total_held,
-           SUM(CASE WHEN granted = 0 THEN 1 ELSE 0 END) as total_waited,
-           COUNT(DISTINCT pid) as distinct_pids,
-           COUNT(DISTINCT CASE WHEN granted = 0 THEN pid END) as waiting_pids,
-           COUNT(DISTINCT _collected_at) as snapshot_count
-         FROM snap_pg_locks
-         WHERE _run_id = ? AND ${clause}`,
-        [rid, ...pParams]
+        `WITH waits AS (
+           SELECT
+             _collected_at,
+             COUNT(*) as total_waited,
+             COUNT(DISTINCT pid) as waiting_pids
+           FROM snap_pg_locks
+           WHERE _run_id = ? AND granted = 0 AND ${clause}
+           GROUP BY _collected_at
+         ),
+         lock_pairs AS (
+           SELECT
+             b._collected_at,
+             COUNT(*) as blocking_pairs,
+             COUNT(DISTINCT bl.pid) as blocking_pids
+           FROM snap_pg_locks b
+           JOIN snap_pg_locks bl
+             ON ${lockObjectMatch('b', 'bl')}
+             AND b.pid != bl.pid
+             AND b.granted = 0
+             AND bl.granted = 1
+             AND ${lockConflictExpr('b.mode', 'bl.mode')}
+           WHERE b._run_id = ? AND ${clause.replace(/_phase/g, 'b._phase')}
+           GROUP BY b._collected_at
+         ),
+         observed AS (
+           SELECT _collected_at, pid
+           FROM snap_pg_locks
+           WHERE _run_id = ? AND ${clause}
+         )
+         SELECT
+           COALESCE((SELECT SUM(total_waited) FROM waits), 0) as total_waited,
+           COALESCE((SELECT SUM(blocking_pairs) FROM lock_pairs), 0) as blocking_pairs,
+           (SELECT COUNT(DISTINCT pid) FROM observed) as distinct_pids,
+           COALESCE((SELECT MAX(waiting_pids) FROM waits), 0) as waiting_pids,
+           COALESCE((SELECT MAX(blocking_pids) FROM lock_pairs), 0) as blocking_pids,
+           (SELECT COUNT(DISTINCT _collected_at) FROM observed) as snapshot_count`,
+        [rid, ...pParams, rid, ...pParams, rid, ...pParams]
       );
       lockSummary = { ...lockSummary, [rid]: (summaryRes.error || !summaryRes.rows[0]) ? null : (summaryRes.rows[0] as unknown as LockSummaryRow) };
 
-      // Lock activity over time (waiting vs holding PIDs per snapshot)
+      // Lock activity over time (waiting vs blocking PIDs per snapshot)
       const lockTimeRes = await queryApi(
-        `SELECT _collected_at,
-           COUNT(DISTINCT CASE WHEN granted = 0 THEN pid END) as waiting_pids,
-           COUNT(DISTINCT CASE WHEN granted = 1 THEN pid END) as holding_pids
-         FROM snap_pg_locks
-         WHERE _run_id = ? AND ${clause}
-         GROUP BY _collected_at ORDER BY _collected_at`,
-        [rid, ...pParams]
+        `WITH snapshots AS (
+           SELECT DISTINCT _collected_at
+           FROM snap_pg_locks
+           WHERE _run_id = ? AND ${clause}
+         ),
+         waiters AS (
+           SELECT
+             _collected_at,
+             COUNT(DISTINCT pid) as waiting_pids
+           FROM snap_pg_locks
+           WHERE _run_id = ? AND granted = 0 AND ${clause}
+           GROUP BY _collected_at
+         ),
+         lock_pairs AS (
+           SELECT DISTINCT
+             b._collected_at,
+             bl.pid as blocking_pid
+           FROM snap_pg_locks b
+           JOIN snap_pg_locks bl
+             ON ${lockObjectMatch('b', 'bl')}
+             AND b.pid != bl.pid
+             AND b.granted = 0
+             AND bl.granted = 1
+             AND ${lockConflictExpr('b.mode', 'bl.mode')}
+           WHERE b._run_id = ? AND ${clause.replace(/_phase/g, 'b._phase')}
+         ),
+         blockers AS (
+           SELECT
+             _collected_at,
+             COUNT(DISTINCT blocking_pid) as blocking_pids
+           FROM lock_pairs
+           GROUP BY _collected_at
+         )
+         SELECT
+           s._collected_at,
+           COALESCE(w.waiting_pids, 0) as waiting_pids,
+           COALESCE(b.blocking_pids, 0) as blocking_pids
+         FROM snapshots s
+         LEFT JOIN waiters w ON w._collected_at = s._collected_at
+         LEFT JOIN blockers b ON b._collected_at = s._collected_at
+         ORDER BY s._collected_at`,
+        [rid, ...pParams, rid, ...pParams, rid, ...pParams]
       );
       lockTimeData = { ...lockTimeData, [rid]: lockTimeRes.error ? [] : (lockTimeRes.rows as unknown as LockTimeRow[]) };
     }));
@@ -809,7 +951,7 @@
     const org = origin(run);
     return [
       { label: 'Waiting PIDs', color: '#d63300', points: rows.map(r => ({ t: toMs(r._collected_at, org), v: Number(r.waiting_pids) })) },
-      { label: 'Holding PIDs', color: '#0066cc', points: rows.map(r => ({ t: toMs(r._collected_at, org), v: Number(r.holding_pids) })) }
+      { label: 'Blocking PIDs', color: '#0066cc', points: rows.map(r => ({ t: toMs(r._collected_at, org), v: Number(r.blocking_pids) })) }
     ];
   }
 
@@ -1286,11 +1428,6 @@
   {#if !anyLocks}
     <div class="empty">No lock conflicts detected during this run. 🎉</div>
   {:else}
-    <div class="lock-sort-bar">
-      <span class="lock-sort-label">Sort tree:</span>
-      <button class="lock-sort-btn" class:active={lockSort === 'times_seen'} onclick={() => lockSort = 'times_seen'}>by duration</button>
-      <button class="lock-sort-btn" class:active={lockSort === 'pid'} onclick={() => lockSort = 'pid'}>by PID</button>
-    </div>
     {#each runs as run}
       {@const pairs = locksData[run.id] ?? []}
       {@const contention = contentionData[run.id] ?? []}
@@ -1303,7 +1440,7 @@
           <!-- Lock activity time-series chart -->
           {#if buildLockTimeSeries(run).some(s => s.points.length > 1)}
             <div style="margin-bottom:12px">
-              <LineChart series={buildLockTimeSeries(run)} title="Lock Activity (PIDs over time)" originMs={origin(run)} />
+              <LineChart series={buildLockTimeSeries(run)} title="Lock Contention (Waiting vs Blocking PIDs per snapshot)" originMs={origin(run)} />
             </div>
           {/if}
 
@@ -1311,9 +1448,16 @@
 
             <!-- ── Left: blocking chain tree ── -->
             <div class="lock-chain-col">
-              <div class="lock-subsec-title">
-                Lock Chain
-                <span class="lock-subsec-hint">ordered by {lockSort === 'times_seen' ? 'duration' : 'PID'} · max depth {MAX_LOCK_DEPTH}</span>
+              <div class="lock-chain-header">
+                <div class="lock-subsec-title">Lock Chain</div>
+                <div class="lock-chain-meta">
+                  <div class="lock-sort-bar">
+                    <span class="lock-sort-label">Sort by</span>
+                    <button class="lock-sort-btn" class:active={lockSort === 'times_seen'} onclick={() => lockSort = 'times_seen'}>Duration</button>
+                    <button class="lock-sort-btn" class:active={lockSort === 'pid'} onclick={() => lockSort = 'pid'}>PID</button>
+                  </div>
+                  <span class="lock-subsec-hint">Max depth {MAX_LOCK_DEPTH}</span>
+                </div>
               </div>
               <div class="lock-tree">
                 {#each tree as root, ri}
@@ -1339,20 +1483,24 @@
                       <span class="lsg-val lsg-hot">{summary.total_waited}</span>
                     </div>
                     <div class="lsg-cell">
-                      <span class="lsg-label">Total Held</span>
-                      <span class="lsg-val">{summary.total_held}</span>
+                      <span class="lsg-label">Blocking Pairs</span>
+                      <span class="lsg-val">{summary.blocking_pairs}</span>
                     </div>
                     <div class="lsg-cell">
-                      <span class="lsg-label">Waiting PIDs</span>
+                      <span class="lsg-label">Peak Waiting PIDs</span>
                       <span class="lsg-val lsg-hot">{summary.waiting_pids}</span>
                     </div>
                     <div class="lsg-cell">
-                      <span class="lsg-label">All PIDs</span>
+                      <span class="lsg-label">Peak Blocking PIDs</span>
+                      <span class="lsg-val">{summary.blocking_pids}</span>
+                    </div>
+                    <div class="lsg-cell">
+                      <span class="lsg-label">Observed PIDs</span>
                       <span class="lsg-val">{summary.distinct_pids}</span>
                     </div>
                     <div class="lsg-cell" style="grid-column:span 2">
-                      <span class="lsg-label">Contention Rate</span>
-                      <span class="lsg-val">{summary.total_held + summary.total_waited > 0 ? Math.round(summary.total_waited / (summary.total_held + summary.total_waited) * 100) : 0}% of lock observations were waits</span>
+                      <span class="lsg-label">Blocker Ratio</span>
+                      <span class="lsg-val">{summary.waiting_pids > 0 ? fmtExact(summary.blocking_pids / summary.waiting_pids, 2) : '0.00'} blocking PIDs per waiting PID were seen in lock pairs</span>
                     </div>
                   </div>
                 {:else if contention.length > 0}
@@ -1361,18 +1509,18 @@
                       <span>Resource</span>
                       {#if contentionGranularity === 'table+mode'}<span>Mode</span>{/if}
                       <span title="Lock wait observations">Wait</span>
-                      <span title="Lock held observations">Hold</span>
-                      <span title="Distinct PIDs waiting">PIDs Wait</span>
-                      <span title="Distinct PIDs holding">PIDs Hold</span>
+                      <span title="Blocking-pair observations">Block</span>
+                      <span title="Peak distinct PIDs waiting in any one snapshot">Peak PIDs Wait</span>
+                      <span title="Peak distinct blocker PIDs in any one snapshot">Peak PIDs Block</span>
                     </div>
                     {#each contention as r}
                       <div class="ct-row" class:ct-has-mode={contentionGranularity === 'table+mode'}>
                         <span class="ct-resource"><span class="ct-resname">{r.resource}</span></span>
                         {#if contentionGranularity === 'table+mode'}<span class="ct-mode">{r.mode ?? '—'}</span>{/if}
                         <span class="ct-waited-num">{r.lock_wait}</span>
-                        <span class="ct-held-num">{r.lock_hold}</span>
+                        <span class="ct-held-num">{r.lock_block}</span>
                         <span class="ct-pids-num ct-pids-wait">{r.pid_wait}</span>
-                        <span class="ct-pids-num">{r.pid_hold}</span>
+                        <span class="ct-pids-num">{r.pid_block}</span>
                       </div>
                     {/each}
                   </div>
@@ -1525,7 +1673,7 @@
   .waits-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
   .sql-panels { display: flex; flex-direction: column; gap: 16px; }
   /* ── Lock sort bar ── */
-  .lock-sort-bar { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; }
+  .lock-sort-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .lock-sort-label { font-size: 11px; color: #888; }
   .lock-sort-btn { background: none; border: 1px solid #ddd; border-radius: 3px; padding: 2px 10px; font-size: 11px; cursor: pointer; color: #555; }
   .lock-sort-btn:hover { background: #f0f4ff; }
@@ -1536,8 +1684,10 @@
   .lock-layout { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
   .lock-chain-col { flex: 1.6; min-width: 260px; }
   .lock-summary-col { flex: 1; min-width: 260px; }
-  .lock-subsec-title { font-size: 12px; font-weight: 700; color: #333; margin-bottom: 8px; }
-  .lock-subsec-hint { font-size: 10px; color: #aaa; font-weight: normal; margin-left: 6px; }
+  .lock-chain-header { margin-bottom: 8px; }
+  .lock-chain-meta { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+  .lock-subsec-title { font-size: 12px; font-weight: 700; color: #333; margin-bottom: 6px; }
+  .lock-subsec-hint { font-size: 10px; color: #aaa; font-weight: normal; }
 
   /* ── Tree rows ── */
   .lock-tree { border: 1px solid #e8e8e8; border-radius: 6px; overflow: hidden; }
