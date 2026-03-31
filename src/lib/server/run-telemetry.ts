@@ -97,11 +97,6 @@ const METRIC_INFO: Partial<Record<string, string>> = {
 		'Share of block access served from shared buffers instead of disk: blks_hit / (blks_hit + blks_read). Higher is usually better.',
 	temp_bytes:
 		'Bytes written to temporary files during the selected phases. Higher values often mean sorts or hashes spilled to disk.',
-	total_conflicts:
-		'Total recovery conflicts reported by pg_stat_database_conflicts across all tracked conflict types.',
-	lock_conflicts: 'Recovery conflicts caused by locks blocking standby queries.',
-	snapshot_conflicts: 'Recovery conflicts caused by snapshots that would block cleanup or replay.',
-	deadlock_conflicts: 'Recovery conflicts caused by deadlocks during recovery.',
 	wal_bytes: 'Total WAL volume generated, calculated from the pg_stat_wal.wal_bytes delta.',
 	wal_bytes_per_tx:
 		'Average WAL volume per transaction: WAL bytes divided by total transactions. This helps compare write amplification between designs.',
@@ -156,7 +151,12 @@ const METRIC_INFO: Partial<Record<string, string>> = {
 		'Total time PostgreSQL spent writing buffers during checkpoints, shown as the delta of pg_stat_checkpointer.write_time.',
 	sync_time:
 		'Total time PostgreSQL spent syncing checkpoint files to disk, shown as the delta of pg_stat_checkpointer.sync_time.',
-	deadlocks: 'Number of deadlocks reported by pg_stat_database during the selected phases.'
+	deadlocks: 'Number of deadlocks reported by pg_stat_database during the selected phases.',
+	sequence_activity: 'Sequence block activity, calculated as blks_read + blks_hit across tracked user sequences.',
+	sequence_hits: 'Sequence blocks served from shared buffers across tracked user sequences.',
+	sequence_reads: 'Sequence blocks read from disk across tracked user sequences.',
+	sequence_hit_ratio:
+		'Average share of sequence block access served from cache across tracked user sequences.'
 };
 
 function parsePhases(phases?: string[]): TelemetryPhase[] {
@@ -440,7 +440,6 @@ function detectAvailablePhases(db: Database.Database, runId: number, databaseNam
 	const phases = new Set<TelemetryPhase>();
 	const phaseSources: Array<{ table: string; datnameColumn?: string }> = [
 		{ table: 'snap_pg_stat_database', datnameColumn: 'datname' },
-		{ table: 'snap_pg_stat_database_conflicts', datnameColumn: 'datname' },
 		{ table: 'snap_pg_stat_wal' },
 		{ table: 'snap_pg_stat_bgwriter' },
 		{ table: 'snap_pg_stat_checkpointer' },
@@ -449,7 +448,8 @@ function detectAvailablePhases(db: Database.Database, runId: number, databaseNam
 		{ table: 'snap_pg_stat_user_tables' },
 		{ table: 'snap_pg_stat_user_indexes' },
 		{ table: 'snap_pg_statio_user_tables' },
-		{ table: 'snap_pg_statio_user_indexes' }
+		{ table: 'snap_pg_statio_user_indexes' },
+		{ table: 'snap_pg_statio_user_sequences' }
 	];
 
 	for (const source of phaseSources) {
@@ -541,75 +541,6 @@ function buildDatabaseSection(rows: SnapshotRow[], runStartMs: number): Telemetr
 			{ metric: 'Deadlocks', value: deadlocks, kind: 'count' },
 			{ metric: 'Block read time (ms)', value: delta(rows, 'blk_read_time'), kind: 'duration_ms' },
 			{ metric: 'Block write time (ms)', value: delta(rows, 'blk_write_time'), kind: 'duration_ms' }
-		])
-	};
-}
-
-function buildDatabaseConflictsSection(rows: SnapshotRow[], runStartMs: number): TelemetrySection {
-	const lock = delta(rows, 'confl_lock');
-	const snapshot = delta(rows, 'confl_snapshot');
-	const deadlock = delta(rows, 'confl_deadlock');
-	const total = sum([lock, snapshot, deadlock, delta(rows, 'confl_tablespace'), delta(rows, 'confl_bufferpin'), delta(rows, 'confl_active_logicalslot')]);
-
-	if (rows.length === 0) {
-		return {
-			key: 'database_conflicts',
-			label: 'Database Conflicts',
-			status: 'no_data',
-			reason: 'No pg_stat_database_conflicts snapshots were collected for the selected phases.',
-			summary: [],
-			chartTitle: 'Conflict types',
-			chartSeries: [],
-			tableTitle: 'Conflict metrics',
-			tableColumns: [],
-			tableRows: []
-		};
-	}
-
-	return {
-		key: 'database_conflicts',
-		label: 'Database Conflicts',
-		status: 'ok',
-		summary: [
-			metricCard('total_conflicts', 'Total Conflicts', 'count', total),
-			metricCard('lock_conflicts', 'Lock Conflicts', 'count', lock),
-			metricCard('snapshot_conflicts', 'Snapshot Conflicts', 'count', snapshot),
-			metricCard('deadlock_conflicts', 'Deadlock Conflicts', 'count', deadlock)
-		],
-		chartTitle: 'Conflict types over time',
-		chartSeries: buildMetricSeries(rows, runStartMs, [
-			{
-				label: 'total conflicts',
-				valueFn: (row) =>
-					sum([
-						toNumber(row.confl_lock),
-						toNumber(row.confl_snapshot),
-						toNumber(row.confl_deadlock),
-						toNumber(row.confl_tablespace),
-						toNumber(row.confl_bufferpin),
-						toNumber(row.confl_active_logicalslot)
-					])
-			},
-			{ label: 'lock', valueFn: (row) => toNumber(row.confl_lock) },
-			{ label: 'snapshot', valueFn: (row) => toNumber(row.confl_snapshot) },
-			{ label: 'deadlock', valueFn: (row) => toNumber(row.confl_deadlock) },
-			{ label: 'tablespace', valueFn: (row) => toNumber(row.confl_tablespace) },
-			{ label: 'buffer pin', valueFn: (row) => toNumber(row.confl_bufferpin) },
-			{ label: 'logical slot', valueFn: (row) => toNumber(row.confl_active_logicalslot) }
-		]),
-		tableTitle: 'Conflict metrics',
-		tableColumns: [
-			{ key: 'metric', label: 'Metric', kind: 'text' },
-			{ key: 'value', label: 'Value', kind: 'count' }
-		],
-		tableRows: makeMetricRows([
-			{ metric: 'Total conflicts', value: total, kind: 'count' },
-			{ metric: 'Lock conflicts', value: lock, kind: 'count' },
-			{ metric: 'Snapshot conflicts', value: snapshot, kind: 'count' },
-			{ metric: 'Deadlock conflicts', value: deadlock, kind: 'count' },
-			{ metric: 'Tablespace conflicts', value: delta(rows, 'confl_tablespace'), kind: 'count' },
-			{ metric: 'Buffer pin conflicts', value: delta(rows, 'confl_bufferpin'), kind: 'count' },
-			{ metric: 'Logical slot conflicts', value: delta(rows, 'confl_active_logicalslot'), kind: 'count' }
 		])
 	};
 }
@@ -1319,6 +1250,104 @@ function buildStatioUserIndexesSection(rows: SnapshotRow[], runStartMs: number):
 	};
 }
 
+function buildStatioUserSequencesSection(rows: SnapshotRow[], runStartMs: number): TelemetrySection {
+	if (rows.length === 0) {
+		return {
+			key: 'statio_user_sequences',
+			label: 'Statio User Sequences',
+			status: 'no_data',
+			reason: 'No pg_statio_user_sequences snapshots were collected for the selected phases.',
+			summary: [],
+			chartTitle: 'Top sequences by block activity',
+			chartSeries: [],
+			tableTitle: 'Top sequences',
+			tableColumns: [],
+			tableRows: []
+		};
+	}
+
+	const grouped = groupRows(rows, (row) => String(row.relname ?? 'unknown'));
+	const entries = [...grouped.entries()].map(([relname, bucket]) => {
+		const sequenceReads = delta(bucket, 'blks_read');
+		const sequenceHits = delta(bucket, 'blks_hit');
+		return {
+			key: relname,
+			label: relname,
+			rows: bucket,
+			sequenceActivity: sum([sequenceReads, sequenceHits]),
+			sequenceReads,
+			sequenceHits,
+			sequenceHitRatio: safeRatio(sequenceHits, sum([sequenceHits, sequenceReads]))
+		};
+	});
+	const topSequences = topEntries(entries, (entry) => entry.sequenceActivity);
+	const chartMetrics = buildGroupedMetricCharts(entries, runStartMs, [
+		{
+			key: 'sequence_activity',
+			label: 'Sequence Activity',
+			kind: 'count',
+			title: 'Top sequences by block activity over time',
+			scoreFn: (entry) => entry.sequenceActivity,
+			seriesValueAt: (groupRows, index) => sumDeltaAt(groupRows, index, ['blks_read', 'blks_hit'])
+		},
+		{
+			key: 'sequence_hits',
+			label: 'Sequence Hits',
+			kind: 'count',
+			title: 'Top sequences by block hits over time',
+			scoreFn: (entry) => entry.sequenceHits,
+			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'blks_hit')
+		},
+		{
+			key: 'sequence_reads',
+			label: 'Sequence Reads',
+			kind: 'count',
+			title: 'Top sequences by block reads over time',
+			scoreFn: (entry) => entry.sequenceReads,
+			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'blks_read')
+		},
+		{
+			key: 'sequence_hit_ratio',
+			label: 'Sequence Hit Ratio',
+			kind: 'percent',
+			title: 'Top sequences by hit ratio over time',
+			scoreFn: (entry) => entry.sequenceHitRatio,
+			seriesValueAt: (groupRows, index) => ratioAt(groupRows, index, 'blks_hit', ['blks_hit', 'blks_read'])
+		}
+	]);
+
+	return {
+		key: 'statio_user_sequences',
+		label: 'Statio User Sequences',
+		status: 'ok',
+		summary: [
+			metricCard('sequence_activity', 'Sequence Activity', 'count', sum(entries.map((entry) => entry.sequenceActivity))),
+			metricCard('sequence_hits', 'Sequence Hits', 'count', sum(entries.map((entry) => entry.sequenceHits))),
+			metricCard('sequence_reads', 'Sequence Reads', 'count', sum(entries.map((entry) => entry.sequenceReads))),
+			metricCard('sequence_hit_ratio', 'Sequence Hit Ratio', 'percent', safeRatio(sum(entries.map((entry) => entry.sequenceHitRatio)), entries.length || null))
+		],
+		chartTitle: chartMetrics[0]?.title ?? 'Top sequences by block activity over time',
+		chartSeries: chartMetrics[0]?.series ?? [],
+		chartMetrics,
+		defaultChartMetricKey: chartMetrics[0]?.key,
+		tableTitle: 'Top sequences by block activity',
+		tableColumns: [
+			{ key: 'sequence', label: 'Sequence', kind: 'text' },
+			{ key: 'sequence_activity', label: 'Sequence Activity', kind: 'count' },
+			{ key: 'sequence_hits', label: 'Sequence Hits', kind: 'count' },
+			{ key: 'sequence_reads', label: 'Sequence Reads', kind: 'count' },
+			{ key: 'sequence_hit_ratio', label: 'Sequence Hit Ratio', kind: 'percent' }
+		],
+		tableRows: topSequences.map((entry) => ({
+			sequence: entry.label,
+			sequence_activity: entry.sequenceActivity,
+			sequence_hits: entry.sequenceHits,
+			sequence_reads: entry.sequenceReads,
+			sequence_hit_ratio: entry.sequenceHitRatio
+		}))
+	};
+}
+
 function buildCheckpointerSection(rows: SnapshotRow[], runStartMs: number): TelemetrySection {
 	const numTimed = delta(rows, 'num_timed');
 	const numRequested = delta(rows, 'num_requested');
@@ -1395,10 +1424,6 @@ export function buildRunTelemetry(db: Database.Database, runId: number, phases?:
 		databaseName: run.database,
 		datnameColumn: 'datname'
 	});
-	const conflictRows = fetchRows(db, 'snap_pg_stat_database_conflicts', runId, selectedPhases, {
-		databaseName: run.database,
-		datnameColumn: 'datname'
-	});
 	const walRows = fetchRows(db, 'snap_pg_stat_wal', runId, selectedPhases);
 	const bgwriterRows = fetchRows(db, 'snap_pg_stat_bgwriter', runId, selectedPhases);
 	const checkpointerRows = fetchRows(db, 'snap_pg_stat_checkpointer', runId, selectedPhases);
@@ -1408,12 +1433,12 @@ export function buildRunTelemetry(db: Database.Database, runId: number, phases?:
 	const userIndexRows = fetchRows(db, 'snap_pg_stat_user_indexes', runId, selectedPhases);
 	const statioUserTableRows = fetchRows(db, 'snap_pg_statio_user_tables', runId, selectedPhases);
 	const statioUserIndexRows = fetchRows(db, 'snap_pg_statio_user_indexes', runId, selectedPhases);
+	const statioUserSequenceRows = fetchRows(db, 'snap_pg_statio_user_sequences', runId, selectedPhases);
 
 	const databaseSection = buildDatabaseSection(databaseRows, runStartMs);
 	const walSection = buildWalSection(walRows, runStartMs, toNumber(databaseSection.summary.find((card) => card.key === 'transactions')?.value));
 	const sections: TelemetrySection[] = [
 		databaseSection,
-		buildDatabaseConflictsSection(conflictRows, runStartMs),
 		walSection,
 		buildBgwriterSection(bgwriterRows, runStartMs),
 		buildCheckpointerSection(checkpointerRows, runStartMs),
@@ -1422,7 +1447,8 @@ export function buildRunTelemetry(db: Database.Database, runId: number, phases?:
 		buildUserTablesSection(userTableRows, runStartMs),
 		buildUserIndexesSection(userIndexRows, runStartMs),
 		buildStatioUserTablesSection(statioUserTableRows, runStartMs),
-		buildStatioUserIndexesSection(statioUserIndexRows, runStartMs)
+		buildStatioUserIndexesSection(statioUserIndexRows, runStartMs),
+		buildStatioUserSequencesSection(statioUserSequenceRows, runStartMs)
 	];
 
 	const markers: TelemetryMarker[] = [];

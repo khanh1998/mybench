@@ -122,6 +122,16 @@ function createDb() {
       heap_blks_hit INTEGER,
       toast_blks_read INTEGER
     );
+    CREATE TABLE snap_pg_statio_user_sequences (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL,
+      _collected_at TEXT NOT NULL,
+      _phase TEXT NOT NULL,
+      schemaname TEXT,
+      relname TEXT,
+      blks_read INTEGER,
+      blks_hit INTEGER
+    );
   `);
 	return db;
 }
@@ -214,6 +224,15 @@ function seedRun(db: Database.Database) {
 	insertStatioUserTableRow.run(1, '2026-03-30T05:58:19Z', 'bench', 'table_a', 0, 260, 0);
 	insertStatioUserTableRow.run(1, '2026-03-30T05:57:59Z', 'bench', 'table_b', 0, 50, 0);
 	insertStatioUserTableRow.run(1, '2026-03-30T05:58:19Z', 'bench', 'table_b', 0, 140, 0);
+
+	const insertStatioUserSequenceRow = db.prepare(`
+    INSERT INTO snap_pg_statio_user_sequences (_run_id, _collected_at, _phase, schemaname, relname, blks_read, blks_hit)
+    VALUES (?, ?, ?, 'public', ?, ?, ?)
+  `);
+	insertStatioUserSequenceRow.run(1, '2026-03-30T05:57:59Z', 'bench', 'seq_a', 0, 20);
+	insertStatioUserSequenceRow.run(1, '2026-03-30T05:58:19Z', 'bench', 'seq_a', 4, 80);
+	insertStatioUserSequenceRow.run(1, '2026-03-30T05:57:59Z', 'bench', 'seq_b', 1, 10);
+	insertStatioUserSequenceRow.run(1, '2026-03-30T05:58:19Z', 'bench', 'seq_b', 3, 35);
 }
 
 describe('buildRunTelemetry', () => {
@@ -274,7 +293,6 @@ describe('buildRunTelemetry', () => {
 		const telemetry = buildRunTelemetry(db, 1, ['bench']);
 		const wal = telemetry.sections.find((section) => section.key === 'wal');
 		const database = telemetry.sections.find((section) => section.key === 'database');
-		const conflicts = telemetry.sections.find((section) => section.key === 'database_conflicts');
 		const io = telemetry.sections.find((section) => section.key === 'io');
 
 		expect(database?.chartSeries.map((series) => series.label)).toEqual([
@@ -286,15 +304,7 @@ describe('buildRunTelemetry', () => {
 			'temp bytes',
 			'deadlocks'
 		]);
-		expect(conflicts?.chartSeries.map((series) => series.label)).toEqual([
-			'total conflicts',
-			'lock',
-			'snapshot',
-			'deadlock',
-			'tablespace',
-			'buffer pin',
-			'logical slot'
-		]);
+		expect(telemetry.sections.some((section) => section.key === 'database_conflicts')).toBe(false);
 		expect(wal?.chartSeries.map((series) => series.label)).toEqual([
 			'wal bytes',
 			'wal records',
@@ -407,6 +417,40 @@ describe('buildRunTelemetry', () => {
 			'seq_scan_ratio',
 			'hot_update_ratio',
 			'dead_tuple_growth'
+		]);
+	});
+
+	it('adds pg_statio_user_sequences telemetry with sequence block activity and hit ratio', () => {
+		const telemetry = buildRunTelemetry(db, 1, ['bench']);
+		const statioSequences = telemetry.sections.find((section) => section.key === 'statio_user_sequences');
+
+		expect(statioSequences?.summary.map((card) => [card.key, card.value])).toEqual([
+			['sequence_activity', 91],
+			['sequence_hits', 85],
+			['sequence_reads', 6],
+			['sequence_hit_ratio', 0.931712962962963]
+		]);
+		expect(statioSequences?.chartMetrics?.map((metric) => metric.key)).toEqual([
+			'sequence_activity',
+			'sequence_hits',
+			'sequence_reads',
+			'sequence_hit_ratio'
+		]);
+		expect(statioSequences?.tableRows).toEqual([
+			{
+				sequence: 'seq_a',
+				sequence_activity: 64,
+				sequence_hits: 60,
+				sequence_reads: 4,
+				sequence_hit_ratio: 0.9375
+			},
+			{
+				sequence: 'seq_b',
+				sequence_activity: 27,
+				sequence_hits: 25,
+				sequence_reads: 2,
+				sequence_hit_ratio: 0.9259259259259259
+			}
 		]);
 	});
 });
