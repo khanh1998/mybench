@@ -30,6 +30,15 @@
     total_plan_time: number; delta_temp_blks_read: number; delta_wal_bytes: number;
     snapshot_count: number; bench_secs: number;
   }
+  type StatementMetricFormat = 'integer' | 'decimal' | 'ms' | 'bytes' | 'bool' | 'text';
+  interface StatementMetricDefinition { key: string; label: string; format: StatementMetricFormat; }
+  interface StatementMetricGroup { title: string; note: string; metrics: StatementMetricDefinition[]; }
+  interface StatementMetrics {
+    snapshotCount: number;
+    firstCollectedAt: string | null;
+    lastCollectedAt: string | null;
+    values: Record<string, number | string | null>;
+  }
   interface ActiveLockNode { node: LockNode; runLabel: string; }
   interface ContentionRow {
     resource: string;
@@ -82,6 +91,181 @@
   };
   const WAIT_ORDER = ['CPU', 'IO', 'Lock', 'LWLock', 'Client', 'IPC', 'Extension', 'Timeout', 'Activity', 'BufferPin', 'Other'];
   const RUN_COLORS = ['#0066cc', '#e6531d', '#00996b', '#9b36b7', '#cc8800'];
+  const PGSS_COUNTER_KEYS = [
+    'plans',
+    'total_plan_time',
+    'calls',
+    'total_exec_time',
+    'rows',
+    'shared_blks_hit',
+    'shared_blks_read',
+    'shared_blks_dirtied',
+    'shared_blks_written',
+    'local_blks_hit',
+    'local_blks_read',
+    'local_blks_dirtied',
+    'local_blks_written',
+    'temp_blks_read',
+    'temp_blks_written',
+    'shared_blk_read_time',
+    'shared_blk_write_time',
+    'local_blk_read_time',
+    'local_blk_write_time',
+    'temp_blk_read_time',
+    'temp_blk_write_time',
+    'wal_records',
+    'wal_fpi',
+    'wal_bytes',
+    'wal_buffers_full',
+    'jit_functions',
+    'jit_generation_time',
+    'jit_inlining_count',
+    'jit_inlining_time',
+    'jit_optimization_count',
+    'jit_optimization_time',
+    'jit_emission_count',
+    'jit_emission_time',
+    'jit_deform_count',
+    'jit_deform_time',
+    'parallel_workers_to_launch',
+    'parallel_workers_launched'
+  ] as const;
+  const PGSS_RATE_KEYS = new Set<string>(PGSS_COUNTER_KEYS as readonly string[]);
+  const PGSS_LATEST_KEYS = [
+    'queryid',
+    'userid',
+    'dbid',
+    'toplevel',
+    'min_plan_time',
+    'max_plan_time',
+    'mean_plan_time',
+    'stddev_plan_time',
+    'min_exec_time',
+    'max_exec_time',
+    'mean_exec_time',
+    'stddev_exec_time',
+    'stats_since',
+    'minmax_stats_since'
+  ] as const;
+  const STATEMENT_METRIC_GROUPS: StatementMetricGroup[] = [
+    {
+      title: 'Identity',
+      note: 'Metadata for the normalized statement entry captured by pg_stat_statements.',
+      metrics: [
+        { key: 'queryid', label: 'Query ID', format: 'text' },
+        { key: 'toplevel', label: 'Top Level', format: 'bool' },
+        { key: 'userid', label: 'User ID', format: 'integer' },
+        { key: 'dbid', label: 'DB ID', format: 'integer' },
+        { key: 'stats_since', label: 'Stats Since', format: 'text' },
+        { key: 'minmax_stats_since', label: 'Min/Max Since', format: 'text' }
+      ]
+    },
+    {
+      title: 'Calls And Rows',
+      note: 'Cumulative counters for executions, planning, and produced rows.',
+      metrics: [
+        { key: 'calls', label: 'Calls', format: 'integer' },
+        { key: 'plans', label: 'Plans', format: 'integer' },
+        { key: 'rows', label: 'Rows', format: 'integer' }
+      ]
+    },
+    {
+      title: 'Execution Time',
+      note: 'Execution latency metrics. Total is cumulative; min/max/mean/stddev come from the latest snapshot.',
+      metrics: [
+        { key: 'total_exec_time', label: 'Total Exec Time', format: 'ms' },
+        { key: 'min_exec_time', label: 'Min Exec Time', format: 'ms' },
+        { key: 'max_exec_time', label: 'Max Exec Time', format: 'ms' },
+        { key: 'mean_exec_time', label: 'Mean Exec Time', format: 'ms' },
+        { key: 'stddev_exec_time', label: 'Stddev Exec Time', format: 'ms' }
+      ]
+    },
+    {
+      title: 'Planning Time',
+      note: 'Planner timing metrics for statements that required planning.',
+      metrics: [
+        { key: 'total_plan_time', label: 'Total Plan Time', format: 'ms' },
+        { key: 'min_plan_time', label: 'Min Plan Time', format: 'ms' },
+        { key: 'max_plan_time', label: 'Max Plan Time', format: 'ms' },
+        { key: 'mean_plan_time', label: 'Mean Plan Time', format: 'ms' },
+        { key: 'stddev_plan_time', label: 'Stddev Plan Time', format: 'ms' }
+      ]
+    },
+    {
+      title: 'Shared Buffers',
+      note: 'Shared buffer activity for this statement.',
+      metrics: [
+        { key: 'shared_blks_hit', label: 'Hits', format: 'integer' },
+        { key: 'shared_blks_read', label: 'Reads', format: 'integer' },
+        { key: 'shared_blks_dirtied', label: 'Dirtied', format: 'integer' },
+        { key: 'shared_blks_written', label: 'Written', format: 'integer' }
+      ]
+    },
+    {
+      title: 'Local Buffers',
+      note: 'Local buffer activity for local temporary relations.',
+      metrics: [
+        { key: 'local_blks_hit', label: 'Hits', format: 'integer' },
+        { key: 'local_blks_read', label: 'Reads', format: 'integer' },
+        { key: 'local_blks_dirtied', label: 'Dirtied', format: 'integer' },
+        { key: 'local_blks_written', label: 'Written', format: 'integer' }
+      ]
+    },
+    {
+      title: 'Temp Buffers',
+      note: 'Temporary block usage caused by this statement.',
+      metrics: [
+        { key: 'temp_blks_read', label: 'Temp Reads', format: 'integer' },
+        { key: 'temp_blks_written', label: 'Temp Writes', format: 'integer' }
+      ]
+    },
+    {
+      title: 'Block I/O Time',
+      note: 'Time spent reading and writing blocks by storage class.',
+      metrics: [
+        { key: 'shared_blk_read_time', label: 'Shared Read Time', format: 'ms' },
+        { key: 'shared_blk_write_time', label: 'Shared Write Time', format: 'ms' },
+        { key: 'local_blk_read_time', label: 'Local Read Time', format: 'ms' },
+        { key: 'local_blk_write_time', label: 'Local Write Time', format: 'ms' },
+        { key: 'temp_blk_read_time', label: 'Temp Read Time', format: 'ms' },
+        { key: 'temp_blk_write_time', label: 'Temp Write Time', format: 'ms' }
+      ]
+    },
+    {
+      title: 'WAL',
+      note: 'Write-ahead log volume generated by this statement.',
+      metrics: [
+        { key: 'wal_records', label: 'WAL Records', format: 'integer' },
+        { key: 'wal_fpi', label: 'Full Page Images', format: 'integer' },
+        { key: 'wal_bytes', label: 'WAL Bytes', format: 'bytes' },
+        { key: 'wal_buffers_full', label: 'WAL Buffers Full', format: 'integer' }
+      ]
+    },
+    {
+      title: 'JIT',
+      note: 'JIT compilation activity and time spent in each JIT stage.',
+      metrics: [
+        { key: 'jit_functions', label: 'Functions', format: 'integer' },
+        { key: 'jit_generation_time', label: 'Generation Time', format: 'ms' },
+        { key: 'jit_inlining_count', label: 'Inlining Count', format: 'integer' },
+        { key: 'jit_inlining_time', label: 'Inlining Time', format: 'ms' },
+        { key: 'jit_optimization_count', label: 'Optimization Count', format: 'integer' },
+        { key: 'jit_optimization_time', label: 'Optimization Time', format: 'ms' },
+        { key: 'jit_emission_count', label: 'Emission Count', format: 'integer' },
+        { key: 'jit_emission_time', label: 'Emission Time', format: 'ms' },
+        { key: 'jit_deform_count', label: 'Deform Count', format: 'integer' },
+        { key: 'jit_deform_time', label: 'Deform Time', format: 'ms' }
+      ]
+    },
+    {
+      title: 'Parallel',
+      note: 'Planned and launched parallel workers across calls.',
+      metrics: [
+        { key: 'parallel_workers_to_launch', label: 'Workers To Launch', format: 'integer' },
+        { key: 'parallel_workers_launched', label: 'Workers Launched', format: 'integer' }
+      ]
+    }
+  ];
 
   // ── State ──────────────────────────────────────────────────────────────────
   let localPhases = $state<string[]>(phases);
@@ -490,6 +674,12 @@
     if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
     return String(Math.round(n));
   }
+  function fmtExact(n: number, maxFractionDigits = 2): string {
+    return n.toLocaleString(undefined, {
+      minimumFractionDigits: Number.isInteger(n) ? 0 : 1,
+      maximumFractionDigits: maxFractionDigits
+    });
+  }
   function fmtBytes(b: number): string {
     if (b >= 1073741824) return (b / 1073741824).toFixed(1) + ' GB';
     if (b >= 1048576) return (b / 1048576).toFixed(1) + ' MB';
@@ -523,6 +713,95 @@
   }
   function fmtTs(iso: string): string {
     return new Date(iso).toLocaleTimeString();
+  }
+  function fmtDateTime(iso: string | null): string {
+    return iso ? new Date(iso).toLocaleString() : '—';
+  }
+  function fmtPerSecValue(n: number, format: StatementMetricFormat, secs: number): string {
+    if (!secs) return '—';
+    const v = n / secs;
+    if (format === 'ms') {
+      if (v >= 1000) return `${(v / 1000).toFixed(3)}s/s`;
+      return `${fmtExact(v, 1)}ms/s`;
+    }
+    if (format === 'bytes') return `${fmtBytes(v)}/s`;
+    return `${fmtExact(v, 2)}/s`;
+  }
+  function metricNumber(value: unknown): number | null {
+    if (value == null || value === '') return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+  function metricText(value: unknown): string | null {
+    if (value == null || value === '') return null;
+    return String(value);
+  }
+  function buildStatementMetrics(rows: Record<string, unknown>[]): StatementMetrics | null {
+    if (rows.length === 0) return null;
+
+    const first = rows[0];
+    const last = rows[rows.length - 1];
+    const values: Record<string, number | string | null> = {};
+
+    for (const key of PGSS_COUNTER_KEYS) {
+      const end = metricNumber(last[key]);
+      if (end == null) {
+        values[key] = null;
+        continue;
+      }
+      if (rows.length === 1) {
+        values[key] = end;
+        continue;
+      }
+      const start = metricNumber(first[key]) ?? 0;
+      values[key] = end >= start ? end - start : end;
+    }
+
+    for (const key of PGSS_LATEST_KEYS) {
+      values[key] = key === 'queryid' || key === 'stats_since' || key === 'minmax_stats_since'
+        ? metricText(last[key])
+        : metricNumber(last[key]);
+    }
+
+    return {
+      snapshotCount: rows.length,
+      firstCollectedAt: metricText(first._collected_at),
+      lastCollectedAt: metricText(last._collected_at),
+      values
+    };
+  }
+  function statementGroupNote(group: StatementMetricGroup): string {
+    if (sqlMode !== 'persec' || group.title === 'Identity') return group.note;
+    if (group.title === 'Execution Time' || group.title === 'Planning Time') {
+      return `${group.note} Total time is normalized per second in this view; min/max/mean/stddev stay absolute.`;
+    }
+    return `${group.note} Values are normalized by wall-clock benchmark duration in this view.`;
+  }
+  function formatStatementMetric(
+    key: string,
+    value: number | string | null | undefined,
+    format: StatementMetricFormat,
+    secs: number
+  ): string {
+    if (value == null || value === '') return '—';
+    if (format === 'text') return String(value);
+    if (format === 'bool') return Number(value) ? 'Yes' : 'No';
+
+    const n = Number(value);
+    if (!Number.isFinite(n)) return '—';
+    if (sqlMode === 'persec' && PGSS_RATE_KEYS.has(key)) {
+      return fmtPerSecValue(n, format, secs);
+    }
+    if (format === 'ms') return fmtMs(n);
+    if (format === 'bytes') return fmtBytes(n);
+    if (format === 'decimal') return fmtExact(n, 2);
+    return fmtExact(n, 0);
+  }
+  function statementSnapshotNote(metrics: StatementMetrics): string {
+    if (metrics.snapshotCount > 1) {
+      return `Cumulative counters are shown as deltas from ${fmtDateTime(metrics.firstCollectedAt)} to ${fmtDateTime(metrics.lastCollectedAt)}. Min/max/mean/stddev fields come from the latest snapshot.`;
+    }
+    return `Only one pg_stat_statements snapshot was collected at ${fmtDateTime(metrics.lastCollectedAt)}, so cumulative fields are shown as absolute values.`;
   }
 
   function buildLockTimeSeries(run: RunMeta) {
@@ -568,11 +847,8 @@
   interface ActiveFlame {
     runId: number; queryId: string; queryShort: string; queryFull: string;
     totalExecMs: number; items: FlameItem[]; noData: boolean; fallback: boolean;
-    // Rich stats from pg_stat_statements
-    deltaCalls: number; deltaRows: number; benchSecs: number;
-    meanExecMs: number; maxExecMs: number; stddevMs: number;
-    totalPlanMs: number; deltaBlksRead: number; deltaTempBlks: number; deltaWalBytes: number;
-    cacheHitPct: number | null;
+    statementMetrics: StatementMetrics | null;
+    benchSecs: number;
   }
   let activeFlame = $state<ActiveFlame | null>(null);
   let flameLoading = $state(false);
@@ -587,19 +863,81 @@
 
     // queryid is already a TEXT string from the SQL query (CAST(queryid AS TEXT))
     // so no float64 precision loss. Compare as text in SQLite.
-    const res = await queryApi(
-      `SELECT COALESCE(wait_event_type,'CPU') as wtype,
-              COALESCE(wait_event,'running') as wevent,
-              COUNT(*) as samples
-       FROM snap_pg_stat_activity
-       WHERE _run_id = ? AND ${clause}
-         AND state = 'active'
-         AND CAST(query_id AS TEXT) = ?
-       GROUP BY 1,2 ORDER BY 3 DESC`,
-      [run.id, ...pParams, row.queryid]);
+    const [res, statementRes] = await Promise.all([
+      queryApi(
+        `SELECT COALESCE(wait_event_type,'CPU') as wtype,
+                COALESCE(wait_event,'running') as wevent,
+                COUNT(*) as samples
+         FROM snap_pg_stat_activity
+         WHERE _run_id = ? AND ${clause}
+           AND state = 'active'
+           AND CAST(query_id AS TEXT) = ?
+         GROUP BY 1,2 ORDER BY 3 DESC`,
+        [run.id, ...pParams, row.queryid]
+      ),
+      queryApi(
+        `SELECT _collected_at,
+                userid,
+                dbid,
+                toplevel,
+                CAST(queryid AS TEXT) as queryid,
+                plans,
+                total_plan_time,
+                min_plan_time,
+                max_plan_time,
+                mean_plan_time,
+                stddev_plan_time,
+                calls,
+                total_exec_time,
+                min_exec_time,
+                max_exec_time,
+                mean_exec_time,
+                stddev_exec_time,
+                rows,
+                shared_blks_hit,
+                shared_blks_read,
+                shared_blks_dirtied,
+                shared_blks_written,
+                local_blks_hit,
+                local_blks_read,
+                local_blks_dirtied,
+                local_blks_written,
+                temp_blks_read,
+                temp_blks_written,
+                shared_blk_read_time,
+                shared_blk_write_time,
+                local_blk_read_time,
+                local_blk_write_time,
+                temp_blk_read_time,
+                temp_blk_write_time,
+                wal_records,
+                wal_fpi,
+                wal_bytes,
+                wal_buffers_full,
+                jit_functions,
+                jit_generation_time,
+                jit_inlining_count,
+                jit_inlining_time,
+                jit_optimization_count,
+                jit_optimization_time,
+                jit_emission_count,
+                jit_emission_time,
+                jit_deform_count,
+                jit_deform_time,
+                parallel_workers_to_launch,
+                parallel_workers_launched,
+                stats_since,
+                minmax_stats_since
+         FROM snap_pg_stat_statements
+         WHERE _run_id = ? AND CAST(queryid AS TEXT) = ?
+         ORDER BY _collected_at`,
+        [run.id, row.queryid]
+      )
+    ]);
 
     let rawItems = res.rows as { wtype: string; wevent: string; samples: number }[];
     let fallback = false;
+    const statementMetrics = buildStatementMetrics(statementRes.rows);
 
     // If per-query match found nothing, fall back to run-wide wait distribution
     if (rawItems.length === 0) {
@@ -636,17 +974,8 @@
       items,
       noData: items.length === 0,
       fallback,
-      deltaCalls: Number(row.delta_calls ?? 0),
-      deltaRows: Number(row.delta_rows ?? 0),
+      statementMetrics,
       benchSecs: runBenchSecs(run),
-      meanExecMs: Number(row.mean_exec_time ?? 0),
-      maxExecMs: Number(row.max_exec_time ?? 0),
-      stddevMs: Number(row.stddev_exec_time ?? 0),
-      totalPlanMs: Number(row.total_plan_time ?? 0),
-      deltaBlksRead: Number(row.delta_blks_read ?? 0),
-      deltaTempBlks: Number(row.delta_temp_blks_read ?? 0),
-      deltaWalBytes: Number(row.delta_wal_bytes ?? 0),
-      cacheHitPct: row.cache_hit_pct != null ? Number(row.cache_hit_pct) : null,
     };
     flameLoading = false;
   }
@@ -1067,6 +1396,13 @@
     <div role="document" class="flame-modal" onclick={e => e.stopPropagation()}>
       <div class="flame-modal-header">
         <span class="flame-modal-title">Wait Profile</span>
+        <div class="flame-header-actions">
+          <span class="flame-mode-label">Metric mode</span>
+          <span class="flame-mode-btns">
+            <button class:active={sqlMode === 'total'} onclick={() => sqlMode = 'total'}>Total</button>
+            <button class:active={sqlMode === 'persec'} onclick={() => sqlMode = 'persec'}>Per sec</button>
+          </span>
+        </div>
         <button class="flame-close" onclick={() => activeFlame = null}>✕</button>
       </div>
 
@@ -1075,59 +1411,6 @@
       {:else if activeFlame}
         <!-- Full query text, scrollable -->
         <div class="flame-query-full">{activeFlame.queryFull}</div>
-
-        <!-- Rich stats grid -->
-        {@const secs = activeFlame.benchSecs}
-        <div class="flame-stats-grid">
-          <div class="fsg-cell">
-            <span class="fsg-label">Calls</span>
-            <span class="fsg-val">{fmtNum(activeFlame.deltaCalls)}</span>
-          </div>
-          <div class="fsg-cell">
-            <span class="fsg-label">Calls/sec</span>
-            <span class="fsg-val">{perSec(activeFlame.deltaCalls, secs)}</span>
-          </div>
-          <div class="fsg-cell">
-            <span class="fsg-label">Avg Latency</span>
-            <span class="fsg-val">{fmtMs(activeFlame.meanExecMs)}</span>
-          </div>
-          <div class="fsg-cell">
-            <span class="fsg-label">Max Latency</span>
-            <span class="fsg-val">{fmtMs(activeFlame.maxExecMs)}</span>
-          </div>
-          <div class="fsg-cell">
-            <span class="fsg-label">Rows</span>
-            <span class="fsg-val">{fmtNum(activeFlame.deltaRows)}</span>
-          </div>
-          <div class="fsg-cell">
-            <span class="fsg-label">Rows/sec</span>
-            <span class="fsg-val">{perSec(activeFlame.deltaRows, secs)}</span>
-          </div>
-          <div class="fsg-cell">
-            <span class="fsg-label">Cache Hit</span>
-            <span class="fsg-val">{activeFlame.cacheHitPct != null ? activeFlame.cacheHitPct + '%' : '—'}</span>
-          </div>
-          <div class="fsg-cell">
-            <span class="fsg-label">Blks Read</span>
-            <span class="fsg-val">{fmtNum(activeFlame.deltaBlksRead)}</span>
-          </div>
-          <div class="fsg-cell">
-            <span class="fsg-label">Stddev</span>
-            <span class="fsg-val">{fmtMs(activeFlame.stddevMs)}</span>
-          </div>
-          <div class="fsg-cell">
-            <span class="fsg-label">Plan Time</span>
-            <span class="fsg-val">{activeFlame.totalPlanMs > 0 ? fmtMs(activeFlame.totalPlanMs) : '—'}</span>
-          </div>
-          <div class="fsg-cell">
-            <span class="fsg-label">Temp Spill</span>
-            <span class="fsg-val">{activeFlame.deltaTempBlks > 0 ? fmtNum(activeFlame.deltaTempBlks) + ' blks' : 'none'}</span>
-          </div>
-          <div class="fsg-cell">
-            <span class="fsg-label">WAL Bytes</span>
-            <span class="fsg-val">{activeFlame.deltaWalBytes > 0 ? fmtBytes(activeFlame.deltaWalBytes) : '—'}</span>
-          </div>
-        </div>
 
         {#if activeFlame.noData}
           <div class="flame-nodata">No activity samples found for this run.</div>
@@ -1145,13 +1428,7 @@
           </div>
           <!-- Legend -->
           {@const flameSecs = activeFlame.benchSecs}
-          <div class="flame-legend-title">
-            Wait Profile
-            <span class="flame-mode-btns">
-              <button class:active={sqlMode === 'total'} onclick={() => sqlMode = 'total'}>Total</button>
-              <button class:active={sqlMode === 'persec'} onclick={() => sqlMode = 'persec'}>Per sec</button>
-            </span>
-          </div>
+          <div class="flame-legend-title">Wait Profile</div>
           <div class="flame-legend">
             {#each activeFlame.items as item}
               {@const pct = total > 0 ? (item.seconds / total * 100).toFixed(0) : '0'}
@@ -1174,6 +1451,28 @@
             {#if sqlMode === 'persec' && flameSecs > 0}
               &nbsp;·&nbsp; {(activeFlame.totalExecMs / 1000 / flameSecs).toFixed(3)}s/s
             {/if}
+          </div>
+        {/if}
+
+        {#if activeFlame.statementMetrics}
+          <div class="flame-metric-note">{statementSnapshotNote(activeFlame.statementMetrics)}</div>
+          <div class="flame-metric-groups">
+            {#each STATEMENT_METRIC_GROUPS as group}
+              <section class="flame-metric-card">
+                <div class="flame-metric-card-header">
+                  <h5>{group.title}</h5>
+                  <p>{statementGroupNote(group)}</p>
+                </div>
+                <div class="flame-metric-list">
+                  {#each group.metrics as metric}
+                    <div class="flame-metric-row">
+                      <span class="flame-metric-label">{metric.label}</span>
+                      <span class="flame-metric-value">{formatStatementMetric(metric.key, activeFlame.statementMetrics.values[metric.key], metric.format, activeFlame.benchSecs)}</span>
+                    </div>
+                  {/each}
+                </div>
+              </section>
+            {/each}
           </div>
         {/if}
       {/if}
@@ -1380,6 +1679,10 @@
   }
   .flame-modal-header { display: flex; align-items: center; margin-bottom: 12px; }
   .flame-modal-title { font-size: 13px; font-weight: 700; color: #e0e0e0; flex: 1; }
+  .flame-header-actions { display: flex; align-items: center; gap: 8px; }
+  .flame-mode-label {
+    font-size: 10px; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.05em;
+  }
   .flame-close { background: none; border: none; color: #9ca3af; font-size: 16px; cursor: pointer; padding: 0 0 0 8px; }
   .flame-close:hover { color: #fff; }
   .flame-query-full {
@@ -1389,15 +1692,36 @@
     max-height: 120px; overflow-y: auto;
     white-space: pre-wrap; word-break: break-word; line-height: 1.5;
   }
-  .flame-stats-grid {
-    display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 14px;
+  .flame-metric-note {
+    font-size: 11px; color: #9ca3af; line-height: 1.5;
+    margin-bottom: 12px;
   }
-  .fsg-cell {
-    background: #13141e; border: 1px solid #2e3048; border-radius: 5px;
-    padding: 5px 8px; display: flex; flex-direction: column; gap: 2px;
+  .flame-metric-groups {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; margin-bottom: 14px;
   }
-  .fsg-label { font-size: 9px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.04em; }
-  .fsg-val { font-size: 12px; font-weight: 600; color: #e0e0e0; font-variant-numeric: tabular-nums; }
+  .flame-metric-card {
+    background: #13141e; border: 1px solid #2e3048; border-radius: 6px;
+    padding: 10px 12px;
+  }
+  .flame-metric-card-header { margin-bottom: 10px; }
+  .flame-metric-card-header h5 {
+    margin: 0 0 4px; font-size: 11px; font-weight: 700; color: #f3f4f6;
+    text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .flame-metric-card-header p {
+    margin: 0; font-size: 10px; color: #6b7280; line-height: 1.4;
+  }
+  .flame-metric-list { display: flex; flex-direction: column; gap: 6px; }
+  .flame-metric-row {
+    display: flex; gap: 8px; align-items: baseline; justify-content: space-between;
+    border-top: 1px solid #23263a; padding-top: 6px;
+  }
+  .flame-metric-row:first-child { border-top: none; padding-top: 0; }
+  .flame-metric-label { font-size: 11px; color: #9ca3af; }
+  .flame-metric-value {
+    font-size: 12px; font-weight: 600; color: #f9fafb; text-align: right;
+    font-variant-numeric: tabular-nums; word-break: break-word;
+  }
   .flame-loading { font-size: 13px; color: #9ca3af; padding: 12px 0; text-align: center; }
   .flame-nodata { font-size: 12px; color: #9ca3af; padding: 12px 0; line-height: 1.6; }
   .flame-notice { font-size: 11px; color: #f59e0b; background: #2d2a1e; border: 1px solid #78500a; border-radius: 5px; padding: 6px 9px; margin-bottom: 12px; line-height: 1.5; }
@@ -1415,8 +1739,7 @@
   .flame-leg-label { flex: 1; font-size: 12px; color: #d1d5db; }
   .flame-leg-pct { font-size: 10px; color: #9ca3af; font-variant-numeric: tabular-nums; min-width: 30px; text-align: right; }
   .flame-leg-val { font-size: 12px; font-variant-numeric: tabular-nums; color: #f9fafb; font-weight: 600; min-width: 60px; text-align: right; }
-  .flame-legend-title { display: flex; align-items: center; gap: 8px; }
-  .flame-mode-btns { display: flex; border: 1px solid #3a3b50; border-radius: 4px; overflow: hidden; margin-left: auto; }
+  .flame-mode-btns { display: flex; border: 1px solid #3a3b50; border-radius: 4px; overflow: hidden; }
   .flame-mode-btns button { background: none; border: none; padding: 2px 8px; font-size: 10px; cursor: pointer; color: #9ca3af; }
   .flame-mode-btns button.active { background: #3a3b50; color: #e0e0e0; }
   .flame-footer { font-size: 11px; color: #6b7280; margin-top: 14px; padding-top: 10px; border-top: 1px solid #3a3b50; }
