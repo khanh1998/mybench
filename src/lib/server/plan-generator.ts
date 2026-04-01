@@ -5,6 +5,8 @@ import type { PgbenchScript, DesignParam, DesignStep, PgServer } from '$lib/type
 const EXCLUDED_SNAP_COLS = new Set(['_id', '_run_id', '_collected_at', '_phase', '_is_baseline', '_step_id']);
 
 export interface PlanRunSettingsOverride {
+	server_id?: number;
+	database?: string;
 	snapshot_interval_seconds?: number;
 }
 
@@ -22,6 +24,9 @@ export function generatePlan(designId: number, overrides: PlanRunSettingsOverrid
 		snapshot_interval_seconds: number;
 	} | undefined;
 	if (!design) throw new Error(`Design ${designId} not found`);
+
+	const resolvedServerId = overrides.server_id ?? design.server_id;
+	const resolvedDatabase = overrides.database ?? design.database;
 
 	// Load enabled steps only
 	const steps = db.prepare(
@@ -85,18 +90,18 @@ export function generatePlan(designId: number, overrides: PlanRunSettingsOverrid
 		port: 5432,
 		username: '',
 		password: '',
-		database: design.database,
+		database: resolvedDatabase,
 		ssl: false
 	};
-	if (design.server_id) {
-		const server = db.prepare('SELECT * FROM pg_servers WHERE id = ?').get(design.server_id) as PgServer | undefined;
+	if (resolvedServerId) {
+		const server = db.prepare('SELECT * FROM pg_servers WHERE id = ?').get(resolvedServerId) as PgServer | undefined;
 		if (server) {
 			serverInfo = {
 				host: server.host,
 				port: server.port,
 				username: server.username,
 				password: server.password,
-				database: design.database,
+				database: resolvedDatabase,
 				ssl: !!server.ssl
 			};
 		}
@@ -104,10 +109,10 @@ export function generatePlan(designId: number, overrides: PlanRunSettingsOverrid
 
 	// Load enabled snap tables for this server
 	const enabledSnapTables: Array<{ pg_view_name: string; snap_table_name: string; columns: string[] }> = [];
-	if (design.server_id) {
+	if (resolvedServerId) {
 		const enabledRows = db.prepare(
 			`SELECT table_name FROM pg_stat_table_selections WHERE server_id = ? AND enabled = 1`
-		).all(design.server_id) as { table_name: string }[];
+		).all(resolvedServerId) as { table_name: string }[];
 
 		for (const row of enabledRows) {
 			const pgViewName = row.table_name;

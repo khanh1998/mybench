@@ -230,15 +230,14 @@
     startingRun = true;
     const body: Record<string, unknown> = {
       design_id: id,
+      server_id: runServer,
+      database: runDatabase,
+      snapshot_interval_seconds: runSnapshotInterval,
       profile_id: runProfile ?? undefined,
       name: runName || undefined
     };
     if (runMode === 'ec2') {
       body.ec2_server_id = runEc2ServerId;
-    } else {
-      body.server_id = runServer;
-      body.database = runDatabase;
-      body.snapshot_interval_seconds = runSnapshotInterval;
     }
     const res = await fetch('/api/runs', {
       method: 'POST',
@@ -533,25 +532,25 @@
             {/each}
           </select>
         </div>
-      {:else}
-        <div class="form-group">
-          <label for="run-server">Server</label>
-          <select id="run-server" bind:value={runServer}>
-            <option value={null}>— select server —</option>
-            {#each servers as s}
-              <option value={s.id}>{s.name}</option>
-            {/each}
-          </select>
-        </div>
-        <div class="form-group">
-          <label for="run-db">Database</label>
-          <input id="run-db" bind:value={runDatabase} placeholder="benchmark_db" />
-        </div>
-        <div class="form-group">
-          <label for="run-snap" title="How often pg_stat_* snapshots are collected">Snapshot interval (s)</label>
-          <input id="run-snap" type="number" bind:value={runSnapshotInterval} min="5" max="300" />
-        </div>
       {/if}
+
+      <div class="form-group">
+        <label for="run-server">Server</label>
+        <select id="run-server" bind:value={runServer}>
+          <option value={null}>— select server —</option>
+          {#each servers as s}
+            <option value={s.id}>{s.name}</option>
+          {/each}
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="run-db">Database</label>
+        <input id="run-db" bind:value={runDatabase} placeholder="benchmark_db" />
+      </div>
+      <div class="form-group">
+        <label for="run-snap" title="How often pg_stat_* snapshots are collected">Snapshot interval (s)</label>
+        <input id="run-snap" type="number" bind:value={runSnapshotInterval} min="5" max="300" />
+      </div>
 
       <!-- pgbench steps summary -->
       {#if design.steps.filter(s => s.enabled && s.type === 'pgbench').length > 0}
@@ -580,7 +579,7 @@
 
       <div class="modal-actions">
         <button onclick={() => showRunModal = false}>Cancel</button>
-        <button class="primary" onclick={startRun} disabled={runMode === 'local' ? (!runServer || !runDatabase) : !runEc2ServerId}>▶ Start Run</button>
+        <button class="primary" onclick={startRun} disabled={!runServer || !runDatabase || (runMode === 'ec2' && !runEc2ServerId)}>▶ Start Run</button>
       </div>
     </div>
   </div>

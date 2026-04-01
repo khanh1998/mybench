@@ -20,6 +20,8 @@ export const POST: RequestHandler = async ({ request }) => {
 	try {
 		if (ec2_server_id) {
 			const runId = startEc2Run(Number(design_id), Number(ec2_server_id), {
+				server_id,
+				database,
 				profile_id,
 				name,
 				snapshot_interval_seconds

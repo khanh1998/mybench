@@ -2,15 +2,75 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getRunnablePgbenchScripts } from '$lib/params';
 import getDb from '$lib/server/db';
-import { createPool } from '$lib/server/pg-client';
+import { createPool, discoverPgStatTables, testConnection } from '$lib/server/pg-client';
 import { SNAP_TABLE_MAP } from '$lib/server/pg-stats';
 import { startRun } from '$lib/server/run-executor';
-import type { PgServer, DesignStep, PgbenchScript, DesignParam } from '$lib/types';
+import { startEc2Run } from '$lib/server/ec2-executor';
+import { testEc2Connection } from '$lib/server/ec2-runner';
+import type { PgServer, Ec2Server, DesignStep, PgbenchScript, DesignParam } from '$lib/types';
 
 const EXCLUDED_SNAP_COLS = new Set(['_id', '_run_id', '_collected_at', '_phase', '_is_baseline', '_step_id']);
 
 function text(obj: unknown): { content: [{ type: 'text'; text: string }] } {
 	return { content: [{ type: 'text' as const, text: JSON.stringify(obj, null, 2) }] };
+}
+
+function scrubPgServer(server: PgServer) {
+	return {
+		id: server.id,
+		name: server.name,
+		host: server.host,
+		port: server.port,
+		username: server.username,
+		ssl: !!server.ssl
+	};
+}
+
+function scrubEc2Server(server: Ec2Server) {
+	return {
+		id: server.id,
+		name: server.name,
+		host: server.host,
+		user: server.user,
+		port: server.port,
+		remote_dir: server.remote_dir,
+		log_dir: server.log_dir
+	};
+}
+
+async function populatePgStatSelections(server: PgServer, database: string) {
+	const db = getDb();
+	const { tables, versionNum } = await discoverPgStatTables(server, database);
+	const supportedTables = Object.keys(SNAP_TABLE_MAP);
+	const insert = db.prepare(
+		'INSERT OR IGNORE INTO pg_stat_table_selections (server_id, table_name, enabled) VALUES (?, ?, 1)'
+	);
+	const disable = db.prepare(
+		'UPDATE pg_stat_table_selections SET enabled = 0 WHERE server_id = ? AND table_name = ?'
+	);
+
+	db.transaction(() => {
+		for (const tableName of supportedTables) {
+			insert.run(server.id, tableName);
+		}
+		if (versionNum < 140000) disable.run(server.id, 'pg_stat_replication_slots');
+		if (versionNum < 150000) disable.run(server.id, 'pg_stat_subscription_stats');
+		if (versionNum < 180000) {
+			disable.run(server.id, 'pg_stat_wal');
+			disable.run(server.id, 'pg_stat_io');
+		}
+		if (versionNum < 170000) disable.run(server.id, 'pg_stat_checkpointer');
+	})();
+
+	const selections = db
+		.prepare('SELECT table_name, enabled FROM pg_stat_table_selections WHERE server_id = ? ORDER BY table_name')
+		.all(server.id) as { table_name: string; enabled: number }[];
+
+	return {
+		discovered_tables: tables,
+		version_num: versionNum,
+		table_selections: selections.map((row) => ({ table_name: row.table_name, enabled: !!row.enabled }))
+	};
 }
 
 export function registerTools(server: McpServer): void {
@@ -29,12 +89,18 @@ and the recommended workflow for creating and running a benchmark plan.`
 			const servers = db.prepare('SELECT id, name, host, port, username, ssl FROM pg_servers ORDER BY id').all() as {
 				id: number; name: string; host: string; port: number; username: string; ssl: number;
 			}[];
+			const ec2Servers = db.prepare('SELECT id, name, host, user, port FROM ec2_servers ORDER BY id').all() as {
+				id: number; name: string; host: string; user: string; port: number;
+			}[];
 
 			const guide = {
 				overview: 'mybench helps you design and run PostgreSQL benchmarks. Use these tools to create plans, run tests, and export results.',
 				database_servers: servers.length > 0
 					? servers.map(s => ({ id: s.id, name: s.name, host: s.host, port: s.port, username: s.username, ssl: !!s.ssl }))
 					: 'No servers configured yet. Add one in Settings (http://localhost:5173/settings) before running benchmarks.',
+				ec2_servers: ec2Servers.length > 0
+					? ec2Servers.map(s => ({ id: s.id, name: s.name, host: s.host, user: s.user, port: s.port }))
+					: 'No EC2 runners configured yet. Add one in Settings (http://localhost:5173/settings) before using remote runs.',
 				data_model: {
 					decisions: 'Top-level question you are answering (e.g. "Which table design is faster?"). Contains one or more designs.',
 					designs: 'One candidate design to benchmark (e.g. "plain table" vs "partitioned table"). Each design is linked to a database server and has steps + params.',
@@ -98,7 +164,7 @@ and the recommended workflow for creating and running a benchmark plan.`
 					}
 				},
 				param_syntax: 'Write {{PARAM_NAME}} in any step script or pgbench_options. Set the value with set_params. Example: "INSERT INTO users SELECT generate_series(1, {{NUM_USERS}})"',
-				design_server_assignment: 'When creating a design, the server_id and database must be set through the web UI (http://localhost:5173). Use get_db_schema(design_id) to verify the connection and see available tables before writing SQL.',
+				design_server_assignment: 'When creating a design, you can set server_id, database, and snapshot settings with configure_design. You can also override server_id, database, snapshot_interval_seconds, and ec2_server_id at run time with run_design.',
 				recommended_workflow: [
 					'1. get_context (this tool) — understand conventions and see available servers',
 					'2. list_decisions — find existing decisions, or create_decision for a new one',
@@ -109,7 +175,7 @@ and the recommended workflow for creating and running a benchmark plan.`
 					'7. upsert_step (repeat) — add sql setup, wait, optional pg_stat_statements reset, pgbench, optional pg_stat_statements collect, wait, sql teardown steps',
 					'8. upsert_profile(design_id, name, values) — optional: create "small"/"large" profiles for different scales',
 					'9. validate_design(design_id) — check for issues (undefined params, missing server, no pgbench step) before running',
-					'10. run_design(design_id, profile_id?) — start a test run (optionally with a profile), get run_id',
+					'10. run_design(design_id, {profile_id?, name?, server_id?, database?, snapshot_interval_seconds?, ec2_server_id?}) — start a local or EC2 test run and get run_id',
 					'11. get_run(run_id) — wait ~(pgbench -T seconds + collect durations) before first poll, then every ~30s',
 					'12. export_plan(design_id) — get plan.json for production mybench-runner CLI'
 				],
@@ -203,6 +269,352 @@ and the recommended workflow for creating and running a benchmark plan.`
 				}
 			};
 			return text(guide);
+		}
+	);
+
+	// ─────────────────────────────────────────────────────────────────────────
+	// PostgreSQL / Settings tools
+	// ─────────────────────────────────────────────────────────────────────────
+	server.registerTool(
+		'list_pg_servers',
+		{
+			description: 'Lists saved PostgreSQL connections from Settings. Returns non-secret fields only.'
+		},
+		async () => {
+			const db = getDb();
+			const servers = db.prepare('SELECT * FROM pg_servers ORDER BY id').all() as PgServer[];
+			return text(servers.map(scrubPgServer));
+		}
+	);
+
+	server.registerTool(
+		'save_pg_server',
+		{
+			description: 'Creates or updates a saved PostgreSQL connection in Settings. If server_id is omitted, creates a new connection. When updating, omitted fields keep their current values.',
+			inputSchema: {
+				server_id: z.number().int().optional().describe('Omit to create a new PostgreSQL connection'),
+				name: z.string().optional(),
+				host: z.string().optional(),
+				port: z.number().int().optional(),
+				username: z.string().optional(),
+				password: z.string().optional().describe('Optional password; omitted on update keeps the current password'),
+				ssl: z.boolean().optional()
+			}
+		},
+		async ({ server_id, name, host, port, username, password, ssl }) => {
+			const db = getDb();
+			const existing = server_id
+				? db.prepare('SELECT * FROM pg_servers WHERE id = ?').get(server_id) as PgServer | undefined
+				: undefined;
+			if (server_id && !existing) return text({ error: `PostgreSQL connection ${server_id} not found` });
+
+			const next = {
+				name: name ?? existing?.name ?? '',
+				host: host ?? existing?.host ?? 'localhost',
+				port: port ?? existing?.port ?? 5432,
+				username: username ?? existing?.username ?? 'postgres',
+				password: password ?? existing?.password ?? '',
+				ssl: ssl !== undefined ? (ssl ? 1 : 0) : (existing?.ssl ?? 0)
+			};
+			if (!next.name.trim()) return text({ error: 'name is required' });
+
+			if (existing) {
+				db.prepare(
+					'UPDATE pg_servers SET name=?, host=?, port=?, username=?, password=?, ssl=? WHERE id=?'
+				).run(next.name, next.host, next.port, next.username, next.password, next.ssl, server_id);
+				const saved = db.prepare('SELECT * FROM pg_servers WHERE id = ?').get(server_id) as PgServer;
+				return text({ action: 'updated', server: scrubPgServer(saved) });
+			}
+
+			const result = db.prepare(
+				'INSERT INTO pg_servers (name, host, port, username, password, ssl) VALUES (?, ?, ?, ?, ?, ?)'
+			).run(next.name, next.host, next.port, next.username, next.password, next.ssl);
+			const saved = db.prepare('SELECT * FROM pg_servers WHERE id = ?').get(result.lastInsertRowid) as PgServer;
+			return text({ action: 'created', server: scrubPgServer(saved) });
+		}
+	);
+
+	server.registerTool(
+		'delete_pg_server',
+		{
+			description: 'Deletes a saved PostgreSQL connection from Settings.',
+			inputSchema: {
+				server_id: z.number().int()
+			}
+		},
+		async ({ server_id }) => {
+			const db = getDb();
+			const existing = db.prepare('SELECT id, name FROM pg_servers WHERE id = ?').get(server_id) as { id: number; name: string } | undefined;
+			if (!existing) return text({ error: `PostgreSQL connection ${server_id} not found` });
+			db.prepare('DELETE FROM pg_servers WHERE id = ?').run(server_id);
+			return text({ deleted: true, server_id, name: existing.name });
+		}
+	);
+
+	server.registerTool(
+		'test_pg_server',
+		{
+			description: 'Tests a PostgreSQL connection. If server_id is provided, tests the saved connection; otherwise tests the provided fields without saving. Saved-connection tests can also discover and populate pg_stat table selections like the Settings screen.',
+			inputSchema: {
+				server_id: z.number().int().optional().describe('Optional saved PostgreSQL connection ID'),
+				host: z.string().optional().describe('Required when server_id is omitted'),
+				port: z.number().int().optional(),
+				username: z.string().optional(),
+				password: z.string().optional(),
+				ssl: z.boolean().optional(),
+				database: z.string().optional().describe('Database name to test against; defaults to "postgres"'),
+				populate_table_selections: z.boolean().optional().describe('When testing a saved connection, discover and sync pg_stat table selections (default true)')
+			}
+		},
+		async ({ server_id, host, port, username, password, ssl, database, populate_table_selections }) => {
+			const db = getDb();
+			const targetDatabase = database ?? 'postgres';
+
+			let target: PgServer | undefined;
+			if (server_id) {
+				target = db.prepare('SELECT * FROM pg_servers WHERE id = ?').get(server_id) as PgServer | undefined;
+				if (!target) return text({ error: `PostgreSQL connection ${server_id} not found` });
+			} else {
+				if (!host) return text({ error: 'host is required when server_id is omitted' });
+				target = {
+					id: 0,
+					name: '',
+					host,
+					port: port ?? 5432,
+					username: username ?? 'postgres',
+					password: password ?? '',
+					ssl: ssl ? 1 : 0
+				};
+			}
+
+			const result = await testConnection(target, targetDatabase);
+			if (!result.ok) {
+				return text({
+					ok: false,
+					server_id: server_id ?? null,
+					database: targetDatabase,
+					error: result.error
+				});
+			}
+
+			let tableSelectionSync:
+				| { discovered_tables: string[]; version_num: number; table_selections: { table_name: string; enabled: boolean }[] }
+				| undefined;
+			let tableSelectionWarning: string | undefined;
+			if (server_id && populate_table_selections !== false) {
+				try {
+					tableSelectionSync = await populatePgStatSelections(target, targetDatabase);
+				} catch (err) {
+					tableSelectionWarning = err instanceof Error ? err.message : String(err);
+				}
+			}
+
+			return text({
+				ok: true,
+				server_id: server_id ?? null,
+				database: targetDatabase,
+				version: result.version,
+				table_selection_sync: tableSelectionSync,
+				table_selection_warning: tableSelectionWarning
+			});
+		}
+	);
+
+	server.registerTool(
+		'get_pg_server_table_selections',
+		{
+			description: 'Returns the saved pg_stat table selections for a PostgreSQL connection. Use test_pg_server(server_id) first to discover and initialize them.',
+			inputSchema: {
+				server_id: z.number().int()
+			}
+		},
+		async ({ server_id }) => {
+			const db = getDb();
+			const existing = db.prepare('SELECT id, name FROM pg_servers WHERE id = ?').get(server_id) as { id: number; name: string } | undefined;
+			if (!existing) return text({ error: `PostgreSQL connection ${server_id} not found` });
+			const rows = db
+				.prepare('SELECT table_name, enabled FROM pg_stat_table_selections WHERE server_id = ? ORDER BY table_name')
+				.all(server_id) as { table_name: string; enabled: number }[];
+			return text({
+				server_id,
+				name: existing.name,
+				table_selections: rows.map((row) => ({ table_name: row.table_name, enabled: !!row.enabled }))
+			});
+		}
+	);
+
+	server.registerTool(
+		'set_pg_server_table_selections',
+		{
+			description: 'Updates the enabled/disabled pg_stat table selections for a saved PostgreSQL connection.',
+			inputSchema: {
+				server_id: z.number().int(),
+				selections: z.array(z.object({
+					table_name: z.string(),
+					enabled: z.boolean()
+				})).describe('Complete or partial list of table selections to update')
+			}
+		},
+		async ({ server_id, selections }) => {
+			const db = getDb();
+			const existing = db.prepare('SELECT id, name FROM pg_servers WHERE id = ?').get(server_id) as { id: number; name: string } | undefined;
+			if (!existing) return text({ error: `PostgreSQL connection ${server_id} not found` });
+
+			const currentRows = db
+				.prepare('SELECT table_name FROM pg_stat_table_selections WHERE server_id = ?')
+				.all(server_id) as { table_name: string }[];
+			if (currentRows.length === 0) {
+				return text({ error: `No table selections exist for PostgreSQL connection ${server_id}. Run test_pg_server(server_id) first.` });
+			}
+
+			const validNames = new Set(currentRows.map((row) => row.table_name));
+			const unknown = selections.map((row) => row.table_name).filter((name) => !validNames.has(name));
+			if (unknown.length > 0) {
+				return text({ error: `Unknown table selection(s): ${unknown.join(', ')}` });
+			}
+
+			const update = db.prepare(
+				'UPDATE pg_stat_table_selections SET enabled = ? WHERE server_id = ? AND table_name = ?'
+			);
+			db.transaction(() => {
+				for (const item of selections) {
+					update.run(item.enabled ? 1 : 0, server_id, item.table_name);
+				}
+			})();
+
+			const rows = db
+				.prepare('SELECT table_name, enabled FROM pg_stat_table_selections WHERE server_id = ? ORDER BY table_name')
+				.all(server_id) as { table_name: string; enabled: number }[];
+			return text({
+				updated: true,
+				server_id,
+				table_selections: rows.map((row) => ({ table_name: row.table_name, enabled: !!row.enabled }))
+			});
+		}
+	);
+
+	// ─────────────────────────────────────────────────────────────────────────
+	// EC2 / Settings tools
+	// ─────────────────────────────────────────────────────────────────────────
+	server.registerTool(
+		'list_ec2_servers',
+		{
+			description: 'Lists saved EC2 runner connections from Settings. Returns non-secret fields only.'
+		},
+		async () => {
+			const db = getDb();
+			const servers = db.prepare('SELECT * FROM ec2_servers ORDER BY id').all() as Ec2Server[];
+			return text(servers.map(scrubEc2Server));
+		}
+	);
+
+	server.registerTool(
+		'save_ec2_server',
+		{
+			description: 'Creates or updates a saved EC2 runner in Settings. If ec2_server_id is omitted, creates a new server. When updating, omitted fields keep their current values.',
+			inputSchema: {
+				ec2_server_id: z.number().int().optional().describe('Omit to create a new EC2 runner'),
+				name: z.string().optional(),
+				host: z.string().optional(),
+				user: z.string().optional(),
+				port: z.number().int().optional(),
+				private_key: z.string().optional().describe('Optional PEM private key; omitted on update keeps the current key'),
+				remote_dir: z.string().optional(),
+				log_dir: z.string().optional()
+			}
+		},
+		async ({ ec2_server_id, name, host, user, port, private_key, remote_dir, log_dir }) => {
+			const db = getDb();
+			const existing = ec2_server_id
+				? db.prepare('SELECT * FROM ec2_servers WHERE id = ?').get(ec2_server_id) as Ec2Server | undefined
+				: undefined;
+			if (ec2_server_id && !existing) return text({ error: `EC2 server ${ec2_server_id} not found` });
+
+			const next = {
+				name: name ?? existing?.name ?? '',
+				host: host ?? existing?.host ?? '',
+				user: user ?? existing?.user ?? 'ec2-user',
+				port: port ?? existing?.port ?? 22,
+				private_key: private_key ?? existing?.private_key ?? '',
+				remote_dir: remote_dir ?? existing?.remote_dir ?? '~/mybench-bench',
+				log_dir: log_dir ?? existing?.log_dir ?? '/tmp/mybench-logs'
+			};
+			if (!next.name.trim()) return text({ error: 'name is required' });
+
+			if (existing) {
+				db.prepare(
+					'UPDATE ec2_servers SET name=?, host=?, user=?, port=?, private_key=?, remote_dir=?, log_dir=? WHERE id=?'
+				).run(next.name, next.host, next.user, next.port, next.private_key, next.remote_dir, next.log_dir, ec2_server_id);
+				const saved = db.prepare('SELECT * FROM ec2_servers WHERE id = ?').get(ec2_server_id) as Ec2Server;
+				return text({ action: 'updated', server: scrubEc2Server(saved) });
+			}
+
+			const result = db.prepare(
+				'INSERT INTO ec2_servers (name, host, user, port, private_key, remote_dir, log_dir) VALUES (?, ?, ?, ?, ?, ?, ?)'
+			).run(next.name, next.host, next.user, next.port, next.private_key, next.remote_dir, next.log_dir);
+			const saved = db.prepare('SELECT * FROM ec2_servers WHERE id = ?').get(result.lastInsertRowid) as Ec2Server;
+			return text({ action: 'created', server: scrubEc2Server(saved) });
+		}
+	);
+
+	server.registerTool(
+		'delete_ec2_server',
+		{
+			description: 'Deletes a saved EC2 runner from Settings.',
+			inputSchema: {
+				ec2_server_id: z.number().int()
+			}
+		},
+		async ({ ec2_server_id }) => {
+			const db = getDb();
+			const existing = db.prepare('SELECT id, name FROM ec2_servers WHERE id = ?').get(ec2_server_id) as { id: number; name: string } | undefined;
+			if (!existing) return text({ error: `EC2 server ${ec2_server_id} not found` });
+			db.prepare('DELETE FROM ec2_servers WHERE id = ?').run(ec2_server_id);
+			return text({ deleted: true, ec2_server_id, name: existing.name });
+		}
+	);
+
+	server.registerTool(
+		'test_ec2_server',
+		{
+			description: 'Tests an EC2 runner connection. If ec2_server_id is provided, tests the saved server; otherwise tests the provided fields without saving.',
+			inputSchema: {
+				ec2_server_id: z.number().int().optional().describe('Optional saved EC2 runner ID'),
+				host: z.string().optional().describe('Required when ec2_server_id is omitted'),
+				user: z.string().optional(),
+				port: z.number().int().optional(),
+				private_key: z.string().optional().describe('Required when ec2_server_id is omitted'),
+				remote_dir: z.string().optional(),
+				log_dir: z.string().optional()
+			}
+		},
+		async ({ ec2_server_id, host, user, port, private_key, remote_dir, log_dir }) => {
+			const db = getDb();
+
+			let target: Ec2Server | undefined;
+			if (ec2_server_id) {
+				target = db.prepare('SELECT * FROM ec2_servers WHERE id = ?').get(ec2_server_id) as Ec2Server | undefined;
+				if (!target) return text({ error: `EC2 server ${ec2_server_id} not found` });
+			} else {
+				if (!host) return text({ error: 'host is required when ec2_server_id is omitted' });
+				if (!private_key) return text({ error: 'private_key is required when ec2_server_id is omitted' });
+				target = {
+					id: 0,
+					name: '',
+					host,
+					user: user ?? 'ec2-user',
+					port: port ?? 22,
+					private_key,
+					remote_dir: remote_dir ?? '~/mybench-bench',
+					log_dir: log_dir ?? '/tmp/mybench-logs'
+				};
+			}
+
+			const result = await testEc2Connection(target);
+			return text({
+				ec2_server_id: ec2_server_id ?? null,
+				...result
+			});
 		}
 	);
 
@@ -534,15 +946,19 @@ Checks performed:
   - Defined params with empty values
 Call this before run_design or export_plan to catch problems early.`,
 			inputSchema: {
-				design_id: z.number().int().describe('Design ID to validate')
+				design_id: z.number().int().describe('Design ID to validate'),
+				server_id: z.number().int().optional().describe('Optional run-time server override to validate against'),
+				database: z.string().optional().describe('Optional run-time database override to validate against')
 			}
 		},
-		async ({ design_id }) => {
+		async ({ design_id, server_id, database }) => {
 			const db = getDb();
 			const design = db.prepare('SELECT * FROM designs WHERE id = ?').get(design_id) as {
 				id: number; name: string; server_id: number | null; database: string;
 			} | undefined;
 			if (!design) return text({ error: `Design ${design_id} not found` });
+			const resolvedServerId = server_id ?? design.server_id;
+			const resolvedDatabase = database ?? design.database;
 
 			const steps = db.prepare('SELECT * FROM design_steps WHERE design_id = ? ORDER BY position').all(design_id) as DesignStep[];
 			const pgbenchScripts = db.prepare('SELECT * FROM pgbench_scripts WHERE step_id IN (SELECT id FROM design_steps WHERE design_id = ?) ORDER BY step_id, position').all(design_id) as PgbenchScript[];
@@ -558,11 +974,11 @@ Call this before run_design or export_plan to catch problems early.`,
 			const issues: { severity: 'error' | 'warning'; code: string; message: string }[] = [];
 
 			// Server and database checks
-			if (!design.server_id) {
-				issues.push({ severity: 'error', code: 'NO_SERVER', message: 'No PostgreSQL server configured. Use configure_design to set server_id, or set one in the web UI.' });
+			if (!resolvedServerId) {
+				issues.push({ severity: 'error', code: 'NO_SERVER', message: 'No PostgreSQL server configured. Use configure_design or pass server_id to validate_design/run_design.' });
 			}
-			if (!design.database || design.database.trim() === '') {
-				issues.push({ severity: 'error', code: 'NO_DATABASE', message: 'No database name configured. Use configure_design to set database.' });
+			if (!resolvedDatabase || resolvedDatabase.trim() === '') {
+				issues.push({ severity: 'error', code: 'NO_DATABASE', message: 'No database name configured. Use configure_design or pass database to validate_design/run_design.' });
 			}
 
 			// Step checks
@@ -641,6 +1057,8 @@ Call this before run_design or export_plan to catch problems early.`,
 			return text({
 				design_id,
 				design_name: design.name,
+				resolved_server_id: resolvedServerId,
+				resolved_database: resolvedDatabase,
 				valid: errorCount === 0,
 				summary: errorCount === 0 && warningCount === 0
 					? 'No issues found. Design is ready to run.'
@@ -659,6 +1077,8 @@ Call this before run_design or export_plan to catch problems early.`,
 			description: `Starts a benchmark run for a design. Returns run_id immediately — poll get_run(run_id) until status is "completed" or "failed".
 Executes all enabled steps in order: sql setup → wait → pgbench → wait → sql teardown.
 Optional query-level steps can be inserted anywhere: pg_stat_statements_reset and pg_stat_statements_collect.
+By default this runs locally. If ec2_server_id is provided, it launches the run on that EC2 runner instead.
+You can override server_id, database, and snapshot_interval_seconds for either run location.
 This is a validation/test run. For production benchmarking, use export_plan + mybench-runner on EC2.
 
 Polling strategy: before polling, estimate total run duration from the design steps:
@@ -669,12 +1089,18 @@ Polling strategy: before polling, estimate total run duration from the design st
 Example: pgbench -T 120 + two 15s wait steps → wait ~150s before first poll.`,
 			inputSchema: {
 				design_id: z.number().int(),
+				server_id: z.number().int().optional().describe('Optional run-time PostgreSQL server override'),
+				database: z.string().optional().describe('Optional run-time database override'),
+				snapshot_interval_seconds: z.number().int().optional().describe('Optional run-time pg_stat_* snapshot interval override'),
 				profile_id: z.number().int().optional().describe('Optional profile ID to apply param overrides'),
-				name: z.string().optional().describe('Optional run name; defaults to profile name if a profile is used')
+				name: z.string().optional().describe('Optional run name; defaults to profile name if a profile is used'),
+				ec2_server_id: z.number().int().optional().describe('Optional EC2 runner ID from get_context ec2_servers; omit for a local run')
 			}
 		},
-		async ({ design_id, profile_id, name }) => {
-			const runId = startRun(design_id, { profile_id, name });
+		async ({ design_id, server_id, database, snapshot_interval_seconds, profile_id, name, ec2_server_id }) => {
+			const runId = ec2_server_id
+				? startEc2Run(design_id, ec2_server_id, { server_id, database, snapshot_interval_seconds, profile_id, name })
+				: startRun(design_id, { server_id, database, snapshot_interval_seconds, profile_id, name });
 			return text({ run_id: runId, message: 'Run started. Poll get_run(run_id) for status.' });
 		}
 	);
@@ -805,13 +1231,13 @@ Use this after validating the plan with run_design.`,
 		{
 			description: `Queries the live PostgreSQL database for the design's server and returns all tables with their columns and types.
 Call this before writing SQL steps — you need the real table and column names.
-Returns tables in the "public" schema. If no server is configured for the design, set one in the web UI first.`,
+Returns tables in the "public" schema. If no server is configured for the design, set one with configure_design first.`,
 			inputSchema: { design_id: z.number().int().describe('Design ID — used to look up the configured PG server') }
 		},
 		async ({ design_id }) => {
 			const db = getDb();
 			const design = db.prepare('SELECT server_id, database FROM designs WHERE id = ?').get(design_id) as { server_id: number | null; database: string } | undefined;
-			if (!design?.server_id) return text({ error: 'No server configured for this design. Set a server in the web UI (http://localhost:5173) first.' });
+			if (!design?.server_id) return text({ error: 'No server configured for this design. Set one with configure_design first.' });
 
 			const srv = db.prepare('SELECT * FROM pg_servers WHERE id = ?').get(design.server_id) as PgServer | undefined;
 			if (!srv) return text({ error: `Server ${design.server_id} not found` });

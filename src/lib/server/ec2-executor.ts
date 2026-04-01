@@ -16,6 +16,8 @@ import type { Ec2Server } from '$lib/types';
 import type { Client } from 'ssh2';
 
 export interface StartEc2RunOptions {
+	server_id?: number;
+	database?: string;
 	profile_id?: number;
 	name?: string;
 	snapshot_interval_seconds?: number;
@@ -36,6 +38,7 @@ export function startEc2Run(
 		| { id: number; name: string; database: string; pre_collect_secs: number; post_collect_secs: number }
 		| undefined;
 	if (!design) throw new Error(`Design ${designId} not found`);
+	const resolvedDatabase = opts.database ?? design.database;
 
 	const ec2Server = db.prepare('SELECT * FROM ec2_servers WHERE id = ?').get(Number(ec2ServerId)) as
 		Ec2Server | undefined;
@@ -67,7 +70,7 @@ export function startEc2Run(
 	`)
 		.run(
 			design.id,
-			design.database,
+			resolvedDatabase,
 			now,
 			opts.snapshot_interval_seconds ?? 30,
 			design.pre_collect_secs,
@@ -136,6 +139,8 @@ async function executeEc2RunAsync(
 
 		// Generate plan JSON and upload
 		const plan = generatePlan(designId, {
+			server_id: opts.server_id,
+			database: opts.database,
 			snapshot_interval_seconds: opts.snapshot_interval_seconds
 		});
 		writeFileSync(localPlanPath, JSON.stringify(plan));
