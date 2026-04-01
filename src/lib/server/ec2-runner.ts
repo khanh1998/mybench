@@ -1,6 +1,10 @@
 import { Client, type SFTPWrapper } from 'ssh2';
 import type { Ec2Server } from '$lib/types';
 
+export function shellQuote(value: string): string {
+	return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
 export function connectSsh(server: Ec2Server): Promise<Client> {
 	return new Promise((resolve, reject) => {
 		const conn = new Client();
@@ -129,7 +133,7 @@ export async function testEc2Connection(server: Ec2Server): Promise<Ec2TestResul
 		const remoteDir = server.remote_dir.replace(/^~/, homeDir);
 		const binaryPath = `${remoteDir}/mybench-runner`;
 
-		const check = await exec(conn, `test -x ${binaryPath} && echo ok`);
+		const check = await exec(conn, `test -x ${shellQuote(binaryPath)} && echo ok`);
 		if (check.code !== 0 || !check.stdout.trim().startsWith('ok')) {
 			return {
 				ok: false,
@@ -138,7 +142,7 @@ export async function testEc2Connection(server: Ec2Server): Promise<Ec2TestResul
 			};
 		}
 
-		const ver = await exec(conn, `${binaryPath} --version 2>&1 || echo unknown`);
+		const ver = await exec(conn, `${shellQuote(binaryPath)} --version 2>&1 || echo unknown`);
 		return {
 			ok: true,
 			ssh: { ok: true },

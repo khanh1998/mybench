@@ -2,7 +2,14 @@ import { writeFileSync, readFileSync, unlinkSync } from 'fs';
 import { randomUUID } from 'crypto';
 import getDb from '$lib/server/db';
 import { createRun, completeRun, getActiveRun } from '$lib/server/run-manager';
-import { connectSsh, exec, execStreaming, uploadFile, downloadFile } from '$lib/server/ec2-runner';
+import {
+	connectSsh,
+	exec,
+	execStreaming,
+	uploadFile,
+	downloadFile,
+	shellQuote
+} from '$lib/server/ec2-runner';
 import { generatePlan } from '$lib/server/plan-generator';
 import { importResultIntoRun } from '$lib/server/run-importer';
 import type { Ec2Server } from '$lib/types';
@@ -109,6 +116,7 @@ async function executeEc2RunAsync(
 	const localResultPath = `/tmp/mybench-ec2-result-${ec2RunToken}.json`;
 	let conn: Client | undefined;
 	let remoteDir = ec2Server.remote_dir;
+	let remoteLogDir = ec2Server.log_dir;
 	let stdoutAccum = '';
 	const LOG_CAP = 500_000;
 
@@ -121,9 +129,10 @@ async function executeEc2RunAsync(
 		const homeResult = await exec(conn, 'echo $HOME');
 		const homeDir = homeResult.stdout.trim();
 		remoteDir = ec2Server.remote_dir.replace(/^~/, homeDir);
+		remoteLogDir = ec2Server.log_dir.replace(/^~/, homeDir);
 
 		// Ensure remote directory exists
-		await exec(conn, `mkdir -p ${remoteDir}`);
+		await exec(conn, `mkdir -p ${shellQuote(remoteDir)}`);
 
 		// Generate plan JSON and upload
 		const plan = generatePlan(designId, {
@@ -138,11 +147,19 @@ async function executeEc2RunAsync(
 		// Build CLI command
 		const binaryPath = `${remoteDir}/mybench-runner`;
 		const remoteResultPath = `${remoteDir}/result-${ec2RunToken}.json`;
-		let cmd = `${binaryPath} run`;
-		cmd += ` --output ${remoteResultPath}`;
-		cmd += ` --log-dir ${ec2Server.log_dir}`;
-		if (profileName) cmd += ` --profile ${profileName}`;
-		cmd += ` ${remotePlanPath}`;
+		const cmdParts = [
+			shellQuote(binaryPath),
+			'run',
+			'--output',
+			shellQuote(remoteResultPath),
+			'--log-dir',
+			shellQuote(remoteLogDir)
+		];
+		if (profileName) {
+			cmdParts.push('--profile', shellQuote(profileName));
+		}
+		cmdParts.push(shellQuote(remotePlanPath));
+		const cmd = cmdParts.join(' ');
 
 		// Execute remotely with live output streaming
 		emit(`Running mybench-runner on EC2...`);
@@ -169,7 +186,7 @@ async function executeEc2RunAsync(
 				conn.end();
 			} catch { /* ignore */ }
 			conn = await connectSsh(ec2Server);
-			const checkResult = await exec(conn, `test -f ${remoteResultPath} && echo exists`);
+			const checkResult = await exec(conn, `test -f ${shellQuote(remoteResultPath)} && echo exists`);
 			if (checkResult.stdout.trim() === 'exists') {
 				emit(`Result file found on EC2 — mybench-runner completed before connection dropped. Downloading...`);
 				exitCode = 0;
@@ -214,7 +231,10 @@ async function executeEc2RunAsync(
 
 		// Clean up remote files — best-effort, don't fail the run if this errors
 		try {
-			await exec(conn, `rm -f ${remotePlanPath} ${remoteResultPath} && rm -rf ${ec2Server.log_dir}`);
+			await exec(
+				conn,
+				`rm -f ${shellQuote(remotePlanPath)} ${shellQuote(remoteResultPath)} && rm -rf ${shellQuote(remoteLogDir)}`
+			);
 		} catch { /* ignore */ }
 
 		emit(`\n=== EC2 benchmark completed ===`);
