@@ -1,80 +1,17 @@
 <script lang="ts">
-  import LineChart from '$lib/LineChart.svelte';
-
-  type TelemetryPhase = 'pre' | 'bench' | 'post';
-  type TelemetryValueKind = 'count' | 'bytes' | 'percent' | 'duration_ms' | 'tps' | 'text' | 'flag';
-
-  interface TelemetryCard {
-    key: string;
-    label: string;
-    kind: TelemetryValueKind;
-    value: number | string | boolean | null;
-    infoText?: string;
-  }
-
-  interface TelemetryTableColumn {
-    key: string;
-    label: string;
-    kind?: TelemetryValueKind;
-  }
-
-  interface TelemetrySeriesPoint {
-    t: number;
-    v: number;
-  }
-
-  interface TelemetrySeries {
-    label: string;
-    color: string;
-    points: TelemetrySeriesPoint[];
-  }
-
-  interface TelemetryChartMetric {
-    key: string;
-    label: string;
-    kind: TelemetryValueKind;
-    title: string;
-    series: TelemetrySeries[];
-  }
-
-  interface TelemetryMarker {
-    t: number;
-    label: string;
-    color?: string;
-  }
-
-  interface TelemetrySection {
-    key: string;
-    label: string;
-    status: 'ok' | 'no_data' | 'unsupported';
-    reason?: string;
-    summary: TelemetryCard[];
-    chartTitle: string;
-    chartSeries: TelemetrySeries[];
-    chartMetrics?: TelemetryChartMetric[];
-    defaultChartMetricKey?: string;
-    tableTitle: string;
-    tableColumns: TelemetryTableColumn[];
-    tableRows: Record<string, unknown>[];
-  }
-
-  interface RunTelemetry {
-    runId: number;
-    database: string;
-    originTs: string;
-    availablePhases: TelemetryPhase[];
-    selectedPhases: TelemetryPhase[];
-    markers: TelemetryMarker[];
-    heroCards: TelemetryCard[];
-    sections: TelemetrySection[];
-  }
+  import { fetchRunTelemetry } from '$lib/telemetry/api';
+  import TelemetrySectionPanel from '$lib/telemetry/TelemetrySectionPanel.svelte';
+  import TelemetryValueCard from '$lib/telemetry/TelemetryValueCard.svelte';
+  import type { RunTelemetry, TelemetryPhase } from '$lib/telemetry/types';
 
   let {
     runId,
-    active = false
+    active = false,
+    title = 'Database Telemetry'
   }: {
     runId: number;
     active?: boolean;
+    title?: string;
   } = $props();
 
   const PHASES: TelemetryPhase[] = ['pre', 'bench', 'post'];
@@ -84,32 +21,19 @@
   let loading = $state(false);
   let error = $state('');
   let selectedPhases = $state<TelemetryPhase[]>([...DEFAULT_PHASES]);
-  let selectedChartMetrics = $state<Record<string, string>>({});
-  let openInfoKey = $state<string | null>(null);
   let requestSeq = 0;
-  const phaseKey = $derived(selectedPhases.join(','));
-  const chartMetricSignature = $derived(
-    telemetry
-      ? telemetry.sections
-          .map((section) => `${section.key}:${section.defaultChartMetricKey ?? ''}:${section.chartMetrics?.map((metric) => metric.key).join(',') ?? ''}`)
-          .join('|')
-      : ''
-  );
+
+  const phaseKey = $derived(`${runId}:${selectedPhases.join(',')}`);
+  const originMs = $derived(telemetry ? new Date(telemetry.originTs).getTime() : null);
 
   async function loadTelemetry() {
     const seq = ++requestSeq;
     loading = true;
     error = '';
     try {
-      const params = new URLSearchParams();
-      params.set('phases', selectedPhases.join(','));
-      const res = await fetch(`/api/runs/${runId}/telemetry?${params.toString()}`);
-      const json = await res.json();
-      if (!res.ok) {
-        throw new Error(json.message ?? `HTTP ${res.status}`);
-      }
+      const nextTelemetry = await fetchRunTelemetry(runId, selectedPhases);
       if (seq !== requestSeq) return;
-      telemetry = json as RunTelemetry;
+      telemetry = nextTelemetry;
     } catch (err) {
       if (seq !== requestSeq) return;
       error = err instanceof Error ? err.message : String(err);
@@ -128,104 +52,17 @@
     }
   }
 
-  function getInfoKey(scope: string, cardKey: string): string {
-    return `${scope}:${cardKey}`;
-  }
-
-  function toggleInfo(infoKey: string) {
-    openInfoKey = openInfoKey === infoKey ? null : infoKey;
-  }
-
-  function handleWindowClick(event: MouseEvent) {
-    const target = event.target;
-    if (target instanceof Element && target.closest('.metric-info')) return;
-    openInfoKey = null;
-  }
-
-  function handleWindowKeydown(event: KeyboardEvent) {
-    if (event.key === 'Escape') openInfoKey = null;
-  }
-
-  function setChartMetric(sectionKey: string, metricKey: string) {
-    selectedChartMetrics = { ...selectedChartMetrics, [sectionKey]: metricKey };
-  }
-
-  function getActiveChartMetric(section: TelemetrySection): TelemetryChartMetric | null {
-    if (!section.chartMetrics?.length) return null;
-    const selected = selectedChartMetrics[section.key] ?? section.defaultChartMetricKey ?? section.chartMetrics[0].key;
-    return section.chartMetrics.find((metric) => metric.key === selected) ?? section.chartMetrics[0];
-  }
-
-  function formatNumber(value: number, maxFractionDigits = 2): string {
-    return value.toLocaleString(undefined, {
-      minimumFractionDigits: Number.isInteger(value) ? 0 : Math.min(1, maxFractionDigits),
-      maximumFractionDigits: maxFractionDigits
-    });
-  }
-
-  function formatBytes(value: number): string {
-    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-    let current = value;
-    let unit = 0;
-    while (Math.abs(current) >= 1024 && unit < units.length - 1) {
-      current /= 1024;
-      unit++;
-    }
-    const digits = Math.abs(current) >= 10 || unit === 0 ? 0 : 1;
-    return `${current.toFixed(digits)} ${units[unit]}`;
-  }
-
-  function formatDurationMs(value: number): string {
-    if (Math.abs(value) >= 1000) return `${(value / 1000).toFixed(2)} s`;
-    return `${formatNumber(value, 1)} ms`;
-  }
-
-  function formatValue(value: unknown, kind: TelemetryValueKind = 'text'): string {
-    if (value === null || value === undefined || value === '') return '—';
-    if (kind === 'flag') return value ? 'yes' : 'no';
-    if (kind === 'text') return String(value);
-    const numeric = typeof value === 'number' ? value : Number(value);
-    if (!Number.isFinite(numeric)) return String(value);
-    if (kind === 'bytes') return formatBytes(numeric);
-    if (kind === 'percent') return `${(numeric * 100).toFixed(1)}%`;
-    if (kind === 'duration_ms') return formatDurationMs(numeric);
-    if (kind === 'tps') return `${formatNumber(numeric, 2)} TPS`;
-    return formatNumber(numeric, 2);
-  }
-
-  const originMs = $derived(telemetry ? new Date(telemetry.originTs).getTime() : null);
-
   $effect(() => {
     if (!active) return;
     phaseKey;
     void loadTelemetry();
   });
-
-  $effect(() => {
-    chartMetricSignature;
-    if (!telemetry) return;
-    const next = { ...selectedChartMetrics };
-    let changed = false;
-    for (const section of telemetry.sections) {
-      if (!section.chartMetrics?.length) continue;
-      const current = next[section.key];
-      if (current && section.chartMetrics.some((metric) => metric.key === current)) continue;
-      const fallback = section.defaultChartMetricKey ?? section.chartMetrics[0].key;
-      if (next[section.key] !== fallback) {
-        next[section.key] = fallback;
-        changed = true;
-      }
-    }
-    if (changed) selectedChartMetrics = next;
-  });
 </script>
-
-<svelte:window onclick={handleWindowClick} onkeydown={handleWindowKeydown} />
 
 <div class="card telemetry-card">
   <div class="telemetry-toolbar">
     <div>
-      <h3 style="margin:0">Database Telemetry</h3>
+      <h3 style="margin:0">{title}</h3>
       {#if telemetry?.database}
         <div class="telemetry-subtitle">Database: <code>{telemetry.database}</code></div>
       {/if}
@@ -251,144 +88,29 @@
   {:else if telemetry}
     <div class="hero-grid">
       {#each telemetry.heroCards as card}
-        {@const infoKey = getInfoKey('hero', card.key)}
-        <div class="hero-card">
-          <div class="metric-card-top">
-            <div class="hero-label">{card.label}</div>
-            {#if card.infoText}
-              <div class="metric-info">
-                <button
-                  type="button"
-                  class="metric-info-btn"
-                  aria-label={`Explain ${card.label}`}
-                  title={`Explain ${card.label}`}
-                  aria-expanded={openInfoKey === infoKey}
-                  onclick={() => toggleInfo(infoKey)}
-                >i</button>
-                {#if openInfoKey === infoKey}
-                  <div class="metric-popover" role="note">
-                    <div class="metric-popover-title">{card.label}</div>
-                    <p>{card.infoText}</p>
-                  </div>
-                {/if}
-              </div>
-            {/if}
-          </div>
-          <div class="hero-value">{formatValue(card.value, card.kind)}</div>
-        </div>
+        <TelemetryValueCard {card} variant="hero" />
       {/each}
     </div>
 
     <div class="section-list">
       {#each telemetry.sections as section}
-        <section class="telemetry-section">
-          <div class="section-header">
-            <div>
-              <h4 style="margin:0">{section.label}</h4>
-              {#if section.reason && section.status !== 'ok'}
-                <div class="section-reason">{section.reason}</div>
-              {/if}
-            </div>
-            <span class="section-status {section.status}">{section.status.replace('_', ' ')}</span>
-          </div>
-
-          {#if section.status === 'ok'}
-            {@const activeChartMetric = getActiveChartMetric(section)}
-            <div class="summary-grid">
-              {#each section.summary as card}
-                {@const infoKey = getInfoKey(section.key, card.key)}
-                <div class="summary-card">
-                  <div class="metric-card-top">
-                    <div class="summary-label">{card.label}</div>
-                    {#if card.infoText}
-                      <div class="metric-info">
-                        <button
-                          type="button"
-                          class="metric-info-btn"
-                          aria-label={`Explain ${card.label}`}
-                          title={`Explain ${card.label}`}
-                          aria-expanded={openInfoKey === infoKey}
-                          onclick={() => toggleInfo(infoKey)}
-                        >i</button>
-                        {#if openInfoKey === infoKey}
-                          <div class="metric-popover" role="note">
-                            <div class="metric-popover-title">{card.label}</div>
-                            <p>{card.infoText}</p>
-                          </div>
-                        {/if}
-                      </div>
-                    {/if}
-                  </div>
-                  <div class="summary-value">{formatValue(card.value, card.kind)}</div>
-                </div>
-              {/each}
-            </div>
-
-            {#if section.chartMetrics && section.chartMetrics.length > 0}
-              <div class="chart-metric-toolbar">
-                <span class="chart-metric-label">Metric</span>
-                <div class="chart-metric-list">
-                  {#each section.chartMetrics as metric}
-                    <button
-                      type="button"
-                      class="chart-metric-chip"
-                      class:active={activeChartMetric?.key === metric.key}
-                      onclick={() => setChartMetric(section.key, metric.key)}
-                    >{metric.label}</button>
-                  {/each}
-                </div>
-              </div>
-            {/if}
-
-            <LineChart
-              title={activeChartMetric?.title ?? section.chartTitle}
-              series={activeChartMetric?.series ?? section.chartSeries}
-              markers={telemetry.markers}
-              originMs={originMs}
-              showAllSeriesByDefault={!!activeChartMetric}
-            />
-
-            {#if section.tableRows.length > 0}
-              <div class="table-block">
-                <div class="table-title">{section.tableTitle}</div>
-                <div class="table-wrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        {#each section.tableColumns as column}
-                          <th>{column.label}</th>
-                        {/each}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {#each section.tableRows as row}
-                        <tr>
-                          {#each section.tableColumns as column}
-                            <td class:mono={column.kind !== 'text' && column.kind !== 'flag'}>
-                              {formatValue(
-                                row[column.key],
-                                column.key === 'value'
-                                  ? ((row.value_kind as TelemetryValueKind | undefined) ?? column.kind ?? 'text')
-                                  : (column.kind ?? 'text')
-                              )}
-                            </td>
-                          {/each}
-                        </tr>
-                      {/each}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            {/if}
-          {/if}
-        </section>
+        <TelemetrySectionPanel
+          {section}
+          markers={telemetry.markers}
+          {originMs}
+        />
       {/each}
     </div>
   {/if}
 </div>
 
 <style>
-  .telemetry-card { display: flex; flex-direction: column; gap: 16px; }
+  .telemetry-card {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
   .telemetry-toolbar {
     display: flex;
     justify-content: space-between;
@@ -396,9 +118,27 @@
     align-items: flex-start;
     flex-wrap: wrap;
   }
-  .telemetry-subtitle { margin-top: 4px; color: #666; font-size: 12px; }
-  .phase-filter { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-  .phase-label { font-size: 12px; color: #666; font-weight: 600; text-transform: uppercase; }
+
+  .telemetry-subtitle {
+    margin-top: 4px;
+    color: #666;
+    font-size: 12px;
+  }
+
+  .phase-filter {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .phase-label {
+    font-size: 12px;
+    color: #666;
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+
   .phase-chip {
     border: 1px solid #d9d9d9;
     background: #fff;
@@ -408,156 +148,30 @@
     font-size: 12px;
     cursor: pointer;
   }
-  .phase-chip.active { background: #0066cc; border-color: #0066cc; color: #fff; }
-  .phase-chip:disabled { cursor: not-allowed; opacity: 0.45; }
+
+  .phase-chip.active {
+    background: #0066cc;
+    border-color: #0066cc;
+    color: #fff;
+  }
+
+  .phase-chip:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
+
   .hero-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
     gap: 10px;
   }
-  .hero-card, .summary-card {
-    border: 1px solid #ececec;
-    border-radius: 8px;
-    padding: 10px 12px;
-    background: #fafafa;
-    position: relative;
-  }
-  .metric-card-top {
-    display: flex;
-    justify-content: space-between;
-    gap: 8px;
-    align-items: flex-start;
-  }
-  .hero-label, .summary-label {
-    font-size: 11px;
-    color: #666;
-    text-transform: uppercase;
-    font-weight: 700;
-    margin-bottom: 4px;
-  }
-  .metric-info {
-    position: relative;
-    flex: 0 0 auto;
-  }
-  .metric-info-btn {
-    list-style: none;
-    width: 20px;
-    height: 20px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    border: 1px solid #d7deea;
-    border-radius: 999px;
-    background: #fff;
-    color: #49617a;
-    font-size: 12px;
-    font-weight: 700;
-    cursor: pointer;
-    user-select: none;
-    line-height: 1;
-    padding: 0;
-  }
-  .metric-info-btn:hover {
-    background: #f5f9ff;
-    border-color: #b8cee9;
-  }
-  .metric-info-btn[aria-expanded='true'] {
-    background: #edf4ff;
-    border-color: #99bbe8;
-    color: #174a85;
-  }
-  .metric-popover {
-    position: absolute;
-    top: calc(100% + 8px);
-    right: 0;
-    z-index: 10;
-    width: min(280px, calc(100vw - 64px));
-    padding: 10px 12px;
-    border: 1px solid #dbe4f0;
-    border-radius: 10px;
-    background: #fff;
-    box-shadow: 0 10px 28px rgba(30, 41, 59, 0.16);
-  }
-  .metric-popover-title {
-    font-size: 12px;
-    font-weight: 700;
-    color: #22324a;
-    margin-bottom: 6px;
-  }
-  .metric-popover p {
-    margin: 0;
-    font-size: 12px;
-    line-height: 1.45;
-    color: #4a5565;
-    text-transform: none;
-  }
-  .hero-value { font-size: 18px; font-weight: 700; color: #222; }
-  .summary-value { font-size: 14px; font-weight: 700; color: #222; }
-  .section-list { display: flex; flex-direction: column; gap: 16px; }
-  .telemetry-section {
-    border-top: 1px solid #efefef;
-    padding-top: 16px;
+
+  .section-list {
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 16px;
   }
-  .section-header {
-    display: flex;
-    justify-content: space-between;
-    gap: 8px;
-    align-items: flex-start;
-    flex-wrap: wrap;
-  }
-  .section-status {
-    font-size: 11px;
-    font-weight: 700;
-    text-transform: uppercase;
-    border-radius: 999px;
-    padding: 3px 8px;
-  }
-  .section-status.ok { background: #e8f7f1; color: #0b6b50; }
-  .section-status.no_data { background: #fff4e5; color: #9a4d00; }
-  .section-status.unsupported { background: #f2f2f2; color: #666; }
-  .section-reason { margin-top: 4px; color: #777; font-size: 12px; }
-  .summary-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-    gap: 8px;
-  }
-  .chart-metric-toolbar {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-    flex-wrap: wrap;
-  }
-  .chart-metric-label {
-    font-size: 11px;
-    color: #666;
-    font-weight: 700;
-    text-transform: uppercase;
-  }
-  .chart-metric-list {
-    display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
-  }
-  .chart-metric-chip {
-    border: 1px solid #d9d9d9;
-    background: #fff;
-    color: #666;
-    border-radius: 999px;
-    padding: 4px 10px;
-    font-size: 12px;
-    cursor: pointer;
-  }
-  .chart-metric-chip.active {
-    background: #0f172a;
-    border-color: #0f172a;
-    color: #fff;
-  }
-  .table-block { display: flex; flex-direction: column; gap: 8px; }
-  .table-title { font-size: 12px; font-weight: 700; color: #444; text-transform: uppercase; }
-  .mono { font-family: monospace; }
+
   .telemetry-empty {
     padding: 20px;
     border: 1px dashed #d8d8d8;
@@ -566,5 +180,8 @@
     color: #777;
     font-size: 13px;
   }
-  .telemetry-error { color: #a11; }
+
+  .telemetry-error {
+    color: #a11;
+  }
 </style>
