@@ -26,11 +26,18 @@ export interface DesignLike {
 	}[];
 }
 
+export function getRunnablePgbenchScripts<T extends { weight?: number }>(scripts: T[]): T[] {
+	return scripts.filter((script) => (script.weight ?? 1) > 0);
+}
+
 export function validateScriptWeights(design: DesignLike): WeightError[] {
 	const errors: WeightError[] = [];
 	for (const step of design.steps ?? []) {
 		if (step.type === 'pgbench' && (step.pgbench_scripts ?? []).length > 0) {
-			const total = (step.pgbench_scripts ?? []).reduce((sum, ps) => sum + (ps.weight ?? 1), 0);
+			const total = getRunnablePgbenchScripts(step.pgbench_scripts ?? []).reduce(
+				(sum, ps) => sum + (ps.weight ?? 1),
+				0
+			);
 			if (total > 100) errors.push({ step: step.name, totalWeight: total });
 		}
 	}
@@ -43,7 +50,7 @@ export function validateDesignParams(design: DesignLike): ValidationError[] {
 	for (const step of design.steps ?? []) {
 		const scripts =
 			step.type === 'pgbench'
-				? (step.pgbench_scripts ?? []).map(ps => ({ name: ps.name, text: ps.script }))
+				? getRunnablePgbenchScripts(step.pgbench_scripts ?? []).map(ps => ({ name: ps.name, text: ps.script }))
 				: [{ name: step.name, text: step.script }];
 		for (const s of scripts) {
 			for (const ph of findPlaceholders(s.text)) {

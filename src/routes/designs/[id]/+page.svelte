@@ -3,7 +3,7 @@
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import CodeEditor from '$lib/CodeEditor.svelte';
-  import { validateDesignParams, validateScriptWeights, type ValidationError, type WeightError } from '$lib/params';
+  import { getRunnablePgbenchScripts, validateDesignParams, validateScriptWeights, type ValidationError, type WeightError } from '$lib/params';
   import type { DesignStepType } from '$lib/types';
   import type { PageData } from './$types';
 
@@ -99,12 +99,17 @@
   let profileFormName = $state('');
   let profileFormValues = $state<{ param_name: string; value: string }[]>([]);
 
+  function parseScriptWeight(value: string): number {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isNaN(parsed) ? 0 : Math.max(0, parsed);
+  }
+
   function openRunModal() {
     if (!design) return;
     if (!isValid) {
       const parts = [];
       if (validationErrors.length > 0) parts.push(`${validationErrors.length} undefined placeholder(s)`);
-      if (weightErrors.length > 0) parts.push(`${weightErrors.length} script weight issue(s)`);
+      if (weightErrors.length > 0) parts.push(`${weightErrors.length} active script weight issue(s)`);
       msg = `Cannot run: ${parts.join(', ')}. Check validation.`;
       return;
     }
@@ -192,8 +197,8 @@
       }
       if (weightErrors.length > 0) {
         if (lines.length > 0) lines.push('');
-        lines.push(`${weightErrors.length} script weight issue(s):`);
-        weightErrors.forEach(e => lines.push(`  "${e.step}": total weight ${e.totalWeight} exceeds 100`));
+        lines.push(`${weightErrors.length} active script weight issue(s):`);
+        weightErrors.forEach(e => lines.push(`  "${e.step}": active total weight ${e.totalWeight} exceeds 100`));
       }
       lines.push('\nSave anyway?');
       if (!confirm(lines.join('\n'))) return;
@@ -417,9 +422,9 @@
       {/each}
     {/if}
     {#if weightErrors.length > 0}
-      <div class="validation-title" style={validationErrors.length > 0 ? 'margin-top:8px' : ''}>⚠ Script weight exceeds 100:</div>
+      <div class="validation-title" style={validationErrors.length > 0 ? 'margin-top:8px' : ''}>⚠ Active script weight exceeds 100:</div>
       {#each weightErrors as e}
-        <div class="validation-item">· "{e.step}": total weight <strong>{e.totalWeight}</strong> (max 100)</div>
+        <div class="validation-item">· "{e.step}": active total weight <strong>{e.totalWeight}</strong> (max 100)</div>
       {/each}
     {/if}
   </div>
@@ -757,7 +762,8 @@
         </div>
       {:else if selectedStep.type === 'pgbench'}
         {@const scripts = selectedStep.pgbench_scripts ?? []}
-        {@const totalWeight = scripts.reduce((s, ps) => s + (ps.weight || 0), 0)}
+        {@const runnableScripts = getRunnablePgbenchScripts(scripts)}
+        {@const totalWeight = runnableScripts.reduce((sum, ps) => sum + (ps.weight ?? 1), 0)}
         <div class="pgbench-split">
           <div class="scripts-panel">
             <div class="scripts-list">
@@ -765,6 +771,7 @@
                 <div
                   class="script-item"
                   class:script-selected={selectedScriptIdx === i}
+                  class:script-ignored={(ps.weight ?? 1) <= 0}
                   role="button"
                   tabindex="0"
                   onclick={() => selectedScriptIdx = i}
@@ -789,10 +796,13 @@
                       type="number"
                       class="weight-input"
                       value={ps.weight}
-                      oninput={(e) => { ps.weight = parseInt((e.currentTarget as HTMLInputElement).value) || 1; }}
+                      oninput={(e) => { ps.weight = parseScriptWeight((e.currentTarget as HTMLInputElement).value); }}
                       onclick={(e) => e.stopPropagation()}
-                      min="1"
+                      min="0"
                     />
+                    {#if (ps.weight ?? 1) <= 0}
+                      <span class="script-ignored-tag" title="Scripts with weight 0 are skipped when this step runs">ignored</span>
+                    {/if}
                     <button
                       class="icon-btn danger-icon"
                       onclick={(e) => { e.stopPropagation(); removeScript(selectedStep!, i); }}
@@ -804,8 +814,9 @@
               <button class="add-script-btn" onclick={() => addScript(selectedStep!)}>+ Add Script</button>
             </div>
             <div class="scripts-total" class:total-exact={totalWeight === 100} class:total-warn={totalWeight !== 100}>
-              Total weight: <strong>{totalWeight}</strong>
+              Active total weight: <strong>{totalWeight}</strong>
               {#if totalWeight !== 100}<span class="total-hint">(target: 100)</span>{/if}
+              <span class="total-hint">· weight 0 = skip</span>
             </div>
           </div>
           <div class="editor-wrap">
@@ -1363,6 +1374,7 @@
   }
   .script-item:hover { background: #2a2a3e; }
   .script-item.script-selected { border-left-color: #a6e3a1; background: #252535; }
+  .script-item.script-ignored { opacity: 0.75; }
   .script-item-name-row {
     display: flex;
     align-items: center;
@@ -1406,6 +1418,24 @@
     padding: 1px 3px;
     border-radius: 3px;
     text-align: center;
+    flex-shrink: 0;
+  }
+  .weight-input::-webkit-outer-spin-button,
+  .weight-input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  .weight-input {
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+  .script-ignored-tag {
+    color: #f9e2af;
+    background: #3b3440;
+    border: 1px solid #5c4b52;
+    border-radius: 999px;
+    font-size: 10px;
+    padding: 1px 6px;
     flex-shrink: 0;
   }
   .add-script-btn {

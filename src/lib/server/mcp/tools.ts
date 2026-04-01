@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { getRunnablePgbenchScripts } from '$lib/params';
 import getDb from '$lib/server/db';
 import { createPool } from '$lib/server/pg-client';
 import { SNAP_TABLE_MAP } from '$lib/server/pg-stats';
@@ -577,10 +578,14 @@ Call this before run_design or export_plan to catch problems early.`,
 				for (const step of enabledSteps) {
 					if (step.type === 'pgbench') {
 						const scripts = scriptsByStep.get(step.id) ?? [];
-						if (scripts.length === 0) {
-							issues.push({ severity: 'warning', code: 'PGBENCH_NO_SCRIPTS', message: `pgbench step "${step.name}" has no scripts defined. It will run pgbench's built-in TPC-B scenario instead.` });
+						const runnableScripts = getRunnablePgbenchScripts(scripts);
+						if (runnableScripts.length === 0) {
+							const message = scripts.length === 0
+								? `pgbench step "${step.name}" has no scripts defined. It will run pgbench's built-in TPC-B scenario instead.`
+								: `pgbench step "${step.name}" has no active scripts because all weights are 0. It will run pgbench's built-in TPC-B scenario instead.`;
+							issues.push({ severity: 'warning', code: 'PGBENCH_NO_SCRIPTS', message });
 						} else {
-							const totalWeight = scripts.reduce((sum, ps) => sum + (ps.weight ?? 1), 0);
+							const totalWeight = runnableScripts.reduce((sum, ps) => sum + (ps.weight ?? 1), 0);
 							if (totalWeight > 100) {
 								issues.push({ severity: 'error', code: 'PGBENCH_WEIGHT_EXCEEDS_100', message: `pgbench step "${step.name}" has scripts with a total weight of ${totalWeight}. Total weight must not exceed 100.` });
 							}
@@ -604,7 +609,7 @@ Call this before run_design or export_plan to catch problems early.`,
 				}
 				if (step.type === 'pgbench') {
 					if (step.pgbench_options) textsToCheck.push({ label: `pgbench_options`, text: step.pgbench_options });
-					for (const ps of scriptsByStep.get(step.id) ?? []) {
+					for (const ps of getRunnablePgbenchScripts(scriptsByStep.get(step.id) ?? [])) {
 						textsToCheck.push({ label: `script "${ps.name}"`, text: ps.script });
 					}
 				}

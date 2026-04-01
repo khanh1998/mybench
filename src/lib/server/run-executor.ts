@@ -7,6 +7,7 @@ import {
 	getEnabledTablesForRun,
 	resetPgStatStatements
 } from '$lib/server/pg-stats';
+import { getRunnablePgbenchScripts } from '$lib/params';
 import { runPgbench, runSqlStep, type SqlStepOptions } from '$lib/server/pgbench';
 import { createRun, completeRun, setPool, setSnapshotTimer, setActivePhase } from '$lib/server/run-manager';
 import { substituteParams } from '$lib/server/params';
@@ -216,7 +217,14 @@ export function startRun(designId: number, opts: StartRunOptions = {}): number {
 					if (scripts.length === 0 && step.script) {
 						scripts = [{ id: step.id, name: 'script', weight: 1, script: step.script, step_id: step.id, position: 0 }];
 					}
-					const substitutedScripts = scripts.map(ps => ({
+					const runnableScripts = getRunnablePgbenchScripts(scripts);
+					if (scripts.length > 0 && runnableScripts.length === 0) {
+						logStepLine('[pgbench] All custom scripts have weight 0. Running pgbench built-in scenario.');
+					} else if (runnableScripts.length < scripts.length) {
+						logStepLine(`[pgbench] Ignoring ${scripts.length - runnableScripts.length} script(s) with weight 0.`);
+					}
+
+					const substitutedScripts = runnableScripts.map(ps => ({
 						...ps,
 						script: substituteParams(ps.script, resolvedParams)
 					}));

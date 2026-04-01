@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import { writeFileSync, unlinkSync, existsSync } from 'fs';
 import { join } from 'path';
 import { EventEmitter } from 'events';
+import { getRunnablePgbenchScripts } from '$lib/params';
 import type { PgbenchScript } from '$lib/types';
 
 export interface PgbenchResult {
@@ -33,7 +34,7 @@ export function runPgbench(
 	return new Promise((resolve) => {
 		const tempFiles: string[] = [];
 		const fileArgs: string[] = [];
-		for (const s of opts.scripts) {
+		for (const s of getRunnablePgbenchScripts(opts.scripts)) {
 			const p = join('/tmp', `mybench-${opts.runId}-${opts.stepId}-${s.id}.pgbench`);
 			writeFileSync(p, s.script, 'utf8');
 			tempFiles.push(p);
