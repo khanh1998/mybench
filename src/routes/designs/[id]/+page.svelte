@@ -49,13 +49,12 @@
   interface Run { id: number; status: string; tps: number|null; latency_avg_ms: number|null; started_at: string; profile_name: string; name: string; }
   interface Profile { id: number; design_id: number; name: string; values: { param_name: string; value: string }[]; }
 
-  let design: Design | null = $state(data.design as Design | null);
-  let servers: Server[] = $state((data.servers ?? []) as Server[]);
-  let ec2Servers: Ec2Server[] = $state((data.ec2Servers ?? []) as Ec2Server[]);
-  let runs: Run[] = $state((data.runs ?? []) as Run[]);
-  let profiles: Profile[] = $state((data.profiles ?? []) as Profile[]);
-  const initialStep = design?.steps?.find(s => s.enabled) ?? design?.steps?.[0] ?? null;
-  let selectedStepId = $state<number|null>(initialStep?.id ?? null);
+  let design = $state<Design | null>(null);
+  let servers = $state<Server[]>([]);
+  let ec2Servers = $state<Ec2Server[]>([]);
+  let runs = $state<Run[]>([]);
+  let profiles = $state<Profile[]>([]);
+  let selectedStepId = $state<number|null>(null);
   let selectedScriptIdx = $state(0);
   let saving = $state(false);
   let startingRun = $state(false);
@@ -98,6 +97,17 @@
   let editingProfileId = $state<number|null>(null);
   let profileFormName = $state('');
   let profileFormValues = $state<{ param_name: string; value: string }[]>([]);
+
+  $effect(() => {
+    const nextDesign = (data.design as Design | null) ?? null;
+    design = nextDesign ? structuredClone(nextDesign) : null;
+    servers = [...((data.servers ?? []) as Server[])];
+    ec2Servers = [...((data.ec2Servers ?? []) as Ec2Server[])];
+    runs = [...((data.runs ?? []) as Run[])];
+    profiles = [...((data.profiles ?? []) as Profile[])];
+    selectedStepId = nextDesign?.steps?.find(s => s.enabled)?.id ?? nextDesign?.steps?.[0]?.id ?? null;
+    selectedScriptIdx = 0;
+  });
 
   function parseScriptWeight(value: string): number {
     const parsed = Number.parseInt(value, 10);
@@ -467,9 +477,21 @@
 
 <!-- Run confirmation modal -->
 {#if showRunModal && design}
-  <div class="modal-backdrop" onclick={() => showRunModal = false}>
-    <div class="modal" onclick={(e) => e.stopPropagation()}>
-      <h3 style="margin:0 0 16px">Configure Run</h3>
+  <div
+    class="modal-backdrop"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="run-modal-title"
+    tabindex="-1"
+    onclick={(e) => {
+      if (e.currentTarget === e.target) showRunModal = false;
+    }}
+    onkeydown={(e) => {
+      if (e.key === 'Escape') showRunModal = false;
+    }}
+  >
+    <div class="modal">
+      <h3 id="run-modal-title" style="margin:0 0 16px">Configure Run</h3>
 
       <div class="form-group">
         <label for="run-name">Run name <span style="color:#aaa;font-weight:400">(optional)</span></label>
@@ -487,8 +509,8 @@
         </div>
       {/if}
 
-      <div class="form-group">
-        <label>Run location</label>
+      <fieldset class="form-group modal-fieldset">
+        <legend>Run location</legend>
         <div style="display:flex; gap:16px">
           <label style="font-weight:normal; cursor:pointer; display:flex; align-items:center; gap:6px">
             <input type="radio" bind:group={runMode} value="local" style="width:auto" />
@@ -499,7 +521,7 @@
             EC2{#if ec2Servers.length === 0}<span style="color:#aaa; font-size:11px; margin-left:4px">(none configured)</span>{/if}
           </label>
         </div>
-      </div>
+      </fieldset>
 
       {#if runMode === 'ec2'}
         <div class="form-group">
@@ -566,9 +588,21 @@
 
 <!-- Import Run modal -->
 {#if showImportModal}
-  <div class="modal-backdrop" onclick={() => showImportModal = false}>
-    <div class="modal" onclick={(e) => e.stopPropagation()}>
-      <h3 style="margin:0 0 16px">Import Run Result</h3>
+  <div
+    class="modal-backdrop"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="import-modal-title"
+    tabindex="-1"
+    onclick={(e) => {
+      if (e.currentTarget === e.target) showImportModal = false;
+    }}
+    onkeydown={(e) => {
+      if (e.key === 'Escape') showImportModal = false;
+    }}
+  >
+    <div class="modal">
+      <h3 id="import-modal-title" style="margin:0 0 16px">Import Run Result</h3>
       <div class="form-group">
         <label for="import-file">Result JSON file</label>
         <input
@@ -650,7 +684,13 @@
     <div class="runs-section" style={runsCollapsed ? '' : `height:${runsHeight}px`}>
       <!-- Resize handle (drag up to expand) -->
       {#if !runsCollapsed}
-        <div class="runs-resize-handle" onmousedown={startRunsResize} role="separator" aria-orientation="horizontal" aria-label="Resize run history"></div>
+        <button
+          type="button"
+          class="runs-resize-handle"
+          onmousedown={startRunsResize}
+          aria-label="Resize run history"
+          title="Drag to resize run history"
+        ></button>
       {/if}
       <div class="runs-section-header">
         <button class="runs-collapse-btn" onclick={() => runsCollapsed = !runsCollapsed} title="{runsCollapsed ? 'Expand' : 'Collapse'} run history">
@@ -893,19 +933,31 @@
 
   <!-- Profile form modal -->
   {#if showProfileForm}
-    <div class="modal-backdrop" onclick={() => showProfileForm = false}>
-      <div class="modal" onclick={(e) => e.stopPropagation()}>
-        <h3 style="margin:0 0 16px">{editingProfileId ? 'Edit Profile' : 'Add Profile'}</h3>
+    <div
+      class="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="profile-modal-title"
+      tabindex="-1"
+      onclick={(e) => {
+        if (e.currentTarget === e.target) showProfileForm = false;
+      }}
+      onkeydown={(e) => {
+        if (e.key === 'Escape') showProfileForm = false;
+      }}
+    >
+      <div class="modal">
+        <h3 id="profile-modal-title" style="margin:0 0 16px">{editingProfileId ? 'Edit Profile' : 'Add Profile'}</h3>
         <div class="form-group">
           <label for="profile-name">Profile name</label>
           <input id="profile-name" bind:value={profileFormName} placeholder="e.g. small, medium, large" />
         </div>
         {#if profileFormValues.length > 0}
           <div style="font-size:12px;font-weight:600;color:#555;margin-bottom:8px">Parameter overrides</div>
-          {#each profileFormValues as v}
+          {#each profileFormValues as v, i}
             <div class="form-group" style="margin-bottom:8px;display:flex;align-items:center;gap:8px">
-              <label style="width:90px;font-size:12px;margin:0;font-family:monospace;color:#333">{v.param_name}</label>
-              <input style="flex:1" bind:value={v.value} placeholder="value" />
+              <label for={`profile-value-${i}`} style="width:90px;font-size:12px;margin:0;font-family:monospace;color:#333">{v.param_name}</label>
+              <input id={`profile-value-${i}`} style="flex:1" bind:value={v.value} placeholder="value" />
             </div>
           {/each}
         {/if}
@@ -937,6 +989,8 @@
   .modal .form-group label { display: block; font-size: 12px; font-weight: 600; color: #555; margin-bottom: 4px; }
   .modal .form-group input, .modal .form-group select { width: 100%; box-sizing: border-box; }
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+  .modal-fieldset { border: 0; padding: 0; margin: 0 0 14px; min-width: 0; }
+  .modal-fieldset legend { font-size: 12px; font-weight: 600; color: #555; margin-bottom: 4px; padding: 0; }
 
   /* Phase timeline (config + modal) */
   .phase-timeline, .run-timeline {
@@ -1002,15 +1056,6 @@
   button.active { background: #e8f0fe; border-color: #0066cc; color: #0066cc; }
   button.warn { background: #fff3cd; border-color: #f0a500; color: #7a4f00; }
   button.warn.active { background: #ffe08a; }
-  a.btn {
-    display: inline-flex; align-items: center;
-    padding: 4px 10px; font-size: 13px; font-weight: 500;
-    border: 1px solid #ccc; border-radius: 4px;
-    background: #fff; color: #333;
-    text-decoration: none; cursor: pointer;
-    white-space: nowrap;
-  }
-  a.btn:hover { background: #f0f0f0; }
 
   .validation-panel {
     background: #fff8e1;
@@ -1217,11 +1262,14 @@
     /* height set via inline style when expanded */
   }
   .runs-resize-handle {
+    width: 100%;
     flex-shrink: 0;
     height: 4px;
     cursor: row-resize;
     background: transparent;
     transition: background 0.15s;
+    border: none;
+    padding: 0;
   }
   .runs-resize-handle:hover { background: #45475a; }
   .runs-section-header {

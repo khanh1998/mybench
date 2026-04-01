@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
   import StackedAreaChart from '$lib/StackedAreaChart.svelte';
   import LineChart from '$lib/LineChart.svelte';
   import { buildLockTree, MAX_LOCK_DEPTH, type LockPairRow, type LockWaitInfo, type LockNode } from '$lib/lock-tree';
@@ -268,8 +267,9 @@
   ];
 
   // ── State ──────────────────────────────────────────────────────────────────
-  let localPhases = $state<string[]>(phases);
+  let localPhases = $state<string[]>([]);
   let loading = $state(false);
+  let phaseSourceSignature = '';
 
   let aasData    = $state<Record<number, AasRow[]>>({});
   let totalAas   = $state<Record<number, TotalAasRow[]>>({});
@@ -290,6 +290,14 @@
   let contentionData          = $state<Record<number, ContentionRow[]>>({});
   let lockSummary             = $state<Record<number, LockSummaryRow | null>>({});
   let lockTimeData            = $state<Record<number, LockTimeRow[]>>({});
+
+  $effect(() => {
+    const signature = phases.join('|');
+    if (signature !== phaseSourceSignature) {
+      localPhases = [...phases];
+      phaseSourceSignature = signature;
+    }
+  });
 
   function toggleLockNode(key: string) {
     const next = new Set(expandedLockNodes);
@@ -1238,7 +1246,6 @@
     loadAll();
   });
 
-  onMount(() => { loadAll(); });
 </script>
 
 <!-- Phase filter -->
@@ -1479,23 +1486,31 @@
   {@const isExpanded = expandedLockNodes.has(key)}
   {@const stateBg = node.waitInfo ? '#fee2e2' : node.state === 'active' ? '#dcfce7' : '#fef3c7'}
   {@const stateColor = node.waitInfo ? '#991b1b' : node.state === 'active' ? '#166534' : '#92400e'}
-  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
   <div
     class="lock-node-row"
+    role="button"
+    tabindex="0"
     style:padding-left="{depth * 18 + 6}px"
     onclick={() => activeLockNode = { node, runLabel: String(runId) }}
+    onkeydown={(e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        activeLockNode = { node, runLabel: String(runId) };
+      }
+    }}
     title="Click for details"
   >
     <!-- level index -->
     <span class="lock-idx">{idx + 1}</span>
     <!-- toggle arrow -->
-    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <span
+    <button
+      type="button"
       class="lock-toggle-btn"
       onclick={(e) => { e.stopPropagation(); if (hasChildren) toggleLockNode(key); }}
-      style:cursor={hasChildren ? 'pointer' : 'default'}
       style:color={hasChildren ? '#555' : '#ddd'}
-    >{#if hasChildren}{isExpanded ? '▼' : '▶'}{:else}·{/if}</span>
+      disabled={!hasChildren}
+      aria-label={hasChildren ? (isExpanded ? 'Collapse blocked sessions' : 'Expand blocked sessions') : 'No blocked sessions'}
+    >{#if hasChildren}{isExpanded ? '▼' : '▶'}{:else}·{/if}</button>
 
     <span class="lock-pid-badge {node.waitInfo ? 'blocked' : 'blocker'}">PID {node.pid}</span>
     <span class="lock-state-badge" style:background={stateBg} style:color={stateColor}>{node.state}</span>
@@ -1637,9 +1652,19 @@
 
 <!-- ── Flame Popup ─────────────────────────────────────────────────────────── -->
 {#if activeFlame || flameLoading}
-  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
-  <div role="dialog" aria-modal="true" class="flame-overlay" onclick={() => activeFlame = null}>
-    <div role="document" class="flame-modal" onclick={e => e.stopPropagation()}>
+  <div
+    role="dialog"
+    aria-modal="true"
+    tabindex="-1"
+    class="flame-overlay"
+    onclick={(e) => {
+      if (e.currentTarget === e.target) activeFlame = null;
+    }}
+    onkeydown={(e) => {
+      if (e.key === 'Escape') activeFlame = null;
+    }}
+  >
+    <div role="document" class="flame-modal">
       <div class="flame-modal-header">
         <span class="flame-modal-title">Wait Profile</span>
         <div class="flame-header-actions">
@@ -1728,9 +1753,19 @@
 
 <!-- ── Lock Detail Popup ─────────────────────────────────────────────────── -->
 {#if activeLockNode}
-  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_no_noninteractive_element_interactions -->
-  <div role="dialog" aria-modal="true" class="flame-overlay" onclick={() => activeLockNode = null}>
-    <div role="document" class="lock-detail-modal" onclick={e => e.stopPropagation()}>
+  <div
+    role="dialog"
+    aria-modal="true"
+    tabindex="-1"
+    class="flame-overlay"
+    onclick={(e) => {
+      if (e.currentTarget === e.target) activeLockNode = null;
+    }}
+    onkeydown={(e) => {
+      if (e.key === 'Escape') activeLockNode = null;
+    }}
+  >
+    <div role="document" class="lock-detail-modal">
       <div class="flame-modal-header">
         <span class="flame-modal-title">Lock Detail — PID {activeLockNode.node.pid}</span>
         <button class="flame-close" onclick={() => activeLockNode = null}>✕</button>
@@ -1802,7 +1837,19 @@
   .lock-node-row:last-child { border-bottom: none; }
   .lock-node-row:hover { background: #f0f4ff; }
   .lock-idx { font-size: 9px; color: #ccc; font-family: monospace; min-width: 14px; text-align: right; flex-shrink: 0; margin-top: 3px; }
-  .lock-toggle-btn { flex-shrink: 0; font-size: 10px; width: 14px; text-align: center; margin-top: 2px; user-select: none; }
+  .lock-toggle-btn {
+    flex-shrink: 0;
+    font-size: 10px;
+    width: 14px;
+    text-align: center;
+    margin-top: 2px;
+    user-select: none;
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+  }
+  .lock-toggle-btn:disabled { cursor: default; }
   .lock-blocking-label { font-size: 11px; color: #888; }
   .lock-node-query { flex-basis: 100%; font-family: monospace; font-size: 10px; color: #888; padding: 1px 0 0 34px; white-space: pre-wrap; word-break: break-all; }
   .lock-flat-note { font-size: 10px; color: #b45309; background: #fef3c7; padding: 2px 8px; border-bottom: 1px solid #e8e8e8; }
@@ -1851,11 +1898,7 @@
   .ct-row:hover { background: #fafafa; }
   .ct-resource { display: flex; align-items: center; gap: 4px; min-width: 0; }
   .ct-resname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #333; font-family: monospace; font-size: 10px; font-weight: 600; }
-  .ct-type { display: flex; }
   .ct-mode { color: #555; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 10px; }
-  .ct-waited-cell { display: flex; align-items: center; gap: 4px; }
-  .ct-bar-bg { flex: 1; height: 6px; background: #f0f0f0; border-radius: 3px; overflow: hidden; min-width: 16px; }
-  .ct-bar { height: 100%; background: #d63300; border-radius: 3px; }
   .ct-waited-num { color: #cc2200; font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums; }
   .ct-held-num { color: #666; font-variant-numeric: tabular-nums; }
   .ct-pids-num { color: #888; text-align: center; font-variant-numeric: tabular-nums; }
@@ -1887,14 +1930,9 @@
   .sql-table .query-cell { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: monospace; font-size: 11px; }
 
   .wait-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; font-weight: 600; white-space: nowrap; }
-  .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; background: #f0f0f0; color: #555; }
-  .badge-warn { background: #fff3e0; color: #b84d00; }
 
   .bar-bg { height: 8px; background: #f0f0f0; border-radius: 4px; overflow: hidden; }
   .bar-fill { height: 100%; border-radius: 4px; transition: width 0.2s; }
-
-  .pct-bar-wrap { display: flex; align-items: center; gap: 6px; min-width: 80px; }
-  .pct-bar { height: 8px; background: #0066cc; border-radius: 3px; min-width: 2px; flex-shrink: 0; }
 
   /* Waits header row (desc + vCPU input) */
   .waits-header-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }

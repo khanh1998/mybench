@@ -1,7 +1,7 @@
 <script lang="ts">
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import { marked } from 'marked';
   import MarkdownEditor from '$lib/MarkdownEditor.svelte';
   import LoadAnalysis from '$lib/LoadAnalysis.svelte';
@@ -37,12 +37,12 @@
     elapsed_secs: number;
   }
 
-  let run: Run | null = $state(data.run as Run | null);
+  let run = $state<Run | null>(null);
   let done = $state(false);
   let finalStatus = $state('');
   let editingName = $state(false);
-  let nameEdit = $state(run?.name ?? '');
-  let notesEdit = $state(run?.notes ?? '');
+  let nameEdit = $state('');
+  let notesEdit = $state('');
   let notesSaveStatus = $state<'' | 'saving' | 'saved'>('');
   let notesTimer: ReturnType<typeof setTimeout> | null = null;
   let notesMode = $state<'edit' | 'view'>('edit');
@@ -54,9 +54,17 @@
   let scrollPending = false;
   let phases: PhaseState[] = $state([]);
   let activeTab = $state<'overview' | 'load' | 'telemetry'>('overview');
+  let nameInput = $state<HTMLInputElement | null>(null);
   const phaseTimers = new Map<string, ReturnType<typeof setInterval>>();
 
   const pendingLines: string[] = [];
+
+  $effect(() => {
+    const nextRun = (data.run as Run | null) ?? null;
+    run = nextRun;
+    nameEdit = nextRun?.name ?? '';
+    notesEdit = nextRun?.notes ?? '';
+  });
 
   function appendLine(line: string) {
     if (!outputEl) { pendingLines.push(line); return; }
@@ -216,6 +224,14 @@
     expandedStep = expandedStep === stepId ? null : stepId;
   }
 
+  async function startEditingName() {
+    nameEdit = run?.name ?? '';
+    editingName = true;
+    await tick();
+    nameInput?.focus();
+    nameInput?.select();
+  }
+
   onMount(() => {
     if (run?.status === 'running') {
       connectSSE();
@@ -241,14 +257,14 @@
     <input
       class="run-name-input"
       bind:value={nameEdit}
+      bind:this={nameInput}
       onblur={saveName}
       onkeydown={(e) => { if (e.key === 'Enter') saveName(); if (e.key === 'Escape') { editingName = false; nameEdit = run?.name ?? ''; } }}
-      autofocus
     />
   {:else}
-    <h1 style="margin-left:8px; cursor:pointer" title="Click to edit name" onclick={() => { nameEdit = run?.name ?? ''; editingName = true; }}>
-      {run?.name || `Run #${runId}`}
-    </h1>
+    <button type="button" class="run-name-trigger" title="Click to edit name" onclick={startEditingName}>
+      <span class="run-name-title">{run?.name || `Run #${runId}`}</span>
+    </button>
   {/if}
   {#if run}
     <span class="badge badge-{run.status}">{run.status}</span>
@@ -399,10 +415,10 @@
     {@const parsedParams = (() => { try { return JSON.parse(run.run_params) as { name: string; value: string }[]; } catch { return []; } })()}
     {#if parsedParams.length > 0}
       <div class="card" style="margin-bottom:12px">
-        <div class="row" style="cursor:pointer; user-select:none" onclick={() => showRunParams = !showRunParams}>
-          <h3 style="margin:0">Parameters used</h3>
-          <span style="margin-left:8px; color:#888; font-size:12px">{showRunParams ? '▲' : '▼'} {parsedParams.length} param(s)</span>
-        </div>
+        <button type="button" class="run-params-toggle" onclick={() => showRunParams = !showRunParams}>
+          <span class="run-params-title">Parameters used</span>
+          <span class="run-params-meta">{showRunParams ? '▲' : '▼'} {parsedParams.length} param(s)</span>
+        </button>
         {#if showRunParams}
           <div class="params-grid" style="margin-top:8px">
             {#each parsedParams as p}
@@ -545,12 +561,40 @@
     background: #e8d8ff; color: #5500aa; font-size: 11px; font-weight: 700;
     padding: 2px 8px; border-radius: 10px; margin-left: 6px;
   }
+  .run-name-trigger {
+    margin-left: 8px;
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    text-align: left;
+  }
+  .run-name-title {
+    font-size: 32px;
+    font-weight: 700;
+    color: #222;
+    line-height: 1.2;
+  }
   .run-name-input {
     margin-left: 8px; font-size: 22px; font-weight: 700;
     border: none; border-bottom: 2px solid #0066cc;
     background: transparent; outline: none; color: #222;
     flex: 1; min-width: 0;
   }
+  .run-params-toggle {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    text-align: left;
+  }
+  .run-params-title { font-size: 18px; font-weight: 600; color: #222; }
+  .run-params-meta { color: #888; font-size: 12px; }
   .params-grid { display: flex; flex-direction: column; gap: 4px; }
   .param-row { display: flex; align-items: center; gap: 8px; }
   .param-name { background: #f0f0f0; color: #5500aa; padding: 1px 6px; border-radius: 3px; font-size: 12px; }

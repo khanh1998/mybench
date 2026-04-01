@@ -1,7 +1,13 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import type { ActionData } from './$types';
 
   let { form }: { form: ActionData } = $props();
+  let passwordInput: HTMLInputElement | null = null;
+
+  onMount(() => {
+    passwordInput?.focus();
+  });
 </script>
 
 <div class="login-wrap">
@@ -9,10 +15,10 @@
     <h1>mybench</h1>
     <form method="POST">
       <input
+        bind:this={passwordInput}
         type="password"
         name="password"
         placeholder="Password"
-        autofocus
         autocomplete="current-password"
       />
       {#if form?.error}
