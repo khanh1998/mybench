@@ -6,7 +6,8 @@ function pair(blocking: number, blocked: number, locktype = 'relation'): LockPai
   return {
     blocking_pid: blocking, blocking_query: `query-${blocking}`, blocking_state: 'active',
     blocked_pid: blocked,   blocked_query:  `query-${blocked}`,  blocked_state:  'waiting',
-    locktype, requested_mode: 'ExclusiveLock', held_mode: 'ExclusiveLock', times_seen: 1,
+    locktype, resource: 'public.accounts', object_key: `${locktype}:public.accounts`,
+    requested_mode: 'ExclusiveLock', held_mode: 'ExclusiveLock', times_seen: 1,
   };
 }
 
@@ -167,8 +168,40 @@ describe('buildLockTree', () => {
     expect(tree[0].waitInfo).toBeNull();
     expect(tree[0].children[0].waitInfo).toMatchObject({
       locktype: 'tuple',
+      resource: 'public.accounts',
       requested_mode: 'ExclusiveLock',
       held_mode: 'ExclusiveLock',
     });
+  });
+
+  it('keeps distinct edges for the same pid pair when lock modes differ', () => {
+    const tree = buildLockTree([
+      pair(1, 2),
+      {
+        ...pair(1, 2),
+        requested_mode: 'ShareLock',
+        held_mode: 'RowExclusiveLock',
+        object_key: 'relation:public.accounts:share'
+      }
+    ]);
+
+    expect(tree).toHaveLength(1);
+    expect(tree[0].children).toHaveLength(2);
+    expect(tree[0].children.map((n) => n.waitInfo?.requested_mode).sort()).toEqual(['ExclusiveLock', 'ShareLock']);
+  });
+
+  it('keeps distinct edges for the same pid pair when resource identity differs', () => {
+    const tree = buildLockTree([
+      pair(1, 2),
+      {
+        ...pair(1, 2),
+        resource: 'public.orders',
+        object_key: 'relation:public.orders'
+      }
+    ]);
+
+    expect(tree).toHaveLength(1);
+    expect(tree[0].children).toHaveLength(2);
+    expect(tree[0].children.map((n) => n.waitInfo?.resource).sort()).toEqual(['public.accounts', 'public.orders']);
   });
 });

@@ -332,6 +332,18 @@
     END`;
   }
 
+  function lockObjectKeyExpr(alias: string): string {
+    return `COALESCE(CAST(${alias}.database AS TEXT), '') || '|' ||
+      COALESCE(CAST(${alias}.relation AS TEXT), '') || '|' ||
+      COALESCE(CAST(${alias}.page AS TEXT), '') || '|' ||
+      COALESCE(CAST(${alias}.tuple AS TEXT), '') || '|' ||
+      COALESCE(${alias}.virtualxid, '') || '|' ||
+      COALESCE(${alias}.transactionid, '') || '|' ||
+      COALESCE(CAST(${alias}.classid AS TEXT), '') || '|' ||
+      COALESCE(CAST(${alias}.objid AS TEXT), '') || '|' ||
+      COALESCE(CAST(${alias}.objsubid AS TEXT), '')`;
+  }
+
   function lockConflictExpr(waitModeExpr: string, holdModeExpr: string): string {
     return `CASE
       WHEN ${waitModeExpr} = 'AccessShareLock' THEN ${holdModeExpr} IN ('AccessExclusiveLock')
@@ -584,33 +596,121 @@
 
       // Lock tree from raw pg_locks snapshots — compute blocking pairs in SQLite
       const lockRes = await queryApi(
-         `WITH pairs AS (
-            SELECT b.pid as blocked_pid, bl.pid as blocking_pid,
-                   b.locktype, b.mode as requested_mode, bl.mode as held_mode,
-                   COUNT(*) as times_seen
+         `WITH rels AS (
+            SELECT DISTINCT relid, schemaname, relname
+            FROM snap_pg_stat_user_tables
+            WHERE _run_id = ?
+          ),
+          pair_events AS (
+            SELECT
+              b._collected_at,
+              b.pid as blocked_pid,
+              bl.pid as blocking_pid,
+              ${lockResourceExpr('b')} as resource,
+              ${lockObjectKeyExpr('b')} as object_key,
+              b.locktype,
+              b.mode as requested_mode,
+              bl.mode as held_mode
             FROM snap_pg_locks b
             JOIN snap_pg_locks bl
               ON ${lockObjectMatch('b', 'bl')}
               AND b.pid != bl.pid
               AND b.granted = 0 AND bl.granted = 1
               AND ${lockConflictExpr('b.mode', 'bl.mode')}
+            LEFT JOIN rels t ON t.relid = b.relation
             WHERE b._run_id = ? AND ${clause.replace(/_phase/g, 'b._phase')}
-           GROUP BY b.pid, bl.pid, b.locktype, b.mode, bl.mode
-         ),
-         latest_act AS (
-           SELECT pid, query, state,
-                  ROW_NUMBER() OVER (PARTITION BY pid ORDER BY _collected_at DESC) as rn
-           FROM snap_pg_stat_activity WHERE _run_id = ?
-         )
-         SELECT p.*,
-                ba.query as blocked_query, ba.state as blocked_state,
-                bla.query as blocking_query, bla.state as blocking_state
-         FROM pairs p
-         LEFT JOIN latest_act ba ON ba.pid = p.blocked_pid AND ba.rn = 1
-         LEFT JOIN latest_act bla ON bla.pid = p.blocking_pid AND bla.rn = 1
-         ORDER BY times_seen DESC
-         LIMIT 200`,
-        [rid, ...pParams, rid]
+          ),
+          pairs AS (
+            SELECT
+              blocked_pid,
+              blocking_pid,
+              resource,
+              object_key,
+              locktype,
+              requested_mode,
+              held_mode,
+              COUNT(*) as times_seen,
+              MAX(_collected_at) as last_seen_at
+            FROM pair_events
+            GROUP BY blocked_pid, blocking_pid, resource, object_key, locktype, requested_mode, held_mode
+          ),
+          blocked_act AS (
+            SELECT
+              p.blocked_pid,
+              p.blocking_pid,
+              p.resource,
+              p.object_key,
+              p.locktype,
+              p.requested_mode,
+              p.held_mode,
+              a.query,
+              a.state,
+              ROW_NUMBER() OVER (
+                PARTITION BY p.blocked_pid, p.blocking_pid, p.resource, p.object_key, p.locktype, p.requested_mode, p.held_mode
+                ORDER BY ABS((julianday(a._collected_at) - julianday(p.last_seen_at)) * 86400), a._collected_at DESC
+              ) as rn
+            FROM pairs p
+            LEFT JOIN snap_pg_stat_activity a
+              ON a._run_id = ?
+              AND a.pid = p.blocked_pid
+              AND ${clause.replace(/_phase/g, 'a._phase')}
+          ),
+          blocking_act AS (
+            SELECT
+              p.blocked_pid,
+              p.blocking_pid,
+              p.resource,
+              p.object_key,
+              p.locktype,
+              p.requested_mode,
+              p.held_mode,
+              a.query,
+              a.state,
+              ROW_NUMBER() OVER (
+                PARTITION BY p.blocked_pid, p.blocking_pid, p.resource, p.object_key, p.locktype, p.requested_mode, p.held_mode
+                ORDER BY ABS((julianday(a._collected_at) - julianday(p.last_seen_at)) * 86400), a._collected_at DESC
+              ) as rn
+            FROM pairs p
+            LEFT JOIN snap_pg_stat_activity a
+              ON a._run_id = ?
+              AND a.pid = p.blocking_pid
+              AND ${clause.replace(/_phase/g, 'a._phase')}
+          )
+          SELECT
+            p.blocked_pid,
+            p.blocking_pid,
+            p.resource,
+            p.object_key,
+            p.locktype,
+            p.requested_mode,
+            p.held_mode,
+            p.times_seen,
+            ba.query as blocked_query,
+            ba.state as blocked_state,
+            bla.query as blocking_query,
+            bla.state as blocking_state
+          FROM pairs p
+          LEFT JOIN blocked_act ba
+            ON ba.blocked_pid = p.blocked_pid
+            AND ba.blocking_pid = p.blocking_pid
+            AND ba.resource = p.resource
+            AND ba.object_key = p.object_key
+            AND ba.locktype = p.locktype
+            AND ba.requested_mode = p.requested_mode
+            AND ba.held_mode = p.held_mode
+            AND ba.rn = 1
+          LEFT JOIN blocking_act bla
+            ON bla.blocked_pid = p.blocked_pid
+            AND bla.blocking_pid = p.blocking_pid
+            AND bla.resource = p.resource
+            AND bla.object_key = p.object_key
+            AND bla.locktype = p.locktype
+            AND bla.requested_mode = p.requested_mode
+            AND bla.held_mode = p.held_mode
+            AND bla.rn = 1
+          ORDER BY p.times_seen DESC
+          LIMIT 200`,
+        [rid, rid, ...pParams, rid, ...pParams, rid, ...pParams]
       );
       locksData = { ...locksData, [rid]: lockRes.error ? [] : (lockRes.rows as unknown as LockPairRow[]) };
 
@@ -1403,6 +1503,9 @@
     {#if node.waitInfo}
       <span class="lock-mode-info">
         waiting for <span class="lock-badge">{node.waitInfo.locktype}</span>
+        {#if node.waitInfo.resource !== node.waitInfo.locktype}
+          <span class="lock-badge-dim">on {node.waitInfo.resource}</span>
+        {/if}
         <span class="lock-badge-dim">{node.waitInfo.requested_mode}</span>
         <span class="lock-held-dim">(holds {node.waitInfo.held_mode})</span>
       </span>
@@ -1437,45 +1540,21 @@
         <div class="lock-panel">
           {#if isCompare}<div class="run-label" style="color:{run.color}">{run.label}</div>{/if}
 
-          <!-- Lock activity time-series chart -->
-          {#if buildLockTimeSeries(run).some(s => s.points.length > 1)}
-            <div style="margin-bottom:12px">
-              <LineChart series={buildLockTimeSeries(run)} title="Lock Contention (Waiting vs Blocking PIDs per snapshot)" originMs={origin(run)} />
-            </div>
-          {/if}
-
-          <div class="lock-layout">
-
-            <!-- ── Left: blocking chain tree ── -->
-            <div class="lock-chain-col">
-              <div class="lock-chain-header">
-                <div class="lock-subsec-title">Lock Chain</div>
-                <div class="lock-chain-meta">
-                  <div class="lock-sort-bar">
-                    <span class="lock-sort-label">Sort by</span>
-                    <button class="lock-sort-btn" class:active={lockSort === 'times_seen'} onclick={() => lockSort = 'times_seen'}>Duration</button>
-                    <button class="lock-sort-btn" class:active={lockSort === 'pid'} onclick={() => lockSort = 'pid'}>PID</button>
-                  </div>
-                  <span class="lock-subsec-hint">Max depth {MAX_LOCK_DEPTH}</span>
-                </div>
+          <div class="lock-top-row">
+            {#if buildLockTimeSeries(run).some(s => s.points.length > 1)}
+              <div class="lock-chart-wrap">
+                <LineChart series={buildLockTimeSeries(run)} title="Lock Contention (Waiting vs Blocking PIDs per snapshot)" originMs={origin(run)} />
               </div>
-              <div class="lock-tree">
-                {#each tree as root, ri}
-                  {@render lockNodeRow(root, run.id, 0, String(run.id), ri)}
-                {/each}
-              </div>
-            </div>
+            {/if}
 
-            <!-- ── Right: contention summary ── -->
-            <div class="lock-summary-col">
-              {#if summary}
+            {#if summary}
+              <div class="lock-summary-col">
                 <div class="ct-gran-bar">
                   <span class="lock-sort-label">View:</span>
                   <button class="lock-sort-btn" class:active={contentionGranularity === 'all'} onclick={() => contentionGranularity = 'all'}>Overview</button>
                   <button class="lock-sort-btn" class:active={contentionGranularity === 'table'} onclick={() => contentionGranularity = 'table'}>By Table</button>
                   <button class="lock-sort-btn" class:active={contentionGranularity === 'table+mode'} onclick={() => contentionGranularity = 'table+mode'}>Table + Mode</button>
                 </div>
-
                 {#if contentionGranularity === 'all'}
                   <div class="lock-stat-grid">
                     <div class="lsg-cell">
@@ -1527,9 +1606,28 @@
                 {:else}
                   <div class="empty" style="font-size:11px">Loading breakdown…</div>
                 {/if}
-              {/if}
-            </div>
+              </div>
+            {/if}
+          </div>
 
+          <!-- ── Lock chain tree ── -->
+          <div class="lock-chain-col lock-chain-section">
+            <div class="lock-chain-header">
+              <div class="lock-subsec-title">Lock Chain</div>
+              <div class="lock-chain-meta">
+                <div class="lock-sort-bar">
+                  <span class="lock-sort-label">Sort by</span>
+                  <button class="lock-sort-btn" class:active={lockSort === 'times_seen'} onclick={() => lockSort = 'times_seen'}>Duration</button>
+                  <button class="lock-sort-btn" class:active={lockSort === 'pid'} onclick={() => lockSort = 'pid'}>PID</button>
+                </div>
+                <span class="lock-subsec-hint">Max depth {MAX_LOCK_DEPTH}</span>
+              </div>
+            </div>
+            <div class="lock-tree">
+              {#each tree as root, ri}
+                {@render lockNodeRow(root, run.id, 0, String(run.id), ri)}
+              {/each}
+            </div>
           </div>
         </div>
       {/if}
@@ -1642,6 +1740,7 @@
         <div class="ldg-row"><span class="ldg-label">State</span><span class="ldg-val">{activeLockNode.node.state}</span></div>
         {#if activeLockNode.node.waitInfo}
           <div class="ldg-row"><span class="ldg-label">Lock Type</span><span class="ldg-val">{activeLockNode.node.waitInfo.locktype}</span></div>
+          <div class="ldg-row"><span class="ldg-label">Resource</span><span class="ldg-val">{activeLockNode.node.waitInfo.resource}</span></div>
           <div class="ldg-row"><span class="ldg-label">Requested Mode</span><span class="ldg-val">{activeLockNode.node.waitInfo.requested_mode}</span></div>
           <div class="ldg-row"><span class="ldg-label">Held Mode (blocker)</span><span class="ldg-val">{activeLockNode.node.waitInfo.held_mode}</span></div>
           <div class="ldg-row"><span class="ldg-label">Times Seen</span><span class="ldg-val">{activeLockNode.node.waitInfo.times_seen}× across snapshots</span></div>
@@ -1681,9 +1780,11 @@
 
   /* ── Lock layout: tree left, summary right ── */
   .lock-panel { margin-bottom: 16px; }
-  .lock-layout { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
-  .lock-chain-col { flex: 1.6; min-width: 260px; }
-  .lock-summary-col { flex: 1; min-width: 260px; }
+  .lock-top-row { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.95fr); align-items: start; gap: 16px; margin-bottom: 14px; }
+  .lock-chart-wrap { min-width: 0; max-width: 560px; }
+  .lock-chain-col { min-width: 260px; }
+  .lock-chain-section { width: 100%; }
+  .lock-summary-col { min-width: 0; }
   .lock-chain-header { margin-bottom: 8px; }
   .lock-chain-meta { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
   .lock-subsec-title { font-size: 12px; font-weight: 700; color: #333; margin-bottom: 6px; }
@@ -1723,7 +1824,7 @@
   .lsg-val.lsg-hot { color: #cc2200; }
 
   /* ── Granularity toggle ── */
-  .ct-gran-bar { display: flex; align-items: center; gap: 6px; margin: 10px 0 6px; }
+  .ct-gran-bar { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; flex-wrap: wrap; justify-content: flex-start; }
 
   /* ── Contention table — columns vary by granularity ── */
   .ct-table { font-size: 11px; border: 1px solid #e8e8e8; border-radius: 5px; overflow: hidden; }
@@ -1742,6 +1843,11 @@
   .ct-header { background: #f7f7f7; font-weight: 600; color: #666; border-bottom: 1px solid #e8e8e8; }
   .ct-row { border-bottom: 1px solid #f3f3f3; }
   .ct-row:last-child { border-bottom: none; }
+
+  @media (max-width: 900px) {
+    .lock-top-row { grid-template-columns: 1fr; }
+    .lock-chart-wrap { max-width: none; }
+  }
   .ct-row:hover { background: #fafafa; }
   .ct-resource { display: flex; align-items: center; gap: 4px; min-width: 0; }
   .ct-resname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #333; font-family: monospace; font-size: 10px; font-weight: 600; }

@@ -1,11 +1,12 @@
 export interface LockPairRow {
   blocked_pid: number; blocked_query: string | null; blocked_state: string | null;
   blocking_pid: number; blocking_query: string | null; blocking_state: string | null;
-  locktype: string; requested_mode: string; held_mode: string; times_seen: number;
+  locktype: string; resource: string; object_key: string;
+  requested_mode: string; held_mode: string; times_seen: number;
 }
 
 export interface LockWaitInfo {
-  locktype: string; requested_mode: string; held_mode: string; times_seen: number;
+  locktype: string; resource: string; requested_mode: string; held_mode: string; times_seen: number;
 }
 
 export interface LockNode {
@@ -20,7 +21,15 @@ export const MAX_LOCK_DEPTH = 5;
 /** Stop expanding the tree after this many nodes to prevent exponential blowup on dense graphs. */
 const MAX_TREE_NODES = 500;
 
-type Edge = { pid: number; locktype: string; requested_mode: string; held_mode: string; times_seen: number };
+type Edge = {
+  pid: number;
+  locktype: string;
+  resource: string;
+  object_key: string;
+  requested_mode: string;
+  held_mode: string;
+  times_seen: number;
+};
 
 export function buildLockTree(pairs: LockPairRow[]): LockNode[] {
   const pidInfo = new Map<number, { query: string; state: string }>();
@@ -35,8 +44,23 @@ export function buildLockTree(pairs: LockPairRow[]): LockNode[] {
   for (const p of pairs) {
     if (!edges.has(p.blocking_pid)) edges.set(p.blocking_pid, []);
     const arr = edges.get(p.blocking_pid)!;
-    if (!arr.some(e => e.pid === p.blocked_pid && e.locktype === p.locktype))
-      arr.push({ pid: p.blocked_pid, locktype: p.locktype, requested_mode: p.requested_mode, held_mode: p.held_mode, times_seen: p.times_seen });
+    if (!arr.some(e =>
+      e.pid === p.blocked_pid &&
+      e.locktype === p.locktype &&
+      e.object_key === p.object_key &&
+      e.requested_mode === p.requested_mode &&
+      e.held_mode === p.held_mode
+    )) {
+      arr.push({
+        pid: p.blocked_pid,
+        locktype: p.locktype,
+        resource: p.resource,
+        object_key: p.object_key,
+        requested_mode: p.requested_mode,
+        held_mode: p.held_mode,
+        times_seen: p.times_seen
+      });
+    }
   }
 
   let nodeCount = 0;
@@ -60,7 +84,19 @@ export function buildLockTree(pairs: LockPairRow[]): LockNode[] {
         seen.add(cPid);
         nodeCount++;
         const cInfo = pidInfo.get(cPid) ?? { query: '(unknown)', state: '—' };
-        node.children.push({ pid: cPid, query: cInfo.query, state: cInfo.state, waitInfo: { locktype: edge.locktype, requested_mode: edge.requested_mode, held_mode: edge.held_mode, times_seen: edge.times_seen }, children: [] });
+        node.children.push({
+          pid: cPid,
+          query: cInfo.query,
+          state: cInfo.state,
+          waitInfo: {
+            locktype: edge.locktype,
+            resource: edge.resource,
+            requested_mode: edge.requested_mode,
+            held_mode: edge.held_mode,
+            times_seen: edge.times_seen
+          },
+          children: []
+        });
         for (const e of (edges.get(cPid) ?? [])) {
           if (!seen.has(e.pid)) queue.push({ pid: e.pid, edge: e });
         }
@@ -72,7 +108,13 @@ export function buildLockTree(pairs: LockPairRow[]): LockNode[] {
     for (const edge of (edges.get(pid) ?? [])) {
       if (nodeCount >= MAX_TREE_NODES) break;
       node.children.push(buildNode(edge.pid,
-        { locktype: edge.locktype, requested_mode: edge.requested_mode, held_mode: edge.held_mode, times_seen: edge.times_seen },
+        {
+          locktype: edge.locktype,
+          resource: edge.resource,
+          requested_mode: edge.requested_mode,
+          held_mode: edge.held_mode,
+          times_seen: edge.times_seen
+        },
         nextVisited, depth + 1));
     }
     return node;
