@@ -1,20 +1,16 @@
-import { json } from '@sveltejs/kit';
-import getDb from '$lib/server/db';
+import { json, error } from '@sveltejs/kit';
+import { listPgServers, savePgServer } from '$lib/server/services/pg-servers';
 import type { RequestHandler } from './$types';
 
 export const GET: RequestHandler = () => {
-	const db = getDb();
-	const servers = db.prepare('SELECT * FROM pg_servers ORDER BY id').all();
-	return json(servers);
+	return json(listPgServers());
 };
 
 export const POST: RequestHandler = async ({ request }) => {
-	const db = getDb();
 	const body = await request.json();
-	const { name, host, port, username, password, ssl } = body;
-	const result = db.prepare(
-		'INSERT INTO pg_servers (name, host, port, username, password, ssl) VALUES (?, ?, ?, ?, ?, ?)'
-	).run(name, host ?? 'localhost', port ?? 5432, username ?? 'postgres', password ?? '', ssl ? 1 : 0);
-	const server = db.prepare('SELECT * FROM pg_servers WHERE id = ?').get(result.lastInsertRowid);
-	return json(server, { status: 201 });
+	try {
+		return json(savePgServer(body).server, { status: 201 });
+	} catch (err) {
+		throw error(400, err instanceof Error ? err.message : String(err));
+	}
 };

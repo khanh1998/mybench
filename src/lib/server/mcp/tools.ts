@@ -2,12 +2,25 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { getRunnablePgbenchScripts } from '$lib/params';
 import getDb from '$lib/server/db';
-import { createPool, discoverPgStatTables, testConnection } from '$lib/server/pg-client';
+import { createPool } from '$lib/server/pg-client';
 import { SNAP_TABLE_MAP } from '$lib/server/pg-stats';
 import { startRun } from '$lib/server/run-executor';
 import { startEc2Run } from '$lib/server/ec2-executor';
-import { testEc2Connection } from '$lib/server/ec2-runner';
 import type { PgServer, Ec2Server, DesignStep, PgbenchScript, DesignParam } from '$lib/types';
+import {
+	deleteEc2Server,
+	listEc2Servers,
+	saveEc2Server,
+	testEc2Server
+} from '$lib/server/services/ec2-servers';
+import {
+	deletePgServer,
+	getPgServerTableSelections,
+	listPgServers,
+	savePgServer,
+	setPgServerTableSelections,
+	testPgServer
+} from '$lib/server/services/pg-servers';
 
 const EXCLUDED_SNAP_COLS = new Set(['_id', '_run_id', '_collected_at', '_phase', '_is_baseline', '_step_id']);
 
@@ -35,41 +48,6 @@ function scrubEc2Server(server: Ec2Server) {
 		port: server.port,
 		remote_dir: server.remote_dir,
 		log_dir: server.log_dir
-	};
-}
-
-async function populatePgStatSelections(server: PgServer, database: string) {
-	const db = getDb();
-	const { tables, versionNum } = await discoverPgStatTables(server, database);
-	const supportedTables = Object.keys(SNAP_TABLE_MAP);
-	const insert = db.prepare(
-		'INSERT OR IGNORE INTO pg_stat_table_selections (server_id, table_name, enabled) VALUES (?, ?, 1)'
-	);
-	const disable = db.prepare(
-		'UPDATE pg_stat_table_selections SET enabled = 0 WHERE server_id = ? AND table_name = ?'
-	);
-
-	db.transaction(() => {
-		for (const tableName of supportedTables) {
-			insert.run(server.id, tableName);
-		}
-		if (versionNum < 140000) disable.run(server.id, 'pg_stat_replication_slots');
-		if (versionNum < 150000) disable.run(server.id, 'pg_stat_subscription_stats');
-		if (versionNum < 180000) {
-			disable.run(server.id, 'pg_stat_wal');
-			disable.run(server.id, 'pg_stat_io');
-		}
-		if (versionNum < 170000) disable.run(server.id, 'pg_stat_checkpointer');
-	})();
-
-	const selections = db
-		.prepare('SELECT table_name, enabled FROM pg_stat_table_selections WHERE server_id = ? ORDER BY table_name')
-		.all(server.id) as { table_name: string; enabled: number }[];
-
-	return {
-		discovered_tables: tables,
-		version_num: versionNum,
-		table_selections: selections.map((row) => ({ table_name: row.table_name, enabled: !!row.enabled }))
 	};
 }
 
@@ -281,9 +259,7 @@ and the recommended workflow for creating and running a benchmark plan.`
 			description: 'Lists saved PostgreSQL connections from Settings. Returns non-secret fields only.'
 		},
 		async () => {
-			const db = getDb();
-			const servers = db.prepare('SELECT * FROM pg_servers ORDER BY id').all() as PgServer[];
-			return text(servers.map(scrubPgServer));
+			return text(listPgServers().map(scrubPgServer));
 		}
 	);
 
@@ -302,35 +278,12 @@ and the recommended workflow for creating and running a benchmark plan.`
 			}
 		},
 		async ({ server_id, name, host, port, username, password, ssl }) => {
-			const db = getDb();
-			const existing = server_id
-				? db.prepare('SELECT * FROM pg_servers WHERE id = ?').get(server_id) as PgServer | undefined
-				: undefined;
-			if (server_id && !existing) return text({ error: `PostgreSQL connection ${server_id} not found` });
-
-			const next = {
-				name: name ?? existing?.name ?? '',
-				host: host ?? existing?.host ?? 'localhost',
-				port: port ?? existing?.port ?? 5432,
-				username: username ?? existing?.username ?? 'postgres',
-				password: password ?? existing?.password ?? '',
-				ssl: ssl !== undefined ? (ssl ? 1 : 0) : (existing?.ssl ?? 0)
-			};
-			if (!next.name.trim()) return text({ error: 'name is required' });
-
-			if (existing) {
-				db.prepare(
-					'UPDATE pg_servers SET name=?, host=?, port=?, username=?, password=?, ssl=? WHERE id=?'
-				).run(next.name, next.host, next.port, next.username, next.password, next.ssl, server_id);
-				const saved = db.prepare('SELECT * FROM pg_servers WHERE id = ?').get(server_id) as PgServer;
-				return text({ action: 'updated', server: scrubPgServer(saved) });
+			try {
+				const result = savePgServer({ server_id, name, host, port, username, password, ssl });
+				return text({ action: result.action, server: scrubPgServer(result.server) });
+			} catch (err) {
+				return text({ error: err instanceof Error ? err.message : String(err) });
 			}
-
-			const result = db.prepare(
-				'INSERT INTO pg_servers (name, host, port, username, password, ssl) VALUES (?, ?, ?, ?, ?, ?)'
-			).run(next.name, next.host, next.port, next.username, next.password, next.ssl);
-			const saved = db.prepare('SELECT * FROM pg_servers WHERE id = ?').get(result.lastInsertRowid) as PgServer;
-			return text({ action: 'created', server: scrubPgServer(saved) });
 		}
 	);
 
@@ -343,11 +296,11 @@ and the recommended workflow for creating and running a benchmark plan.`
 			}
 		},
 		async ({ server_id }) => {
-			const db = getDb();
-			const existing = db.prepare('SELECT id, name FROM pg_servers WHERE id = ?').get(server_id) as { id: number; name: string } | undefined;
-			if (!existing) return text({ error: `PostgreSQL connection ${server_id} not found` });
-			db.prepare('DELETE FROM pg_servers WHERE id = ?').run(server_id);
-			return text({ deleted: true, server_id, name: existing.name });
+			try {
+				return text(deletePgServer(server_id));
+			} catch (err) {
+				return text({ error: err instanceof Error ? err.message : String(err) });
+			}
 		}
 	);
 
@@ -367,56 +320,11 @@ and the recommended workflow for creating and running a benchmark plan.`
 			}
 		},
 		async ({ server_id, host, port, username, password, ssl, database, populate_table_selections }) => {
-			const db = getDb();
-			const targetDatabase = database ?? 'postgres';
-
-			let target: PgServer | undefined;
-			if (server_id) {
-				target = db.prepare('SELECT * FROM pg_servers WHERE id = ?').get(server_id) as PgServer | undefined;
-				if (!target) return text({ error: `PostgreSQL connection ${server_id} not found` });
-			} else {
-				if (!host) return text({ error: 'host is required when server_id is omitted' });
-				target = {
-					id: 0,
-					name: '',
-					host,
-					port: port ?? 5432,
-					username: username ?? 'postgres',
-					password: password ?? '',
-					ssl: ssl ? 1 : 0
-				};
+			try {
+				return text(await testPgServer({ server_id, host, port, username, password, ssl, database, populate_table_selections }));
+			} catch (err) {
+				return text({ error: err instanceof Error ? err.message : String(err) });
 			}
-
-			const result = await testConnection(target, targetDatabase);
-			if (!result.ok) {
-				return text({
-					ok: false,
-					server_id: server_id ?? null,
-					database: targetDatabase,
-					error: result.error
-				});
-			}
-
-			let tableSelectionSync:
-				| { discovered_tables: string[]; version_num: number; table_selections: { table_name: string; enabled: boolean }[] }
-				| undefined;
-			let tableSelectionWarning: string | undefined;
-			if (server_id && populate_table_selections !== false) {
-				try {
-					tableSelectionSync = await populatePgStatSelections(target, targetDatabase);
-				} catch (err) {
-					tableSelectionWarning = err instanceof Error ? err.message : String(err);
-				}
-			}
-
-			return text({
-				ok: true,
-				server_id: server_id ?? null,
-				database: targetDatabase,
-				version: result.version,
-				table_selection_sync: tableSelectionSync,
-				table_selection_warning: tableSelectionWarning
-			});
 		}
 	);
 
@@ -429,17 +337,17 @@ and the recommended workflow for creating and running a benchmark plan.`
 			}
 		},
 		async ({ server_id }) => {
-			const db = getDb();
-			const existing = db.prepare('SELECT id, name FROM pg_servers WHERE id = ?').get(server_id) as { id: number; name: string } | undefined;
-			if (!existing) return text({ error: `PostgreSQL connection ${server_id} not found` });
-			const rows = db
-				.prepare('SELECT table_name, enabled FROM pg_stat_table_selections WHERE server_id = ? ORDER BY table_name')
-				.all(server_id) as { table_name: string; enabled: number }[];
-			return text({
-				server_id,
-				name: existing.name,
-				table_selections: rows.map((row) => ({ table_name: row.table_name, enabled: !!row.enabled }))
-			});
+			try {
+				return text({
+					server_id,
+					table_selections: getPgServerTableSelections(server_id).map((row) => ({
+						table_name: row.table_name,
+						enabled: !!row.enabled
+					}))
+				});
+			} catch (err) {
+				return text({ error: err instanceof Error ? err.message : String(err) });
+			}
 		}
 	);
 
@@ -456,40 +364,11 @@ and the recommended workflow for creating and running a benchmark plan.`
 			}
 		},
 		async ({ server_id, selections }) => {
-			const db = getDb();
-			const existing = db.prepare('SELECT id, name FROM pg_servers WHERE id = ?').get(server_id) as { id: number; name: string } | undefined;
-			if (!existing) return text({ error: `PostgreSQL connection ${server_id} not found` });
-
-			const currentRows = db
-				.prepare('SELECT table_name FROM pg_stat_table_selections WHERE server_id = ?')
-				.all(server_id) as { table_name: string }[];
-			if (currentRows.length === 0) {
-				return text({ error: `No table selections exist for PostgreSQL connection ${server_id}. Run test_pg_server(server_id) first.` });
+			try {
+				return text(setPgServerTableSelections(server_id, selections));
+			} catch (err) {
+				return text({ error: err instanceof Error ? err.message : String(err) });
 			}
-
-			const validNames = new Set(currentRows.map((row) => row.table_name));
-			const unknown = selections.map((row) => row.table_name).filter((name) => !validNames.has(name));
-			if (unknown.length > 0) {
-				return text({ error: `Unknown table selection(s): ${unknown.join(', ')}` });
-			}
-
-			const update = db.prepare(
-				'UPDATE pg_stat_table_selections SET enabled = ? WHERE server_id = ? AND table_name = ?'
-			);
-			db.transaction(() => {
-				for (const item of selections) {
-					update.run(item.enabled ? 1 : 0, server_id, item.table_name);
-				}
-			})();
-
-			const rows = db
-				.prepare('SELECT table_name, enabled FROM pg_stat_table_selections WHERE server_id = ? ORDER BY table_name')
-				.all(server_id) as { table_name: string; enabled: number }[];
-			return text({
-				updated: true,
-				server_id,
-				table_selections: rows.map((row) => ({ table_name: row.table_name, enabled: !!row.enabled }))
-			});
 		}
 	);
 
@@ -502,9 +381,7 @@ and the recommended workflow for creating and running a benchmark plan.`
 			description: 'Lists saved EC2 runner connections from Settings. Returns non-secret fields only.'
 		},
 		async () => {
-			const db = getDb();
-			const servers = db.prepare('SELECT * FROM ec2_servers ORDER BY id').all() as Ec2Server[];
-			return text(servers.map(scrubEc2Server));
+			return text(listEc2Servers().map(scrubEc2Server));
 		}
 	);
 
@@ -524,36 +401,12 @@ and the recommended workflow for creating and running a benchmark plan.`
 			}
 		},
 		async ({ ec2_server_id, name, host, user, port, private_key, remote_dir, log_dir }) => {
-			const db = getDb();
-			const existing = ec2_server_id
-				? db.prepare('SELECT * FROM ec2_servers WHERE id = ?').get(ec2_server_id) as Ec2Server | undefined
-				: undefined;
-			if (ec2_server_id && !existing) return text({ error: `EC2 server ${ec2_server_id} not found` });
-
-			const next = {
-				name: name ?? existing?.name ?? '',
-				host: host ?? existing?.host ?? '',
-				user: user ?? existing?.user ?? 'ec2-user',
-				port: port ?? existing?.port ?? 22,
-				private_key: private_key ?? existing?.private_key ?? '',
-				remote_dir: remote_dir ?? existing?.remote_dir ?? '~/mybench-bench',
-				log_dir: log_dir ?? existing?.log_dir ?? '/tmp/mybench-logs'
-			};
-			if (!next.name.trim()) return text({ error: 'name is required' });
-
-			if (existing) {
-				db.prepare(
-					'UPDATE ec2_servers SET name=?, host=?, user=?, port=?, private_key=?, remote_dir=?, log_dir=? WHERE id=?'
-				).run(next.name, next.host, next.user, next.port, next.private_key, next.remote_dir, next.log_dir, ec2_server_id);
-				const saved = db.prepare('SELECT * FROM ec2_servers WHERE id = ?').get(ec2_server_id) as Ec2Server;
-				return text({ action: 'updated', server: scrubEc2Server(saved) });
+			try {
+				const result = saveEc2Server({ ec2_server_id, name, host, user, port, private_key, remote_dir, log_dir });
+				return text({ action: result.action, server: scrubEc2Server(result.server) });
+			} catch (err) {
+				return text({ error: err instanceof Error ? err.message : String(err) });
 			}
-
-			const result = db.prepare(
-				'INSERT INTO ec2_servers (name, host, user, port, private_key, remote_dir, log_dir) VALUES (?, ?, ?, ?, ?, ?, ?)'
-			).run(next.name, next.host, next.user, next.port, next.private_key, next.remote_dir, next.log_dir);
-			const saved = db.prepare('SELECT * FROM ec2_servers WHERE id = ?').get(result.lastInsertRowid) as Ec2Server;
-			return text({ action: 'created', server: scrubEc2Server(saved) });
 		}
 	);
 
@@ -566,11 +419,11 @@ and the recommended workflow for creating and running a benchmark plan.`
 			}
 		},
 		async ({ ec2_server_id }) => {
-			const db = getDb();
-			const existing = db.prepare('SELECT id, name FROM ec2_servers WHERE id = ?').get(ec2_server_id) as { id: number; name: string } | undefined;
-			if (!existing) return text({ error: `EC2 server ${ec2_server_id} not found` });
-			db.prepare('DELETE FROM ec2_servers WHERE id = ?').run(ec2_server_id);
-			return text({ deleted: true, ec2_server_id, name: existing.name });
+			try {
+				return text(deleteEc2Server(ec2_server_id));
+			} catch (err) {
+				return text({ error: err instanceof Error ? err.message : String(err) });
+			}
 		}
 	);
 
@@ -589,32 +442,11 @@ and the recommended workflow for creating and running a benchmark plan.`
 			}
 		},
 		async ({ ec2_server_id, host, user, port, private_key, remote_dir, log_dir }) => {
-			const db = getDb();
-
-			let target: Ec2Server | undefined;
-			if (ec2_server_id) {
-				target = db.prepare('SELECT * FROM ec2_servers WHERE id = ?').get(ec2_server_id) as Ec2Server | undefined;
-				if (!target) return text({ error: `EC2 server ${ec2_server_id} not found` });
-			} else {
-				if (!host) return text({ error: 'host is required when ec2_server_id is omitted' });
-				if (!private_key) return text({ error: 'private_key is required when ec2_server_id is omitted' });
-				target = {
-					id: 0,
-					name: '',
-					host,
-					user: user ?? 'ec2-user',
-					port: port ?? 22,
-					private_key,
-					remote_dir: remote_dir ?? '~/mybench-bench',
-					log_dir: log_dir ?? '/tmp/mybench-logs'
-				};
+			try {
+				return text(await testEc2Server({ ec2_server_id, host, user, port, private_key, remote_dir, log_dir }));
+			} catch (err) {
+				return text({ error: err instanceof Error ? err.message : String(err) });
 			}
-
-			const result = await testEc2Connection(target);
-			return text({
-				ec2_server_id: ec2_server_id ?? null,
-				...result
-			});
 		}
 	);
 

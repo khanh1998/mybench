@@ -1,6 +1,5 @@
 import { json, error } from '@sveltejs/kit';
-import { testConnection } from '$lib/server/pg-client';
-import type { PgServer } from '$lib/types';
+import { testPgServer } from '$lib/server/services/pg-servers';
 import type { RequestHandler } from './$types';
 
 /**
@@ -11,20 +10,9 @@ import type { RequestHandler } from './$types';
  */
 export const POST: RequestHandler = async ({ request }) => {
 	const body = await request.json();
-	const { host, port, username, password, ssl, database } = body;
-
-	if (!host) throw error(400, 'Missing host');
-
-	const server: PgServer = {
-		id: 0,
-		name: '',
-		host,
-		port: port ?? 5432,
-		username: username ?? 'postgres',
-		password: password ?? '',
-		ssl: ssl ? 1 : 0
-	};
-
-	const result = await testConnection(server, database ?? 'postgres');
-	return json(result);
+	try {
+		return json(await testPgServer(body));
+	} catch (err) {
+		throw error(400, err instanceof Error ? err.message : String(err));
+	}
 };

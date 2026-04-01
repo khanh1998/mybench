@@ -1,15 +1,12 @@
 import { json, error } from '@sveltejs/kit';
-import getDb from '$lib/server/db';
-import { testEc2Connection } from '$lib/server/ec2-runner';
-import type { Ec2Server } from '$lib/types';
+import { testEc2Server } from '$lib/server/services/ec2-servers';
 import type { RequestHandler } from './$types';
 
 export const POST: RequestHandler = async ({ params }) => {
-	const db = getDb();
-	const server = db
-		.prepare('SELECT * FROM ec2_servers WHERE id = ?')
-		.get(Number(params.id)) as Ec2Server | undefined;
-	if (!server) throw error(404, 'EC2 server not found');
-	const result = await testEc2Connection(server);
-	return json(result);
+	try {
+		return json(await testEc2Server({ ec2_server_id: Number(params.id) }));
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		throw error(message.includes('not found') ? 404 : 400, message);
+	}
 };
