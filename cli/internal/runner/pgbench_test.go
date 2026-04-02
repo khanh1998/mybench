@@ -6,6 +6,27 @@ import (
 	"github.com/khanh1998/mybench/cli/internal/plan"
 )
 
+func stringValue(ptr *string) string {
+	if ptr == nil {
+		return ""
+	}
+	return *ptr
+}
+
+func intValue(ptr *int) int {
+	if ptr == nil {
+		return 0
+	}
+	return *ptr
+}
+
+func floatValue(ptr *float64) float64 {
+	if ptr == nil {
+		return 0
+	}
+	return *ptr
+}
+
 func TestParseTPS(t *testing.T) {
 	line := "tps = 279.500000 (without initial connection time)"
 	var res pgbenchResult
@@ -61,6 +82,7 @@ func TestParsePgbenchOutputSample(t *testing.T) {
 		"query mode: simple",
 		"number of clients: 30",
 		"number of threads: 2",
+		"maximum number of tries: 1",
 		"duration: 120 s",
 		"number of transactions actually processed: 33498",
 		"number of failed transactions: 0 (0.000%)",
@@ -87,6 +109,30 @@ func TestParsePgbenchOutputSample(t *testing.T) {
 	if res.Transactions != 33498 {
 		t.Errorf("expected Transactions=33498, got %d", res.Transactions)
 	}
+	if stringValue(res.TransactionType) != "<builtin: TPC-B (sort of)>" {
+		t.Errorf("expected TransactionType to be parsed, got %q", stringValue(res.TransactionType))
+	}
+	if intValue(res.ScalingFactor) != 1 {
+		t.Errorf("expected ScalingFactor=1, got %d", intValue(res.ScalingFactor))
+	}
+	if stringValue(res.QueryMode) != "simple" {
+		t.Errorf("expected QueryMode=simple, got %q", stringValue(res.QueryMode))
+	}
+	if intValue(res.NumberOfClients) != 30 {
+		t.Errorf("expected NumberOfClients=30, got %d", intValue(res.NumberOfClients))
+	}
+	if intValue(res.NumberOfThreads) != 2 {
+		t.Errorf("expected NumberOfThreads=2, got %d", intValue(res.NumberOfThreads))
+	}
+	if intValue(res.MaximumTries) != 1 {
+		t.Errorf("expected MaximumTries=1, got %d", intValue(res.MaximumTries))
+	}
+	if intValue(res.DurationSecs) != 120 {
+		t.Errorf("expected DurationSecs=120, got %d", intValue(res.DurationSecs))
+	}
+	if floatValue(res.InitialConnectionTimeMs) != 254.567 {
+		t.Errorf("expected InitialConnectionTimeMs=254.567, got %f", floatValue(res.InitialConnectionTimeMs))
+	}
 }
 
 func TestParsePgbenchOutputNoMatch(t *testing.T) {
@@ -96,15 +142,25 @@ func TestParsePgbenchOutputNoMatch(t *testing.T) {
 	if res.TPS != 0 || res.LatencyAvgMs != 0 || res.LatencyStddevMs != 0 || res.Transactions != 0 || res.FailedTransactions != 0 {
 		t.Error("expected all zero metrics for non-matching line")
 	}
+	if res.TransactionType != nil || res.ScalingFactor != nil || res.QueryMode != nil || res.NumberOfClients != nil || res.NumberOfThreads != nil || res.MaximumTries != nil || res.DurationSecs != nil || res.InitialConnectionTimeMs != nil {
+		t.Error("expected optional metadata pointers to remain nil for non-matching line")
+	}
 }
 
 func TestParsePgbenchFinalOutputKeepsOverallSummaryAndScriptDetails(t *testing.T) {
 	output := `pgbench (16.11, server 18.3)
 transaction type: multiple scripts
+scaling factor: 1
+query mode: prepared
+number of clients: 30
+number of threads: 2
+maximum number of tries: 1
+duration: 60 s
 number of transactions actually processed: 19646
 number of failed transactions: 0 (0.000%)
 latency average = 898.249 ms
 latency stddev = 7394.088 ms
+initial connection time = 465.506 ms
 tps = 64.854015 (without initial connection time)
 SQL script 1: /tmp/script-1.pgbench
  - weight: 10 (targets 10.0% of total)
@@ -132,6 +188,27 @@ SQL script 2: /tmp/script-2.pgbench
 	}
 	if summary.LatencyAvgMs != 898.249 {
 		t.Fatalf("expected overall LatencyAvgMs=898.249, got %f", summary.LatencyAvgMs)
+	}
+	if stringValue(summary.TransactionType) != "multiple scripts" {
+		t.Fatalf("expected TransactionType=multiple scripts, got %q", stringValue(summary.TransactionType))
+	}
+	if intValue(summary.ScalingFactor) != 1 {
+		t.Fatalf("expected ScalingFactor=1, got %d", intValue(summary.ScalingFactor))
+	}
+	if stringValue(summary.QueryMode) != "prepared" {
+		t.Fatalf("expected QueryMode=prepared, got %q", stringValue(summary.QueryMode))
+	}
+	if intValue(summary.NumberOfClients) != 30 || intValue(summary.NumberOfThreads) != 2 {
+		t.Fatalf("expected client/thread metadata to be parsed, got clients=%d threads=%d", intValue(summary.NumberOfClients), intValue(summary.NumberOfThreads))
+	}
+	if intValue(summary.MaximumTries) != 1 {
+		t.Fatalf("expected MaximumTries=1, got %d", intValue(summary.MaximumTries))
+	}
+	if intValue(summary.DurationSecs) != 60 {
+		t.Fatalf("expected DurationSecs=60, got %d", intValue(summary.DurationSecs))
+	}
+	if floatValue(summary.InitialConnectionTimeMs) != 465.506 {
+		t.Fatalf("expected InitialConnectionTimeMs=465.506, got %f", floatValue(summary.InitialConnectionTimeMs))
 	}
 	if len(scripts) != 2 {
 		t.Fatalf("expected 2 script results, got %d", len(scripts))

@@ -45,12 +45,17 @@
     started_ms: number;
     elapsed_secs: number;
   }
-  interface BenchmarkScriptSection {
+  interface PgbenchStepSection {
     step_id: number;
     step_name: string;
     summary: PgbenchStepSummary | null;
     scripts: PgbenchScriptResult[];
     snapshotUnavailable: boolean;
+  }
+  interface PgbenchDetailSection {
+    step_id: number;
+    step_name: string;
+    details: { label: string; value: string }[];
   }
 
   let run = $state<Run | null>(null);
@@ -104,6 +109,56 @@
     } catch {
       return null;
     }
+  }
+
+  function getStepOutput(step: Pick<StepResult, 'stdout' | 'stderr'>): string {
+    return [step.stdout ?? '', step.stderr ?? '']
+      .filter((part) => part.trim().length > 0)
+      .join('\n');
+  }
+
+  function mergePgbenchSummary(
+    storedSummary: PgbenchStepSummary | null,
+    parsedSummary: PgbenchStepSummary | null
+  ): PgbenchStepSummary | null {
+    if (!storedSummary && !parsedSummary) return null;
+
+    const summary: PgbenchStepSummary = {
+      tps: storedSummary?.tps ?? parsedSummary?.tps ?? null,
+      latency_avg_ms: storedSummary?.latency_avg_ms ?? parsedSummary?.latency_avg_ms ?? null,
+      latency_stddev_ms: storedSummary?.latency_stddev_ms ?? parsedSummary?.latency_stddev_ms ?? null,
+      transactions: storedSummary?.transactions ?? parsedSummary?.transactions ?? null,
+      failed_transactions: storedSummary?.failed_transactions ?? parsedSummary?.failed_transactions ?? null,
+      transaction_type: storedSummary?.transaction_type ?? parsedSummary?.transaction_type ?? null,
+      scaling_factor: storedSummary?.scaling_factor ?? parsedSummary?.scaling_factor ?? null,
+      query_mode: storedSummary?.query_mode ?? parsedSummary?.query_mode ?? null,
+      number_of_clients: storedSummary?.number_of_clients ?? parsedSummary?.number_of_clients ?? null,
+      number_of_threads: storedSummary?.number_of_threads ?? parsedSummary?.number_of_threads ?? null,
+      maximum_tries: storedSummary?.maximum_tries ?? parsedSummary?.maximum_tries ?? null,
+      duration_secs: storedSummary?.duration_secs ?? parsedSummary?.duration_secs ?? null,
+      initial_connection_time_ms: storedSummary?.initial_connection_time_ms ?? parsedSummary?.initial_connection_time_ms ?? null
+    };
+
+    if (Object.values(summary).every((value) => value == null)) return null;
+    return summary;
+  }
+
+  function getPgbenchDetailEntries(summary: PgbenchStepSummary | null): Array<{ label: string; value: string }> {
+    if (!summary) return [];
+
+    const details: Array<{ label: string; value: string }> = [];
+    if (summary.transaction_type) details.push({ label: 'Transaction Type', value: summary.transaction_type });
+    if (summary.scaling_factor != null) details.push({ label: 'Scaling Factor', value: String(summary.scaling_factor) });
+    if (summary.query_mode) details.push({ label: 'Query Mode', value: summary.query_mode });
+    if (summary.number_of_clients != null) details.push({ label: 'Clients', value: summary.number_of_clients.toLocaleString() });
+    if (summary.number_of_threads != null) details.push({ label: 'Threads', value: summary.number_of_threads.toLocaleString() });
+    if (summary.maximum_tries != null) details.push({ label: 'Maximum Tries', value: summary.maximum_tries.toLocaleString() });
+    if (summary.duration_secs != null) details.push({ label: 'Duration', value: `${summary.duration_secs.toLocaleString()} s` });
+    if (summary.initial_connection_time_ms != null) {
+      details.push({ label: 'Initial Connection Time', value: `${summary.initial_connection_time_ms.toFixed(3)} ms` });
+    }
+
+    return details;
   }
 
   function buildHistoricalPgbenchScripts(step: StepResult, parsedScripts: PgbenchScriptResult[]): PgbenchScriptResult[] {
@@ -160,7 +215,7 @@
     return merged;
   }
 
-  const benchmarkScriptSections = $derived.by((): BenchmarkScriptSection[] => {
+  const pgbenchStepSections = $derived.by((): PgbenchStepSection[] => {
     if (!run) return [];
 
     return run.steps
@@ -168,24 +223,36 @@
       .map((step) => {
         const storedSummary = parseJson<PgbenchStepSummary>(step.pgbench_summary_json);
         const storedScripts = parseJson<PgbenchScriptResult[]>(step.pgbench_scripts_json);
-        const parsedOutput = parsePgbenchFinalOutput(step.stdout ?? '');
+        const parsedOutput = parsePgbenchFinalOutput(getStepOutput(step));
         const scripts = mergePgbenchScripts(storedScripts, parsedOutput.scripts, step);
+        const summary = mergePgbenchSummary(storedSummary, parsedOutput.summary);
 
         return {
           step_id: step.step_id,
           step_name: step.name,
-          summary: storedSummary ?? parsedOutput.summary,
+          summary,
           scripts,
           snapshotUnavailable: scripts.length > 0 && scripts.every((script) => !script.script.trim())
         };
-      })
-      .filter((section) => section.scripts.length > 0);
+      });
   });
+
+  const benchmarkScriptSections = $derived.by(() => pgbenchStepSections.filter((section) => section.scripts.length > 0));
+
+  const pgbenchDetailSections = $derived.by((): PgbenchDetailSection[] => (
+    pgbenchStepSections
+      .map((section) => ({
+        step_id: section.step_id,
+        step_name: section.step_name,
+        details: getPgbenchDetailEntries(section.summary)
+      }))
+      .filter((section) => section.details.length > 0)
+  ));
 
   const displayRunMetrics = $derived.by(() => {
     if (!run) return null;
-    if (benchmarkScriptSections.length === 1 && benchmarkScriptSections[0].summary) {
-      return benchmarkScriptSections[0].summary;
+    if (pgbenchStepSections.length === 1 && pgbenchStepSections[0].summary) {
+      return pgbenchStepSections[0].summary;
     }
     return {
       tps: run.tps,
@@ -466,6 +533,29 @@
       {/if}
     </div>
   </div>
+
+  {#if pgbenchDetailSections.length > 0}
+    {#each pgbenchDetailSections as section}
+      <div class="card" style="margin-bottom:12px">
+        <div class="benchmark-scripts-header">
+          <div>
+            <h3 style="margin:0 0 2px">pgbench Details</h3>
+            {#if pgbenchDetailSections.length > 1}
+              <p style="margin:0;color:#666;font-size:12px">{section.step_name}</p>
+            {/if}
+          </div>
+        </div>
+        <div class="pgbench-details-grid">
+          {#each section.details as detail}
+            <div class="pgbench-detail-item">
+              <div class="pgbench-detail-label">{detail.label}</div>
+              <div class="pgbench-detail-value">{detail.value}</div>
+            </div>
+          {/each}
+        </div>
+      </div>
+    {/each}
+  {/if}
 
   <!-- TPS over time -->
   {#if pgbenchProgressData}
@@ -774,6 +864,10 @@
   .benchmark-scripts-note { margin-bottom: 10px; padding: 8px 10px; border-radius: 6px; background: #fff6df; border: 1px solid #f2d58c; color: #8a5a00; font-size: 12px; }
   .benchmark-scripts-table th:last-child,
   .benchmark-scripts-table td:last-child { width: 1%; white-space: nowrap; }
+  .pgbench-details-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px 18px; }
+  .pgbench-detail-item { min-width: 0; }
+  .pgbench-detail-label { font-size: 11px; color: #666; font-weight: 600; text-transform: uppercase; margin-bottom: 4px; }
+  .pgbench-detail-value { font-size: 16px; font-weight: 600; color: #222; word-break: break-word; }
 
   .stats-row { display: flex; gap: 20px; flex-wrap: wrap; }
   .stat { min-width: 100px; }

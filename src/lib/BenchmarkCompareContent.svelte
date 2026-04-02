@@ -69,6 +69,16 @@
     return match?.value ?? null;
   }
 
+  function formatOptionalNumber(value: number | null | undefined, suffix = ''): string | null {
+    if (value == null || !Number.isFinite(value)) return null;
+    return `${value.toLocaleString()}${suffix}`;
+  }
+
+  function formatOptionalMilliseconds(value: number | null | undefined): string | null {
+    if (value == null || !Number.isFinite(value)) return null;
+    return `${value.toFixed(3)} ms`;
+  }
+
   function durationSecondsBetween(start: string | null, end: string | null): number | null {
     if (!start || !end) return null;
     const startMs = new Date(start).getTime();
@@ -151,19 +161,40 @@
         values: runs.map((run) => formatDuration(durationSecondsBetween(run?.started_at ?? null, run?.finished_at ?? null)))
       },
       {
-        label: 'Configured time',
+        label: 'Transaction type',
+        values: runs.map((run) => run?.transaction_type ?? null)
+      },
+      {
+        label: 'Scaling factor',
+        values: runs.map((run) => formatOptionalNumber(run?.scaling_factor))
+      },
+      {
+        label: 'Query mode',
+        values: runs.map((run) => run?.query_mode ?? null)
+      },
+      {
+        label: 'Duration',
         values: runs.map((run) => {
+          if (run?.duration_secs != null) return `${run.duration_secs.toLocaleString()}s`;
           const value = getRunParamValue(run, ['TIME', 'DURATION', 'DURATION_SECS']);
           return value ? `${value}s` : null;
         })
       },
       {
         label: 'Connections',
-        values: runs.map((run) => getRunParamValue(run, ['CONNECTION', 'CONNECTIONS', 'CLIENTS', 'NUM_CLIENTS']))
+        values: runs.map((run) => formatOptionalNumber(run?.number_of_clients) ?? getRunParamValue(run, ['CONNECTION', 'CONNECTIONS', 'CLIENTS', 'NUM_CLIENTS']))
       },
       {
         label: 'Threads',
-        values: runs.map((run) => getRunParamValue(run, ['THREAD', 'THREADS', 'JOBS']))
+        values: runs.map((run) => formatOptionalNumber(run?.number_of_threads) ?? getRunParamValue(run, ['THREAD', 'THREADS', 'JOBS']))
+      },
+      {
+        label: 'Maximum tries',
+        values: runs.map((run) => formatOptionalNumber(run?.maximum_tries))
+      },
+      {
+        label: 'Initial connection time',
+        values: runs.map((run) => formatOptionalMilliseconds(run?.initial_connection_time_ms))
       }
     ];
 

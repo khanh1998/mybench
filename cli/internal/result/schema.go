@@ -27,11 +27,19 @@ type StepResult struct {
 }
 
 type PgbenchSummary struct {
-	TPS                float64 `json:"tps"`
-	LatencyAvgMs       float64 `json:"latency_avg_ms"`
-	LatencyStddevMs    float64 `json:"latency_stddev_ms"`
-	Transactions       int64   `json:"transactions"`
-	FailedTransactions int64   `json:"failed_transactions"`
+	TPS                     float64  `json:"tps"`
+	LatencyAvgMs            float64  `json:"latency_avg_ms"`
+	LatencyStddevMs         float64  `json:"latency_stddev_ms"`
+	Transactions            int64    `json:"transactions"`
+	FailedTransactions      int64    `json:"failed_transactions"`
+	TransactionType         *string  `json:"transaction_type,omitempty"`
+	ScalingFactor           *int     `json:"scaling_factor,omitempty"`
+	QueryMode               *string  `json:"query_mode,omitempty"`
+	NumberOfClients         *int     `json:"number_of_clients,omitempty"`
+	NumberOfThreads         *int     `json:"number_of_threads,omitempty"`
+	MaximumTries            *int     `json:"maximum_tries,omitempty"`
+	DurationSecs            *int     `json:"duration_secs,omitempty"`
+	InitialConnectionTimeMs *float64 `json:"initial_connection_time_ms,omitempty"`
 }
 
 type PgbenchScriptResult struct {

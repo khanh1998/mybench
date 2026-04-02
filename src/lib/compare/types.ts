@@ -6,6 +6,15 @@ export interface CompareRunInfo {
   latency_avg_ms: number | null;
   latency_stddev_ms: number | null;
   transactions: number | null;
+  failed_transactions?: number | null;
+  transaction_type?: string | null;
+  scaling_factor?: number | null;
+  query_mode?: string | null;
+  number_of_clients?: number | null;
+  number_of_threads?: number | null;
+  maximum_tries?: number | null;
+  duration_secs?: number | null;
+  initial_connection_time_ms?: number | null;
   profile_name: string | null;
   run_params: string | null;
   started_at: string;

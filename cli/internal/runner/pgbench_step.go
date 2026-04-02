@@ -17,28 +17,44 @@ import (
 )
 
 var (
-	reTPS                = regexp.MustCompile(`tps = (\d+\.\d+) \(without initial connection time\)`)
-	reLatencyAvg         = regexp.MustCompile(`latency average = (\d+\.\d+) ms`)
-	reLatencyStddev      = regexp.MustCompile(`latency stddev = (\d+\.\d+) ms`)
-	reTransactions       = regexp.MustCompile(`number of transactions actually processed: (\d+)`)
-	reFailedTransactions = regexp.MustCompile(`number of failed transactions: (\d+)`)
-	reScriptTPS          = regexp.MustCompile(`tps = (\d+\.\d+)`)
-	reScriptTransactions = regexp.MustCompile(`-\s+(\d+)\s+transactions\b`)
-	reScriptWeight       = regexp.MustCompile(`-\s+weight:\s*(\d+)`)
+	reTPS                   = regexp.MustCompile(`tps = (\d+\.\d+) \(without initial connection time\)`)
+	reLatencyAvg            = regexp.MustCompile(`latency average = (\d+\.\d+) ms`)
+	reLatencyStddev         = regexp.MustCompile(`latency stddev = (\d+\.\d+) ms`)
+	reTransactions          = regexp.MustCompile(`number of transactions actually processed: (\d+)`)
+	reFailedTransactions    = regexp.MustCompile(`number of failed transactions: (\d+)`)
+	reTransactionType       = regexp.MustCompile(`transaction type:\s*([^\r\n]+)`)
+	reScalingFactor         = regexp.MustCompile(`scaling factor:\s*(\d+)`)
+	reQueryMode             = regexp.MustCompile(`query mode:\s*([^\r\n]+)`)
+	reNumberOfClients       = regexp.MustCompile(`number of clients:\s*(\d+)`)
+	reNumberOfThreads       = regexp.MustCompile(`number of threads:\s*(\d+)`)
+	reMaximumTries          = regexp.MustCompile(`maximum number of tries:\s*(\d+)`)
+	reDurationSecs          = regexp.MustCompile(`duration:\s*(\d+)\s*s`)
+	reInitialConnectionTime = regexp.MustCompile(`initial connection time = (\d+\.\d+) ms`)
+	reScriptTPS             = regexp.MustCompile(`tps = (\d+\.\d+)`)
+	reScriptTransactions    = regexp.MustCompile(`-\s+(\d+)\s+transactions\b`)
+	reScriptWeight          = regexp.MustCompile(`-\s+weight:\s*(\d+)`)
 )
 
 // pgbenchResult holds parsed metrics from pgbench stdout.
 type pgbenchResult struct {
-	TPS                float64
-	LatencyAvgMs       float64
-	LatencyStddevMs    float64
-	Transactions       int64
-	FailedTransactions int64
-	Command            string
-	LogPath            string
-	ProcessedScript    string
-	PgbenchSummary     *result.PgbenchSummary
-	PgbenchScripts     []result.PgbenchScriptResult
+	TPS                     float64
+	LatencyAvgMs            float64
+	LatencyStddevMs         float64
+	Transactions            int64
+	FailedTransactions      int64
+	TransactionType         *string
+	ScalingFactor           *int
+	QueryMode               *string
+	NumberOfClients         *int
+	NumberOfThreads         *int
+	MaximumTries            *int
+	DurationSecs            *int
+	InitialConnectionTimeMs *float64
+	Command                 string
+	LogPath                 string
+	ProcessedScript         string
+	PgbenchSummary          *result.PgbenchSummary
+	PgbenchScripts          []result.PgbenchScriptResult
 }
 
 // parsePgbenchOutput scans pgbench stdout lines and extracts metrics.
@@ -58,6 +74,66 @@ func parsePgbenchOutput(line string, res *pgbenchResult) {
 	if m := reFailedTransactions.FindStringSubmatch(line); m != nil {
 		res.FailedTransactions, _ = strconv.ParseInt(m[1], 10, 64)
 	}
+	if m := reTransactionType.FindStringSubmatch(line); m != nil {
+		res.TransactionType = stringPtr(strings.TrimSpace(m[1]))
+	}
+	if m := reScalingFactor.FindStringSubmatch(line); m != nil {
+		res.ScalingFactor = intPtrFromString(m[1])
+	}
+	if m := reQueryMode.FindStringSubmatch(line); m != nil {
+		res.QueryMode = stringPtr(strings.TrimSpace(m[1]))
+	}
+	if m := reNumberOfClients.FindStringSubmatch(line); m != nil {
+		res.NumberOfClients = intPtrFromString(m[1])
+	}
+	if m := reNumberOfThreads.FindStringSubmatch(line); m != nil {
+		res.NumberOfThreads = intPtrFromString(m[1])
+	}
+	if m := reMaximumTries.FindStringSubmatch(line); m != nil {
+		res.MaximumTries = intPtrFromString(m[1])
+	}
+	if m := reDurationSecs.FindStringSubmatch(line); m != nil {
+		res.DurationSecs = intPtrFromString(m[1])
+	}
+	if m := reInitialConnectionTime.FindStringSubmatch(line); m != nil {
+		res.InitialConnectionTimeMs = float64PtrFromString(m[1])
+	}
+}
+
+func stringPtr(value string) *string {
+	return &value
+}
+
+func intPtrFromString(value string) *int {
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return nil
+	}
+	return &parsed
+}
+
+func float64PtrFromString(value string) *float64 {
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return nil
+	}
+	return &parsed
+}
+
+func hasSummaryData(res *pgbenchResult) bool {
+	return res.TPS != 0 ||
+		res.LatencyAvgMs != 0 ||
+		res.LatencyStddevMs != 0 ||
+		res.Transactions != 0 ||
+		res.FailedTransactions != 0 ||
+		res.TransactionType != nil ||
+		res.ScalingFactor != nil ||
+		res.QueryMode != nil ||
+		res.NumberOfClients != nil ||
+		res.NumberOfThreads != nil ||
+		res.MaximumTries != nil ||
+		res.DurationSecs != nil ||
+		res.InitialConnectionTimeMs != nil
 }
 
 func formatProcessedPgbenchScripts(scripts []plan.PgbenchScript) string {
@@ -99,13 +175,21 @@ func parsePgbenchFinalOutput(output string, scripts []plan.PgbenchScript) (*resu
 	summaryProbe := &pgbenchResult{}
 	parsePgbenchOutput(strings.Join(summaryLines, "\n"), summaryProbe)
 	var summary *result.PgbenchSummary
-	if summaryProbe.TPS != 0 || summaryProbe.LatencyAvgMs != 0 || summaryProbe.LatencyStddevMs != 0 || summaryProbe.Transactions != 0 || summaryProbe.FailedTransactions != 0 {
+	if hasSummaryData(summaryProbe) {
 		summary = &result.PgbenchSummary{
-			TPS:                summaryProbe.TPS,
-			LatencyAvgMs:       summaryProbe.LatencyAvgMs,
-			LatencyStddevMs:    summaryProbe.LatencyStddevMs,
-			Transactions:       summaryProbe.Transactions,
-			FailedTransactions: summaryProbe.FailedTransactions,
+			TPS:                     summaryProbe.TPS,
+			LatencyAvgMs:            summaryProbe.LatencyAvgMs,
+			LatencyStddevMs:         summaryProbe.LatencyStddevMs,
+			Transactions:            summaryProbe.Transactions,
+			FailedTransactions:      summaryProbe.FailedTransactions,
+			TransactionType:         summaryProbe.TransactionType,
+			ScalingFactor:           summaryProbe.ScalingFactor,
+			QueryMode:               summaryProbe.QueryMode,
+			NumberOfClients:         summaryProbe.NumberOfClients,
+			NumberOfThreads:         summaryProbe.NumberOfThreads,
+			MaximumTries:            summaryProbe.MaximumTries,
+			DurationSecs:            summaryProbe.DurationSecs,
+			InitialConnectionTimeMs: summaryProbe.InitialConnectionTimeMs,
 		}
 	}
 

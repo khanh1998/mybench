@@ -34,6 +34,14 @@ export interface RunnerResultStep {
 		latency_stddev_ms?: number;
 		transactions?: number;
 		failed_transactions?: number;
+		transaction_type?: string;
+		scaling_factor?: number;
+		query_mode?: string;
+		number_of_clients?: number;
+		number_of_threads?: number;
+		maximum_tries?: number;
+		duration_secs?: number;
+		initial_connection_time_ms?: number;
 	};
 	pgbench_scripts?: Array<{
 		position: number;

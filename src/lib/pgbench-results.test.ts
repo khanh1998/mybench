@@ -7,10 +7,17 @@ import {
 
 const SAMPLE_OUTPUT = `pgbench (16.11, server 18.3)
 transaction type: multiple scripts
+scaling factor: 1
+query mode: prepared
+number of clients: 30
+number of threads: 2
+maximum number of tries: 1
+duration: 60 s
 number of transactions actually processed: 19646
 number of failed transactions: 0 (0.000%)
 latency average = 898.249 ms
 latency stddev = 7394.088 ms
+initial connection time = 465.506 ms
 tps = 64.854015 (without initial connection time)
 SQL script 1: /tmp/script-1.pgbench
  - weight: 10 (targets 10.0% of total)
@@ -33,7 +40,15 @@ describe('parsePgbenchFinalOutput', () => {
 			latency_avg_ms: 898.249,
 			latency_stddev_ms: 7394.088,
 			transactions: 19646,
-			failed_transactions: 0
+			failed_transactions: 0,
+			transaction_type: 'multiple scripts',
+			scaling_factor: 1,
+			query_mode: 'prepared',
+			number_of_clients: 30,
+			number_of_threads: 2,
+			maximum_tries: 1,
+			duration_secs: 60,
+			initial_connection_time_ms: 465.506
 		});
 	});
 
@@ -64,6 +79,39 @@ describe('parsePgbenchFinalOutput', () => {
 	});
 
 	it('supports built-in scenario output with no script blocks', () => {
+		const parsed = parsePgbenchFinalOutput(`pgbench (PostgreSQL) 15.3
+transaction type: <builtin: TPC-B (sort of)>
+scaling factor: 1
+query mode: simple
+number of clients: 30
+number of threads: 2
+duration: 120 s
+number of transactions actually processed: 33498
+number of failed transactions: 1 (0.003%)
+latency average = 107.456 ms
+latency stddev = 136.400000 ms
+initial connection time = 254.567 ms
+tps = 279.500000 (without initial connection time)`);
+
+		expect(parsed.summary).toEqual({
+			tps: 279.5,
+			latency_avg_ms: 107.456,
+			latency_stddev_ms: 136.4,
+			transactions: 33498,
+			failed_transactions: 1,
+			transaction_type: '<builtin: TPC-B (sort of)>',
+			scaling_factor: 1,
+			query_mode: 'simple',
+			number_of_clients: 30,
+			number_of_threads: 2,
+			maximum_tries: null,
+			duration_secs: 120,
+			initial_connection_time_ms: 254.567
+		});
+		expect(parsed.scripts).toEqual([]);
+	});
+
+	it('keeps optional metadata null when absent', () => {
 		const parsed = parsePgbenchFinalOutput(`number of transactions actually processed: 33498
 number of failed transactions: 1 (0.003%)
 latency average = 107.456 ms
@@ -75,9 +123,16 @@ tps = 279.500000 (without initial connection time)`);
 			latency_avg_ms: 107.456,
 			latency_stddev_ms: 136.4,
 			transactions: 33498,
-			failed_transactions: 1
+			failed_transactions: 1,
+			transaction_type: null,
+			scaling_factor: null,
+			query_mode: null,
+			number_of_clients: null,
+			number_of_threads: null,
+			maximum_tries: null,
+			duration_secs: null,
+			initial_connection_time_ms: null
 		});
-		expect(parsed.scripts).toEqual([]);
 	});
 });
 
