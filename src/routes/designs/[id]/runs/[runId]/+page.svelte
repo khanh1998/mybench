@@ -36,7 +36,15 @@
     pre_collect_secs: number; post_collect_secs: number;
     is_imported?: number;
     name: string; notes: string; profile_name: string; run_params: string;
+    ec2_server_id?: number | null;
+    ec2_run_token?: string | null;
     steps: StepResult[];
+  }
+  interface Ec2Status {
+    alive: boolean;
+    pid?: number;
+    result_exists: boolean;
+    log_files: string[];
   }
   interface PhaseState {
     name: 'pre' | 'post';
@@ -77,6 +85,12 @@
   let phases: PhaseState[] = $state([]);
   let activeTab = $state<'overview' | 'load' | 'telemetry'>('overview');
   let nameInput = $state<HTMLInputElement | null>(null);
+  let ec2StatusLoading = $state(false);
+  let ec2Status = $state<Ec2Status | null>(null);
+  let ec2StatusError = $state<string | null>(null);
+  let ec2LogFile = $state<string | null>(null);
+  let ec2LogContent = $state<string | null>(null);
+  let ec2LogLoading = $state(false);
   const phaseTimers = new Map<string, ReturnType<typeof setInterval>>();
 
   const pendingLines: string[] = [];
@@ -424,6 +438,38 @@
     goto(`/designs/${designId}`);
   }
 
+  async function checkEc2Status() {
+    ec2StatusLoading = true;
+    ec2StatusError = null;
+    ec2Status = null;
+    try {
+      const res = await fetch(`/api/runs/${runId}/ec2-status`);
+      if (!res.ok) { ec2StatusError = (await res.json().catch(() => ({}))).message ?? `Error ${res.status}`; return; }
+      ec2Status = await res.json();
+    } catch (e) {
+      ec2StatusError = e instanceof Error ? e.message : String(e);
+    } finally {
+      ec2StatusLoading = false;
+    }
+  }
+
+  async function openEc2Log(filename: string) {
+    if (ec2LogFile === filename) { ec2LogFile = null; ec2LogContent = null; return; }
+    ec2LogFile = filename;
+    ec2LogContent = null;
+    ec2LogLoading = true;
+    try {
+      const res = await fetch(`/api/runs/${runId}/ec2-logs?file=${encodeURIComponent(filename)}`);
+      if (!res.ok) { ec2LogContent = `Error: ${(await res.json().catch(() => ({}))).message ?? res.status}`; return; }
+      const data = await res.json();
+      ec2LogContent = data.content;
+    } catch (e) {
+      ec2LogContent = `Error: ${e instanceof Error ? e.message : String(e)}`;
+    } finally {
+      ec2LogLoading = false;
+    }
+  }
+
   function toggleStep(stepId: number) {
     expandedStep = expandedStep === stepId ? null : stepId;
   }
@@ -481,6 +527,11 @@
     {/if}
   {/if}
   <span class="spacer"></span>
+  {#if run?.ec2_server_id && (run.status === 'running' || run.status === 'failed')}
+    <button onclick={checkEc2Status} disabled={ec2StatusLoading}>
+      {ec2StatusLoading ? 'Checking...' : 'EC2 Status'}
+    </button>
+  {/if}
   {#if !done && run?.status === 'running'}
     <button class="danger" onclick={stopRun}>Stop Run</button>
   {/if}
@@ -488,6 +539,63 @@
     <button class="danger" onclick={deleteRun}>Delete Run</button>
   {/if}
 </div>
+
+{#if ec2Status || ec2StatusError}
+<div class="ec2-status-card">
+  <div class="ec2-status-header">
+    <strong>EC2 Status</strong>
+    <button class="ec2-status-close" onclick={() => { ec2Status = null; ec2StatusError = null; ec2LogFile = null; ec2LogContent = null; }}>✕</button>
+  </div>
+  {#if ec2StatusError}
+    <p class="ec2-status-error">{ec2StatusError}</p>
+  {:else if ec2Status}
+    <div class="ec2-status-row">
+      <span class="ec2-status-label">Process</span>
+      {#if ec2Status.alive}
+        <span class="badge badge-running">alive</span>
+        {#if ec2Status.pid}<span class="ec2-pid">PID {ec2Status.pid}</span>{/if}
+      {:else}
+        <span class="badge badge-failed">not running</span>
+      {/if}
+    </div>
+    <div class="ec2-status-row">
+      <span class="ec2-status-label">Result file</span>
+      {#if ec2Status.result_exists}
+        <span class="badge badge-completed">exists</span>
+      {:else}
+        <span style="color:#888;font-size:12px">not found</span>
+      {/if}
+    </div>
+    {#if ec2Status.log_files.length > 0}
+      <div class="ec2-status-row ec2-log-files-row">
+        <span class="ec2-status-label">Log files</span>
+        <div class="ec2-log-files">
+          {#each ec2Status.log_files as filename}
+            <button class="ec2-log-btn" class:active={ec2LogFile === filename} onclick={() => openEc2Log(filename)}>
+              {filename}
+            </button>
+          {/each}
+        </div>
+      </div>
+      {#if ec2LogFile}
+        <div class="ec2-log-viewer">
+          <div class="ec2-log-viewer-title">{ec2LogFile}</div>
+          {#if ec2LogLoading}
+            <p style="color:#888;font-size:12px;padding:8px">Loading...</p>
+          {:else}
+            <pre class="ec2-log-content">{ec2LogContent ?? ''}</pre>
+          {/if}
+        </div>
+      {/if}
+    {:else}
+      <div class="ec2-status-row">
+        <span class="ec2-status-label">Log files</span>
+        <span style="color:#888;font-size:12px">none found</span>
+      </div>
+    {/if}
+  {/if}
+</div>
+{/if}
 
 <div class="run-tabs">
   <button class="tab-btn" class:active={activeTab === 'overview'} onclick={() => activeTab = 'overview'}>Overview</button>
@@ -992,4 +1100,22 @@
   .notes-content :global(pre) { background: #f5f5f5; padding: 8px; border-radius: 4px; overflow-x: auto; }
   .notes-content :global(code) { background: #f5f5f5; padding: 1px 4px; border-radius: 3px; font-size: 12px; font-family: monospace; }
   .notes-content :global(blockquote) { border-left: 3px solid #ddd; margin: 0 0 8px; padding-left: 10px; color: #666; }
+
+  .ec2-status-card { background: #fff; border: 1px solid #d0d0d0; border-radius: 6px; padding: 12px 14px; margin-bottom: 16px; }
+  .ec2-status-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .ec2-status-header strong { font-size: 13px; }
+  .ec2-status-close { background: none; border: none; cursor: pointer; font-size: 14px; color: #888; padding: 0 2px; line-height: 1; }
+  .ec2-status-close:hover { color: #333; }
+  .ec2-status-row { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; font-size: 12px; }
+  .ec2-status-label { font-weight: 600; color: #555; min-width: 80px; padding-top: 2px; }
+  .ec2-pid { font-size: 11px; color: #666; font-family: monospace; padding-top: 2px; }
+  .ec2-status-error { color: #a00; font-size: 12px; margin: 0; }
+  .ec2-log-files-row { align-items: flex-start; }
+  .ec2-log-files { display: flex; flex-wrap: wrap; gap: 6px; }
+  .ec2-log-btn { background: #f0f4ff; border: 1px solid #c0cff5; border-radius: 4px; padding: 3px 8px; font-size: 11px; font-family: monospace; cursor: pointer; color: #0044aa; }
+  .ec2-log-btn:hover { background: #dce8ff; }
+  .ec2-log-btn.active { background: #0066cc; color: #fff; border-color: #0055bb; }
+  .ec2-log-viewer { margin-top: 10px; border: 1px solid #e0e0e0; border-radius: 4px; overflow: hidden; }
+  .ec2-log-viewer-title { background: #f5f5f5; border-bottom: 1px solid #e0e0e0; padding: 4px 10px; font-size: 11px; font-family: monospace; font-weight: 600; color: #444; }
+  .ec2-log-content { margin: 0; padding: 10px; font-size: 11px; line-height: 1.5; overflow-x: auto; max-height: 400px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; background: #fafafa; }
 </style>

@@ -115,6 +115,7 @@ export interface BenchmarkRun {
 	run_params: string; // JSON string of [{name, value}]; '' if no params
 	is_imported: number;          // 0 or 1
 	ec2_server_id: number | null;
+	ec2_run_token: string | null;
 }
 
 export interface ParamProfile {
