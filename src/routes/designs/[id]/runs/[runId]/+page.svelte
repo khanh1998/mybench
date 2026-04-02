@@ -6,6 +6,8 @@
   import MarkdownEditor from '$lib/MarkdownEditor.svelte';
   import LoadAnalysis from '$lib/LoadAnalysis.svelte';
   import DatabaseTelemetry from '$lib/DatabaseTelemetry.svelte';
+  import LineChart from '$lib/LineChart.svelte';
+  import { parsePgbenchProgress } from '$lib/pgbench-progress';
   import type { PageData } from './$types';
   import { fmtTs, fmtTime } from '$lib/utils';
 
@@ -58,6 +60,27 @@
   const phaseTimers = new Map<string, ReturnType<typeof setInterval>>();
 
   const pendingLines: string[] = [];
+
+  const pgbenchProgressData = $derived.by(() => {
+    if (!run) return null;
+    const pgbenchStep = run.steps.find((s) => s.type === 'pgbench' && s.stdout);
+    if (!pgbenchStep) return null;
+    const points = parsePgbenchProgress(pgbenchStep.stdout);
+    if (points.length < 2) return null;
+    const interval = Math.round(points[1].elapsedSec - points[0].elapsedSec) || 5;
+    const totalFailed = points.reduce((acc, p) => acc + p.failed, 0);
+    return {
+      points,
+      interval,
+      totalFailed,
+      tpsSeries: [{ label: 'TPS', color: '#0066cc', points: points.map((p) => ({ t: p.elapsedSec * 1000, v: p.tps })) }],
+      latSeries: [{ label: 'Avg Latency (ms)', color: '#e6531d', points: points.map((p) => ({ t: p.elapsedSec * 1000, v: p.latAvgMs })) }],
+      stddevSeries: [{ label: 'Latency Stddev (ms)', color: '#9b36b7', points: points.map((p) => ({ t: p.elapsedSec * 1000, v: p.latStddevMs })) }],
+      failedSeries: totalFailed > 0
+        ? [{ label: 'Failed', color: '#cc0000', points: points.map((p) => ({ t: p.elapsedSec * 1000, v: p.failed })) }]
+        : []
+    };
+  });
 
   $effect(() => {
     const nextRun = (data.run as Run | null) ?? null;
@@ -326,6 +349,42 @@
     </div>
   </div>
 
+  <!-- TPS over time -->
+  {#if pgbenchProgressData}
+    {@const pd = pgbenchProgressData}
+    <div class="card" style="margin-bottom:12px">
+      <div class="progress-chart-header">
+        <div>
+          <h3 style="margin:0 0 2px">Throughput &amp; Latency Over Time</h3>
+          <p style="margin:0;color:#666;font-size:12px">Per {pd.interval}s interval — a stable flat line means healthy sustained throughput.</p>
+        </div>
+        {#if pd.totalFailed > 0}
+          <span class="progress-failed-badge">{pd.totalFailed.toLocaleString()} failed txns</span>
+        {/if}
+      </div>
+      <div class="progress-chart-grid">
+        <div>
+          <div class="progress-chart-label">TPS</div>
+          <LineChart series={pd.tpsSeries} title="TPS over time" originMs={0} showAllSeriesByDefault={true} />
+        </div>
+        <div>
+          <div class="progress-chart-label">Avg Latency (ms)</div>
+          <LineChart series={pd.latSeries} title="Avg latency over time" originMs={0} showAllSeriesByDefault={true} />
+        </div>
+        <div>
+          <div class="progress-chart-label">Latency Stddev (ms)</div>
+          <LineChart series={pd.stddevSeries} title="Latency stddev over time" originMs={0} showAllSeriesByDefault={true} />
+        </div>
+        {#if pd.failedSeries.length > 0}
+          <div>
+            <div class="progress-chart-label">Failed Transactions</div>
+            <LineChart series={pd.failedSeries} title="Failed transactions over time" originMs={0} showAllSeriesByDefault={true} />
+          </div>
+        {/if}
+      </div>
+    </div>
+  {/if}
+
   <!-- Collection phases -->
   {#if phases.length > 0 || (run.pre_collect_secs > 0 || run.post_collect_secs > 0)}
     <div class="card" style="margin-bottom:12px">
@@ -527,6 +586,11 @@
   .tab-btn:hover:not(:disabled) { color: #333; background: #f5f5f5; }
   .tab-btn.active { color: #0066cc; border-bottom-color: #0066cc; }
   .tab-btn:disabled { cursor: not-allowed; opacity: 0.4; }
+
+  .progress-chart-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+  .progress-chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+  .progress-chart-label { font-size: 11px; font-weight: 700; color: #666; text-transform: uppercase; margin-bottom: 6px; letter-spacing: 0.04em; }
+  .progress-failed-badge { background: #fff0f0; border: 1px solid #f5c0c0; color: #a00; font-size: 12px; font-weight: 700; padding: 4px 10px; border-radius: 999px; white-space: nowrap; }
 
   .stats-row { display: flex; gap: 20px; flex-wrap: wrap; }
   .stat { min-width: 100px; }

@@ -329,6 +329,31 @@ function buildGroupedSeries(
 		.filter((series): series is TelemetrySeries => series !== null);
 }
 
+// Builds TelemetrySeries for derived/computed metrics (ratios, rates, averages).
+// Unlike buildMetricSeries, seriesValueAt receives the full rows array so it can compute
+// delta-based ratios (e.g. cache hit rate = Δhit / (Δhit + Δread)) at each snapshot.
+function buildDerivedSeries(
+	rows: SnapshotRow[],
+	runStartMs: number,
+	metrics: Array<{ label: string; seriesValueAt: (rows: SnapshotRow[], index: number) => number | null }>,
+	colorOffset = 0
+): TelemetrySeries[] {
+	return metrics
+		.map((metric, index) => {
+			if (rows.length === 0) return null;
+			const points = rows
+				.map((row, rowIndex) => {
+					const value = metric.seriesValueAt(rows, rowIndex);
+					if (value === null || !Number.isFinite(value)) return null;
+					return relPoint(row, runStartMs, value);
+				})
+				.filter((point): point is TelemetrySeriesPoint => point !== null);
+			if (points.length === 0) return null;
+			return { label: metric.label, color: COLORS[(colorOffset + index) % COLORS.length], points };
+		})
+		.filter((series): series is TelemetrySeries => series !== null);
+}
+
 function deltaAt(rows: SnapshotRow[], index: number, field: string): number | null {
 	if (rows.length === 0 || index < 0 || index >= rows.length) return null;
 	const first = toNumber(rows[0][field]);
@@ -501,26 +526,44 @@ function buildDatabaseSection(rows: SnapshotRow[], runStartMs: number): Telemetr
 			metricCard('transactions', 'Transactions', 'count', totalTransactions),
 			metricCard('tps', 'DB-stat TPS', 'tps', tps),
 			metricCard('buffer_hit_ratio', 'Buffer Hit Ratio', 'percent', hitRatio),
-			metricCard('temp_bytes', 'Temp Bytes', 'bytes', tempBytes)
+			metricCard('rollback_ratio', 'Rollback Rate', 'percent', safeRatio(txRollback, totalTransactions)),
+			metricCard('temp_bytes', 'Temp Bytes', 'bytes', tempBytes),
+			metricCard('blk_read_time_per_tx', 'Block Read Time / Tx', 'duration_ms', safeRatio(delta(rows, 'blk_read_time'), totalTransactions))
 		],
 		chartTitle: 'Database metrics over time',
-		chartSeries: buildMetricSeries(rows, runStartMs, [
-			{
-				label: 'transactions',
-				valueFn: (row) => sum([toNumber(row.xact_commit), toNumber(row.xact_rollback)])
-			},
-			{ label: 'commits', valueFn: (row) => toNumber(row.xact_commit) },
-			{ label: 'rollbacks', valueFn: (row) => toNumber(row.xact_rollback) },
-			{ label: 'blocks read', valueFn: (row) => toNumber(row.blks_read) },
-			{ label: 'blocks hit', valueFn: (row) => toNumber(row.blks_hit) },
-			{ label: 'rows inserted', valueFn: (row) => toNumber(row.tup_inserted) },
-			{ label: 'rows updated', valueFn: (row) => toNumber(row.tup_updated) },
-			{ label: 'rows deleted', valueFn: (row) => toNumber(row.tup_deleted) },
-			{ label: 'temp bytes', valueFn: (row) => toNumber(row.temp_bytes) },
-			{ label: 'deadlocks', valueFn: (row) => toNumber(row.deadlocks) },
-			{ label: 'block read time', valueFn: (row) => toNumber(row.blk_read_time) },
-			{ label: 'block write time', valueFn: (row) => toNumber(row.blk_write_time) }
-		]),
+		chartSeries: [
+			...buildMetricSeries(rows, runStartMs, [
+				{
+					label: 'transactions',
+					valueFn: (row) => sum([toNumber(row.xact_commit), toNumber(row.xact_rollback)])
+				},
+				{ label: 'commits', valueFn: (row) => toNumber(row.xact_commit) },
+				{ label: 'rollbacks', valueFn: (row) => toNumber(row.xact_rollback) },
+				{ label: 'blocks read', valueFn: (row) => toNumber(row.blks_read) },
+				{ label: 'blocks hit', valueFn: (row) => toNumber(row.blks_hit) },
+				{ label: 'rows inserted', valueFn: (row) => toNumber(row.tup_inserted) },
+				{ label: 'rows updated', valueFn: (row) => toNumber(row.tup_updated) },
+				{ label: 'rows deleted', valueFn: (row) => toNumber(row.tup_deleted) },
+				{ label: 'temp bytes', valueFn: (row) => toNumber(row.temp_bytes) },
+				{ label: 'deadlocks', valueFn: (row) => toNumber(row.deadlocks) },
+				{ label: 'block read time', valueFn: (row) => toNumber(row.blk_read_time) },
+				{ label: 'block write time', valueFn: (row) => toNumber(row.blk_write_time) }
+			]),
+			...buildDerivedSeries(rows, runStartMs, [
+				{
+					label: '⟳ cache hit rate',
+					seriesValueAt: (r, i) => ratioAt(r, i, 'blks_hit', ['blks_hit', 'blks_read'])
+				},
+				{
+					label: '⟳ rollback rate',
+					seriesValueAt: (r, i) => ratioAt(r, i, 'xact_rollback', ['xact_commit', 'xact_rollback'])
+				},
+				{
+					label: '⟳ avg block read time (ms/block)',
+					seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'blk_read_time'), deltaAt(r, i, 'blks_read'))
+				}
+			], 12)
+		],
 		tableTitle: 'Database metrics',
 		tableColumns: [
 			{ key: 'metric', label: 'Metric', kind: 'text' },
@@ -572,17 +615,30 @@ function buildWalSection(rows: SnapshotRow[], runStartMs: number, transactions: 
 		status: 'ok',
 		summary: [
 			metricCard('wal_bytes', 'WAL Bytes', 'bytes', walBytes),
+			metricCard('wal_bytes_per_sec', 'WAL Rate', 'bytes', safeRatio(walBytes, elapsedSeconds(rows))),
 			metricCard('wal_bytes_per_tx', 'WAL / Tx', 'bytes', safeRatio(walBytes, transactions)),
 			metricCard('fpi_ratio', 'FPI Ratio', 'percent', safeRatio(walFpi, walRecords)),
 			metricCard('wal_buffers_full', 'WAL Buffers Full', 'count', walBuffersFull)
 		],
 		chartTitle: 'WAL metrics over time',
-		chartSeries: buildMetricSeries(rows, runStartMs, [
-			{ label: 'wal bytes', valueFn: (row) => toNumber(row.wal_bytes) },
-			{ label: 'wal records', valueFn: (row) => toNumber(row.wal_records) },
-			{ label: 'full page images', valueFn: (row) => toNumber(row.wal_fpi) },
-			{ label: 'wal buffers full', valueFn: (row) => toNumber(row.wal_buffers_full) }
-		]),
+		chartSeries: [
+			...buildMetricSeries(rows, runStartMs, [
+				{ label: 'wal bytes', valueFn: (row) => toNumber(row.wal_bytes) },
+				{ label: 'wal records', valueFn: (row) => toNumber(row.wal_records) },
+				{ label: 'full page images', valueFn: (row) => toNumber(row.wal_fpi) },
+				{ label: 'wal buffers full', valueFn: (row) => toNumber(row.wal_buffers_full) }
+			]),
+			...buildDerivedSeries(rows, runStartMs, [
+				{
+					label: '⟳ FPI ratio (fpi / records)',
+					seriesValueAt: (r, i) => ratioAt(r, i, 'wal_fpi', ['wal_records'])
+				},
+				{
+					label: '⟳ avg WAL bytes / record',
+					seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'wal_bytes'), deltaAt(r, i, 'wal_records'))
+				}
+			], 4)
+		],
 		tableTitle: 'WAL metrics',
 		tableColumns: [
 			{ key: 'metric', label: 'Metric', kind: 'text' },
@@ -926,6 +982,28 @@ function buildUserTablesSection(rows: SnapshotRow[], runStartMs: number): Teleme
 			title: 'Top tables by dead tuple growth over time',
 			scoreFn: (entry) => entry.deadTupleGrowth,
 			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'n_dead_tup')
+		},
+		{
+			key: 'dead_tuple_ratio',
+			label: '⟳ Dead Tuple Ratio',
+			kind: 'percent',
+			title: 'Dead tuple ratio over time (dead / total rows) — autovacuum backlog indicator',
+			scoreFn: (entry) => entry.deadTupleGrowth,
+			seriesValueAt: (groupRows, index) => {
+				const dead = toNumber(groupRows[index].n_dead_tup);
+				const live = toNumber(groupRows[index].n_live_tup);
+				if (dead === null || live === null) return null;
+				const total = dead + live;
+				return total > 0 ? dead / total : 0;
+			}
+		},
+		{
+			key: 'index_scan_ratio',
+			label: '⟳ Index Scan Ratio',
+			kind: 'percent',
+			title: 'Index scan ratio over time (idx_scan / total scans) — inverse of seq scan ratio',
+			scoreFn: (entry) => entry.writes,
+			seriesValueAt: (groupRows, index) => ratioAt(groupRows, index, 'idx_scan', ['seq_scan', 'idx_scan'])
 		}
 	]);
 
@@ -937,7 +1015,13 @@ function buildUserTablesSection(rows: SnapshotRow[], runStartMs: number): Teleme
 			metricCard('total_writes', 'Total Writes', 'count', sum(entries.map((entry) => entry.writes))),
 			metricCard('avg_seq_ratio', 'Avg Seq Scan Ratio', 'percent', safeRatio(sum(entries.map((entry) => entry.seqScanRatio)), entries.length || null)),
 			metricCard('avg_hot_ratio', 'Avg HOT Ratio', 'percent', safeRatio(sum(entries.map((entry) => entry.hotRatio)), entries.length || null)),
-			metricCard('dead_tuple_growth', 'Dead Tuple Growth', 'count', sum(entries.map((entry) => entry.deadTupleGrowth)))
+			metricCard('dead_tuple_growth', 'Dead Tuple Growth', 'count', sum(entries.map((entry) => entry.deadTupleGrowth))),
+			metricCard('dead_tuples_per_1k_writes', 'Dead Tuples / 1k Writes', 'count',
+				safeRatio(
+					(sum(entries.map((entry) => entry.deadTupleGrowth)) ?? 0) * 1000,
+					sum(entries.map((entry) => entry.writes))
+				)
+			)
 		],
 		chartTitle: chartMetrics[0]?.title ?? 'Top tables by writes over time',
 		chartSeries: chartMetrics[0]?.series ?? [],
@@ -1376,14 +1460,36 @@ function buildCheckpointerSection(rows: SnapshotRow[], runStartMs: number): Tele
 		summary: [
 			metricCard('num_requested', 'Requested Checkpoints', 'count', numRequested),
 			metricCard('num_timed', 'Timed Checkpoints', 'count', numTimed),
+			metricCard('checkpoint_pressure', 'Checkpoint Pressure', 'percent',
+				safeRatio(numRequested, sum([numRequested, numTimed]))),
+			metricCard('avg_checkpoint_write_ms', 'Avg Write Time / Checkpoint', 'duration_ms',
+				safeRatio(writeTime, sum([numRequested, numTimed]))),
 			metricCard('write_time', 'Write Time', 'duration_ms', writeTime),
 			metricCard('sync_time', 'Sync Time', 'duration_ms', syncTime)
 		],
 		chartTitle: 'Checkpoint activity over time',
-		chartSeries: buildMetricSeries(rows, runStartMs, [
-			{ label: 'requested', valueFn: (row) => toNumber(row.num_requested) },
-			{ label: 'timed', valueFn: (row) => toNumber(row.num_timed) }
-		]),
+		chartSeries: [
+			...buildMetricSeries(rows, runStartMs, [
+				{ label: 'requested', valueFn: (row) => toNumber(row.num_requested) },
+				{ label: 'timed', valueFn: (row) => toNumber(row.num_timed) },
+				{ label: 'buffers written', valueFn: (row) => toNumber(row.buffers_written) },
+				{ label: 'write time (ms)', valueFn: (row) => toNumber(row.write_time) },
+				{ label: 'sync time (ms)', valueFn: (row) => toNumber(row.sync_time) }
+			]),
+			...buildDerivedSeries(rows, runStartMs, [
+				{
+					label: '⟳ checkpoint pressure (% forced)',
+					seriesValueAt: (r, i) => ratioAt(r, i, 'num_requested', ['num_requested', 'num_timed'])
+				},
+				{
+					label: '⟳ avg write time / checkpoint (ms)',
+					seriesValueAt: (r, i) => safeRatio(
+						deltaAt(r, i, 'write_time'),
+						sum([deltaAt(r, i, 'num_requested'), deltaAt(r, i, 'num_timed')])
+					)
+				}
+			], 5)
+		],
 		tableTitle: 'Checkpointer metrics',
 		tableColumns: [
 			{ key: 'metric', label: 'Metric', kind: 'text' },
@@ -1464,7 +1570,13 @@ export function buildRunTelemetry(db: Database.Database, runId: number, phases?:
 		metricCard('wal_bytes', 'WAL Bytes', 'bytes', walSection.summary.find((card) => card.key === 'wal_bytes')?.value ?? null),
 		metricCard('wal_per_tx', 'WAL / Tx', 'bytes', walSection.summary.find((card) => card.key === 'wal_bytes_per_tx')?.value ?? null),
 		metricCard('temp_bytes', 'Temp Bytes', 'bytes', databaseSection.summary.find((card) => card.key === 'temp_bytes')?.value ?? null),
+		metricCard('temp_bytes_per_tx', 'Temp / Tx', 'bytes', (() => {
+			const tmp = toNumber(databaseSection.summary.find((card) => card.key === 'temp_bytes')?.value);
+			const tx = toNumber(databaseSection.summary.find((card) => card.key === 'transactions')?.value);
+			return tmp !== null && tx !== null && tx > 0 ? tmp / tx : null;
+		})()),
 		metricCard('requested_checkpoints', 'Requested Checkpoints', 'count', sections.find((section) => section.key === 'checkpointer')?.summary.find((card) => card.key === 'num_requested')?.value ?? null),
+		metricCard('dead_tuple_growth', 'Dead Tuple Growth', 'count', sections.find((section) => section.key === 'user_tables')?.summary.find((card) => card.key === 'dead_tuple_growth')?.value ?? null),
 		metricCard('deadlocks', 'Deadlocks', 'count', delta(databaseRows, 'deadlocks'))
 	];
 

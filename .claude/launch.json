@@ -5,6 +5,7 @@
       "name": "mybench",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev"],
+      "cwd": "/Users/khanhbui/Documents/mybench",
       "port": 5173
     }
   ]
