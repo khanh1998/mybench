@@ -8,6 +8,7 @@ import {
 	resetPgStatStatements
 } from '$lib/server/pg-stats';
 import { getRunnablePgbenchScripts } from '$lib/params';
+import { formatProcessedPgbenchScripts } from '$lib/pgbench-results';
 import { runPgbench, runSqlStep, type SqlStepOptions } from '$lib/server/pgbench';
 import { createRun, completeRun, setPool, setSnapshotTimer, setActivePhase } from '$lib/server/run-manager';
 import { substituteParams } from '$lib/server/params';
@@ -248,9 +249,35 @@ export function startRun(designId: number, opts: StartRunOptions = {}): number {
 					clearInterval(timer);
 					exitCode = result.exitCode;
 
-					const pgbenchScript = substitutedScripts.map(ps => `-- [${ps.name} @${ps.weight}]\n${ps.script}`).join('\n\n');
-					db.prepare(`UPDATE run_step_results SET command=?, processed_script=? WHERE run_id=? AND step_id=?`)
-						.run(result.command, pgbenchScript, runId, step.id);
+					const pgbenchScript = formatProcessedPgbenchScripts(substitutedScripts);
+					const pgbenchScriptsJson = substitutedScripts.length > 0
+						? JSON.stringify(substitutedScripts.map((script, index) => {
+							const parsedScript = result.pgbenchScripts.find((item) => item.position === index);
+							return {
+								position: index,
+								name: script.name,
+								weight: script.weight,
+								script: script.script,
+								tps: parsedScript?.tps ?? null,
+								latency_avg_ms: parsedScript?.latency_avg_ms ?? null,
+								latency_stddev_ms: parsedScript?.latency_stddev_ms ?? null,
+								transactions: parsedScript?.transactions ?? null,
+								failed_transactions: parsedScript?.failed_transactions ?? null
+							};
+						}))
+						: '';
+					db.prepare(`
+						UPDATE run_step_results
+						SET command=?, processed_script=?, pgbench_summary_json=?, pgbench_scripts_json=?
+						WHERE run_id=? AND step_id=?
+					`).run(
+						result.command,
+						pgbenchScript,
+						result.pgbenchSummary ? JSON.stringify(result.pgbenchSummary) : '',
+						pgbenchScriptsJson,
+						runId,
+						step.id
+					);
 
 					await collectSnapshot(pool, runId, enabledTables, 'bench');
 					await collectPgLocksSnapshot(pool, runId, 'bench');

@@ -17,20 +17,28 @@ import (
 )
 
 var (
-	reTPS          = regexp.MustCompile(`tps = (\d+\.\d+) \(without initial connection time\)`)
-	reLatencyAvg   = regexp.MustCompile(`latency average = (\d+\.\d+) ms`)
-	reLatencyStddev = regexp.MustCompile(`latency stddev = (\d+\.\d+) ms`)
-	reTransactions = regexp.MustCompile(`number of transactions actually processed: (\d+)`)
+	reTPS                = regexp.MustCompile(`tps = (\d+\.\d+) \(without initial connection time\)`)
+	reLatencyAvg         = regexp.MustCompile(`latency average = (\d+\.\d+) ms`)
+	reLatencyStddev      = regexp.MustCompile(`latency stddev = (\d+\.\d+) ms`)
+	reTransactions       = regexp.MustCompile(`number of transactions actually processed: (\d+)`)
+	reFailedTransactions = regexp.MustCompile(`number of failed transactions: (\d+)`)
+	reScriptTPS          = regexp.MustCompile(`tps = (\d+\.\d+)`)
+	reScriptTransactions = regexp.MustCompile(`-\s+(\d+)\s+transactions\b`)
+	reScriptWeight       = regexp.MustCompile(`-\s+weight:\s*(\d+)`)
 )
 
 // pgbenchResult holds parsed metrics from pgbench stdout.
 type pgbenchResult struct {
-	TPS             float64
-	LatencyAvgMs    float64
-	LatencyStddevMs float64
-	Transactions    int64
-	Command         string
-	LogPath         string
+	TPS                float64
+	LatencyAvgMs       float64
+	LatencyStddevMs    float64
+	Transactions       int64
+	FailedTransactions int64
+	Command            string
+	LogPath            string
+	ProcessedScript    string
+	PgbenchSummary     *result.PgbenchSummary
+	PgbenchScripts     []result.PgbenchScriptResult
 }
 
 // parsePgbenchOutput scans pgbench stdout lines and extracts metrics.
@@ -47,6 +55,98 @@ func parsePgbenchOutput(line string, res *pgbenchResult) {
 	if m := reTransactions.FindStringSubmatch(line); m != nil {
 		res.Transactions, _ = strconv.ParseInt(m[1], 10, 64)
 	}
+	if m := reFailedTransactions.FindStringSubmatch(line); m != nil {
+		res.FailedTransactions, _ = strconv.ParseInt(m[1], 10, 64)
+	}
+}
+
+func formatProcessedPgbenchScripts(scripts []plan.PgbenchScript) string {
+	parts := make([]string, 0, len(scripts))
+	for _, script := range scripts {
+		parts = append(parts, fmt.Sprintf("-- [%s @%d]\n%s", script.Name, script.Weight, script.Script))
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+func parsePgbenchFinalOutput(output string, scripts []plan.PgbenchScript) (*result.PgbenchSummary, []result.PgbenchScriptResult) {
+	lines := strings.Split(strings.ReplaceAll(output, "\r\n", "\n"), "\n")
+	summaryLines := make([]string, 0, len(lines))
+	scriptBlocks := make([][]string, 0)
+	currentScriptBlock := []string(nil)
+
+	flushScriptBlock := func() {
+		if len(currentScriptBlock) == 0 {
+			return
+		}
+		scriptBlocks = append(scriptBlocks, currentScriptBlock)
+		currentScriptBlock = nil
+	}
+
+	for _, line := range lines {
+		if strings.HasPrefix(line, "SQL script ") {
+			flushScriptBlock()
+			currentScriptBlock = []string{line}
+			continue
+		}
+		if currentScriptBlock != nil {
+			currentScriptBlock = append(currentScriptBlock, line)
+			continue
+		}
+		summaryLines = append(summaryLines, line)
+	}
+	flushScriptBlock()
+
+	summaryProbe := &pgbenchResult{}
+	parsePgbenchOutput(strings.Join(summaryLines, "\n"), summaryProbe)
+	var summary *result.PgbenchSummary
+	if summaryProbe.TPS != 0 || summaryProbe.LatencyAvgMs != 0 || summaryProbe.LatencyStddevMs != 0 || summaryProbe.Transactions != 0 || summaryProbe.FailedTransactions != 0 {
+		summary = &result.PgbenchSummary{
+			TPS:                summaryProbe.TPS,
+			LatencyAvgMs:       summaryProbe.LatencyAvgMs,
+			LatencyStddevMs:    summaryProbe.LatencyStddevMs,
+			Transactions:       summaryProbe.Transactions,
+			FailedTransactions: summaryProbe.FailedTransactions,
+		}
+	}
+
+	parsedScripts := make([]result.PgbenchScriptResult, 0, len(scriptBlocks))
+	for idx, blockLines := range scriptBlocks {
+		blockText := strings.Join(blockLines, "\n")
+		blockProbe := &pgbenchResult{}
+		parsePgbenchOutput(blockText, blockProbe)
+		weight := 0
+		if m := reScriptWeight.FindStringSubmatch(blockText); m != nil {
+			weight, _ = strconv.Atoi(m[1])
+		}
+		if m := reScriptTransactions.FindStringSubmatch(blockText); m != nil {
+			blockProbe.Transactions, _ = strconv.ParseInt(m[1], 10, 64)
+		}
+		if m := reScriptTPS.FindStringSubmatch(blockText); m != nil {
+			blockProbe.TPS, _ = strconv.ParseFloat(m[1], 64)
+		}
+
+		name := fmt.Sprintf("Script %d", idx+1)
+		scriptText := ""
+		if idx < len(scripts) {
+			name = scripts[idx].Name
+			weight = scripts[idx].Weight
+			scriptText = scripts[idx].Script
+		}
+
+		parsedScripts = append(parsedScripts, result.PgbenchScriptResult{
+			Position:           idx,
+			Name:               name,
+			Weight:             weight,
+			Script:             scriptText,
+			TPS:                blockProbe.TPS,
+			LatencyAvgMs:       blockProbe.LatencyAvgMs,
+			LatencyStddevMs:    blockProbe.LatencyStddevMs,
+			Transactions:       blockProbe.Transactions,
+			FailedTransactions: blockProbe.FailedTransactions,
+		})
+	}
+
+	return summary, parsedScripts
 }
 
 // runPgbenchStep executes a pgbench step: writes scripts, starts snapshot ticker,
@@ -60,9 +160,11 @@ func runPgbenchStep(
 	intervalSecs int,
 ) (pgbenchResult, error) {
 	server := opts.Plan.Server
+	var res pgbenchResult
 
 	// Write each pgbench script to a temp file.
 	scriptFiles := make([]string, 0, len(step.PgbenchScripts))
+	resolvedScripts := make([]plan.PgbenchScript, 0, len(step.PgbenchScripts))
 	for i, ps := range step.PgbenchScripts {
 		fname := fmt.Sprintf("%s/mybench-%s-%d-%d.pgbench", opts.LogDir, opts.Timestamp, step.ID, i)
 		script := plan.SubstituteParams(ps.Script, opts.Plan.Params)
@@ -70,7 +172,14 @@ func runPgbenchStep(
 			return pgbenchResult{}, fmt.Errorf("writing pgbench script: %w", err)
 		}
 		scriptFiles = append(scriptFiles, fmt.Sprintf("%s@%d", fname, ps.Weight))
+		resolvedScripts = append(resolvedScripts, plan.PgbenchScript{
+			ID:     ps.ID,
+			Name:   ps.Name,
+			Weight: ps.Weight,
+			Script: script,
+		})
 	}
+	res.ProcessedScript = formatProcessedPgbenchScripts(resolvedScripts)
 
 	// Parse and build pgbench args.
 	baseArgs := strings.Fields(plan.SubstituteParams(step.PgbenchOptions, opts.Plan.Params))
@@ -84,7 +193,6 @@ func runPgbenchStep(
 		args = append(args, "-f", sf)
 	}
 
-	var res pgbenchResult
 	res.Command = "pgbench " + strings.Join(args, " ")
 
 	cmd := exec.CommandContext(ctx, "pgbench", args...)
@@ -123,6 +231,7 @@ func runPgbenchStep(
 
 	// Read stdout in a goroutine, parsing metrics as we go.
 	stdoutDone := make(chan struct{})
+	var stdoutBuilder strings.Builder
 	go func() {
 		defer close(stdoutDone)
 		var writers []io.Writer
@@ -135,7 +244,8 @@ func runPgbenchStep(
 		for scanner.Scan() {
 			line := scanner.Text()
 			fmt.Fprintln(w, line)
-			parsePgbenchOutput(line, &res)
+			stdoutBuilder.WriteString(line)
+			stdoutBuilder.WriteByte('\n')
 		}
 	}()
 
@@ -156,6 +266,16 @@ func runPgbenchStep(
 	<-stderrDone
 
 	runErr := cmd.Wait()
+	summary, parsedScripts := parsePgbenchFinalOutput(stdoutBuilder.String(), resolvedScripts)
+	res.PgbenchSummary = summary
+	res.PgbenchScripts = parsedScripts
+	if summary != nil {
+		res.TPS = summary.TPS
+		res.LatencyAvgMs = summary.LatencyAvgMs
+		res.LatencyStddevMs = summary.LatencyStddevMs
+		res.Transactions = summary.Transactions
+		res.FailedTransactions = summary.FailedTransactions
+	}
 
 	// Stop ticker and take final snapshot.
 	ticker.Stop()

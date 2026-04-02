@@ -3,6 +3,7 @@ import { writeFileSync, unlinkSync, existsSync } from 'fs';
 import { join } from 'path';
 import { EventEmitter } from 'events';
 import { getRunnablePgbenchScripts } from '$lib/params';
+import { parsePgbenchFinalOutput, type PgbenchScriptResult, type PgbenchStepSummary } from '$lib/pgbench-results';
 import type { PgbenchScript } from '$lib/types';
 
 export interface PgbenchResult {
@@ -10,8 +11,11 @@ export interface PgbenchResult {
 	latencyAvgMs: number | null;
 	latencyStddevMs: number | null;
 	transactions: number | null;
+	failedTransactions: number | null;
 	exitCode: number | null;
 	command: string;
+	pgbenchSummary: PgbenchStepSummary | null;
+	pgbenchScripts: PgbenchScriptResult[];
 }
 
 export interface PgbenchRunOptions {
@@ -94,10 +98,17 @@ export function runPgbench(
 			for (const p of tempFiles) {
 				try { if (existsSync(p)) unlinkSync(p); } catch {}
 			}
+			const parsed = parsePgbenchFinalOutput(fullStdout);
 			resolve({
-				...parsePgbenchOutput(fullStdout),
+				tps: parsed.summary?.tps ?? null,
+				latencyAvgMs: parsed.summary?.latency_avg_ms ?? null,
+				latencyStddevMs: parsed.summary?.latency_stddev_ms ?? null,
+				transactions: parsed.summary?.transactions ?? null,
+				failedTransactions: parsed.summary?.failed_transactions ?? null,
 				exitCode: code,
-				command
+				command,
+				pgbenchSummary: parsed.summary,
+				pgbenchScripts: parsed.scripts
 			});
 		});
 
@@ -176,25 +187,6 @@ function parseOptions(opts: string): string[] {
 	if (!opts.trim()) return [];
 	// Simple shell-like split (doesn't handle quotes within quotes)
 	return opts.trim().split(/\s+/);
-}
-
-function parsePgbenchOutput(output: string): Omit<PgbenchResult, 'exitCode' | 'command'> {
-	// pgbench outputs like:
-	// tps = 1234.56 (without initial connection establishment)
-	// latency average = 0.810 ms
-	// latency stddev = 0.123 ms
-	// number of transactions actually processed: 75000
-	const tpsMatch = output.match(/^tps\s*=\s*([\d.]+)/m);
-	const latAvgMatch = output.match(/latency average\s*=\s*([\d.]+)\s*ms/m);
-	const latStdMatch = output.match(/latency stddev\s*=\s*([\d.]+)\s*ms/m);
-	const txnMatch = output.match(/number of transactions actually processed:\s*(\d+)/m);
-
-	return {
-		tps: tpsMatch ? parseFloat(tpsMatch[1]) : null,
-		latencyAvgMs: latAvgMatch ? parseFloat(latAvgMatch[1]) : null,
-		latencyStddevMs: latStdMatch ? parseFloat(latStdMatch[1]) : null,
-		transactions: txnMatch ? parseInt(txnMatch[1]) : null
-	};
 }
 
 export interface PgbenchProgressPoint {

@@ -8,6 +8,12 @@
   import DatabaseTelemetry from '$lib/DatabaseTelemetry.svelte';
   import LineChart from '$lib/LineChart.svelte';
   import { parsePgbenchProgress } from '$lib/pgbench-progress';
+  import {
+    parsePgbenchFinalOutput,
+    parseProcessedPgbenchScripts,
+    type PgbenchScriptResult,
+    type PgbenchStepSummary
+  } from '$lib/pgbench-results';
   import type { PageData } from './$types';
   import { fmtTs, fmtTime } from '$lib/utils';
 
@@ -20,6 +26,7 @@
     id: number; step_id: number; name: string; type: string; status: string;
     stdout: string; stderr: string; started_at: string|null; finished_at: string|null;
     command: string; processed_script: string;
+    pgbench_summary_json: string; pgbench_scripts_json: string;
   }
   interface Run {
     id: number; status: string; tps: number|null; latency_avg_ms: number|null;
@@ -38,6 +45,13 @@
     started_ms: number;
     elapsed_secs: number;
   }
+  interface BenchmarkScriptSection {
+    step_id: number;
+    step_name: string;
+    summary: PgbenchStepSummary | null;
+    scripts: PgbenchScriptResult[];
+    snapshotUnavailable: boolean;
+  }
 
   let run = $state<Run | null>(null);
   let done = $state(false);
@@ -53,6 +67,7 @@
   let eventSource: EventSource | null = null;
   let outputEl: HTMLPreElement | null = $state(null);
   let expandedStep = $state<number | null>(null);
+  let expandedBenchmarkScript = $state<string | null>(null);
   let scrollPending = false;
   let phases: PhaseState[] = $state([]);
   let activeTab = $state<'overview' | 'load' | 'telemetry'>('overview');
@@ -79,6 +94,105 @@
       failedSeries: totalFailed > 0
         ? [{ label: 'Failed', color: '#cc0000', points: points.map((p) => ({ t: p.elapsedSec * 1000, v: p.failed })) }]
         : []
+    };
+  });
+
+  function parseJson<T>(value: string | null | undefined): T | null {
+    if (!value?.trim()) return null;
+    try {
+      return JSON.parse(value) as T;
+    } catch {
+      return null;
+    }
+  }
+
+  function buildHistoricalPgbenchScripts(step: StepResult, parsedScripts: PgbenchScriptResult[]): PgbenchScriptResult[] {
+    const snapshotScripts = parseProcessedPgbenchScripts(step.processed_script);
+    const maxLength = Math.max(parsedScripts.length, snapshotScripts.length);
+    const merged: PgbenchScriptResult[] = [];
+
+    for (let index = 0; index < maxLength; index += 1) {
+      const parsedScript = parsedScripts.find((script) => script.position === index);
+      const snapshotScript = snapshotScripts.find((script) => script.position === index);
+      if (!parsedScript && !snapshotScript) continue;
+      merged.push({
+        position: index,
+        name: snapshotScript?.name ?? parsedScript?.name ?? `Script ${index + 1}`,
+        weight: snapshotScript?.weight ?? parsedScript?.weight ?? null,
+        script: snapshotScript?.script ?? '',
+        tps: parsedScript?.tps ?? null,
+        latency_avg_ms: parsedScript?.latency_avg_ms ?? null,
+        latency_stddev_ms: parsedScript?.latency_stddev_ms ?? null,
+        transactions: parsedScript?.transactions ?? null,
+        failed_transactions: parsedScript?.failed_transactions ?? null
+      });
+    }
+
+    return merged;
+  }
+
+  function mergePgbenchScripts(
+    storedScripts: PgbenchScriptResult[] | null,
+    parsedScripts: PgbenchScriptResult[],
+    step: StepResult
+  ): PgbenchScriptResult[] {
+    const fallbackScripts = buildHistoricalPgbenchScripts(step, parsedScripts);
+    if (!storedScripts || storedScripts.length === 0) return fallbackScripts;
+
+    const merged: PgbenchScriptResult[] = [];
+    const maxLength = Math.max(storedScripts.length, parsedScripts.length);
+    for (let index = 0; index < maxLength; index += 1) {
+      const storedScript = storedScripts.find((script) => script.position === index);
+      const parsedScript = parsedScripts.find((script) => script.position === index);
+      if (!storedScript && !parsedScript) continue;
+      merged.push({
+        position: index,
+        name: storedScript?.name ?? parsedScript?.name ?? `Script ${index + 1}`,
+        weight: storedScript?.weight ?? parsedScript?.weight ?? null,
+        script: storedScript?.script ?? '',
+        tps: parsedScript?.tps ?? storedScript?.tps ?? null,
+        latency_avg_ms: parsedScript?.latency_avg_ms ?? storedScript?.latency_avg_ms ?? null,
+        latency_stddev_ms: parsedScript?.latency_stddev_ms ?? storedScript?.latency_stddev_ms ?? null,
+        transactions: parsedScript?.transactions ?? storedScript?.transactions ?? null,
+        failed_transactions: parsedScript?.failed_transactions ?? storedScript?.failed_transactions ?? null
+      });
+    }
+    return merged;
+  }
+
+  const benchmarkScriptSections = $derived.by((): BenchmarkScriptSection[] => {
+    if (!run) return [];
+
+    return run.steps
+      .filter((step) => step.type === 'pgbench')
+      .map((step) => {
+        const storedSummary = parseJson<PgbenchStepSummary>(step.pgbench_summary_json);
+        const storedScripts = parseJson<PgbenchScriptResult[]>(step.pgbench_scripts_json);
+        const parsedOutput = parsePgbenchFinalOutput(step.stdout ?? '');
+        const scripts = mergePgbenchScripts(storedScripts, parsedOutput.scripts, step);
+
+        return {
+          step_id: step.step_id,
+          step_name: step.name,
+          summary: storedSummary ?? parsedOutput.summary,
+          scripts,
+          snapshotUnavailable: scripts.length > 0 && scripts.every((script) => !script.script.trim())
+        };
+      })
+      .filter((section) => section.scripts.length > 0);
+  });
+
+  const displayRunMetrics = $derived.by(() => {
+    if (!run) return null;
+    if (benchmarkScriptSections.length === 1 && benchmarkScriptSections[0].summary) {
+      return benchmarkScriptSections[0].summary;
+    }
+    return {
+      tps: run.tps,
+      latency_avg_ms: run.latency_avg_ms,
+      latency_stddev_ms: run.latency_stddev_ms,
+      transactions: run.transactions,
+      failed_transactions: null
     };
   });
 
@@ -247,6 +361,10 @@
     expandedStep = expandedStep === stepId ? null : stepId;
   }
 
+  function toggleBenchmarkScriptDetails(key: string) {
+    expandedBenchmarkScript = expandedBenchmarkScript === key ? null : key;
+  }
+
   async function startEditingName() {
     nameEdit = run?.name ?? '';
     editingName = true;
@@ -322,19 +440,19 @@
     <div class="stats-row">
       <div class="stat">
         <div class="stat-label">TPS</div>
-        <div class="stat-value">{run.tps?.toFixed(2) ?? '—'}</div>
+        <div class="stat-value">{displayRunMetrics?.tps?.toFixed(2) ?? '—'}</div>
       </div>
       <div class="stat">
         <div class="stat-label">Avg Latency</div>
-        <div class="stat-value">{run.latency_avg_ms?.toFixed(3) ?? '—'} ms</div>
+        <div class="stat-value">{displayRunMetrics?.latency_avg_ms?.toFixed(3) ?? '—'} ms</div>
       </div>
       <div class="stat">
         <div class="stat-label">Stddev</div>
-        <div class="stat-value">{run.latency_stddev_ms?.toFixed(3) ?? '—'} ms</div>
+        <div class="stat-value">{displayRunMetrics?.latency_stddev_ms?.toFixed(3) ?? '—'} ms</div>
       </div>
       <div class="stat">
         <div class="stat-label">Transactions</div>
-        <div class="stat-value">{run.transactions?.toLocaleString() ?? '—'}</div>
+        <div class="stat-value">{displayRunMetrics?.transactions?.toLocaleString() ?? '—'}</div>
       </div>
       <div class="stat">
         <div class="stat-label">Started</div>
@@ -385,8 +503,69 @@
     </div>
   {/if}
 
+  {#if benchmarkScriptSections.length > 0}
+    {#each benchmarkScriptSections as section}
+      <div class="card" style="margin-bottom:12px">
+        <div class="benchmark-scripts-header">
+          <div>
+            <h3 style="margin:0 0 2px">Benchmark Scripts</h3>
+            <p style="margin:0;color:#666;font-size:12px">{section.step_name}</p>
+          </div>
+        </div>
+
+        {#if section.snapshotUnavailable}
+          <div class="benchmark-scripts-note">Script snapshot unavailable for this run.</div>
+        {/if}
+
+        <table class="benchmark-scripts-table">
+          <thead>
+            <tr>
+              <th>Script</th>
+              <th>Weight</th>
+              <th>Transactions</th>
+              <th>TPS</th>
+              <th>Avg Latency</th>
+              <th>Stddev</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each section.scripts as script}
+              {@const scriptKey = `${section.step_id}:${script.position}`}
+              <tr>
+                <td>{script.name}</td>
+                <td>{script.weight ?? '—'}</td>
+                <td>{script.transactions?.toLocaleString() ?? '—'}</td>
+                <td>{script.tps?.toFixed(3) ?? '—'}</td>
+                <td>{script.latency_avg_ms?.toFixed(3) ?? '—'} ms</td>
+                <td>{script.latency_stddev_ms?.toFixed(3) ?? '—'} ms</td>
+                <td>
+                  {#if script.script}
+                    <button class="expand-btn" onclick={() => toggleBenchmarkScriptDetails(scriptKey)}>
+                      {expandedBenchmarkScript === scriptKey ? '▲' : '▼'} script
+                    </button>
+                  {/if}
+                </td>
+              </tr>
+              {#if expandedBenchmarkScript === scriptKey && script.script}
+                <tr class="detail-row">
+                  <td colspan="7">
+                    <div class="detail-block">
+                      <div class="detail-label">Script Snapshot</div>
+                      <pre class="detail-pre">{script.script}</pre>
+                    </div>
+                  </td>
+                </tr>
+              {/if}
+            {/each}
+          </tbody>
+        </table>
+      </div>
+    {/each}
+  {/if}
+
   <!-- Collection phases -->
-  {#if phases.length > 0 || (run.pre_collect_secs > 0 || run.post_collect_secs > 0)}
+  {#if run.status === 'running' && (phases.length > 0 || (run.pre_collect_secs > 0 || run.post_collect_secs > 0))}
     <div class="card" style="margin-bottom:12px">
       <h3>Collection Phases</h3>
       <div class="phases-list">
@@ -591,6 +770,10 @@
   .progress-chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
   .progress-chart-label { font-size: 11px; font-weight: 700; color: #666; text-transform: uppercase; margin-bottom: 6px; letter-spacing: 0.04em; }
   .progress-failed-badge { background: #fff0f0; border: 1px solid #f5c0c0; color: #a00; font-size: 12px; font-weight: 700; padding: 4px 10px; border-radius: 999px; white-space: nowrap; }
+  .benchmark-scripts-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+  .benchmark-scripts-note { margin-bottom: 10px; padding: 8px 10px; border-radius: 6px; background: #fff6df; border: 1px solid #f2d58c; color: #8a5a00; font-size: 12px; }
+  .benchmark-scripts-table th:last-child,
+  .benchmark-scripts-table td:last-child { width: 1%; white-space: nowrap; }
 
   .stats-row { display: flex; gap: 20px; flex-wrap: wrap; }
   .stat { min-width: 100px; }

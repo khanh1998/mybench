@@ -45,6 +45,26 @@ export interface PgbenchScript {
 	script: string;
 }
 
+export interface PgbenchStepSummary {
+	tps: number | null;
+	latency_avg_ms: number | null;
+	latency_stddev_ms: number | null;
+	transactions: number | null;
+	failed_transactions: number | null;
+}
+
+export interface PgbenchScriptResult {
+	position: number;
+	name: string;
+	weight: number | null;
+	script: string;
+	tps: number | null;
+	latency_avg_ms: number | null;
+	latency_stddev_ms: number | null;
+	transactions: number | null;
+	failed_transactions: number | null;
+}
+
 export interface DesignParam {
 	id: number;
 	design_id: number;
@@ -109,6 +129,10 @@ export interface RunStepResult {
 	exit_code: number | null;
 	started_at: string | null;
 	finished_at: string | null;
+	command: string;
+	processed_script: string;
+	pgbench_summary_json: string;
+	pgbench_scripts_json: string;
 }
 
 export interface Ec2Server {

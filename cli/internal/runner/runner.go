@@ -147,6 +147,13 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 			seenPgbench = true
 			stepRes.Command = pbRes.Command
 			stepRes.Log = tailFile(pbRes.LogPath, opts.LogTailLines)
+			stepRes.ProcessedScript = pbRes.ProcessedScript
+			if pbRes.PgbenchSummary != nil {
+				stepRes.PgbenchSummary = pbRes.PgbenchSummary
+			}
+			if len(pbRes.PgbenchScripts) > 0 {
+				stepRes.PgbenchScripts = pbRes.PgbenchScripts
+			}
 
 			// Capture metrics even on error (partial results).
 			res.Run.TPS = pbRes.TPS

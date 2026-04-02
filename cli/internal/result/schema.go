@@ -2,43 +2,66 @@ package result
 
 // Result is the top-level structure written to result.json.
 type Result struct {
-	Version       int                        `json:"version"`
-	DesignID      int                        `json:"design_id"`
-	RunnerVersion string                     `json:"runner_version"`
-	Run           RunSummary                 `json:"run"`
-	Steps         []StepResult               `json:"steps"`
-	Snapshots     map[string][]SnapshotRow   `json:"snapshots"`
+	Version       int                      `json:"version"`
+	DesignID      int                      `json:"design_id"`
+	RunnerVersion string                   `json:"runner_version"`
+	Run           RunSummary               `json:"run"`
+	Steps         []StepResult             `json:"steps"`
+	Snapshots     map[string][]SnapshotRow `json:"snapshots"`
 }
 
 // StepResult records execution metadata for a single step.
 type StepResult struct {
-	StepID     int    `json:"step_id"`
-	Position   int    `json:"position"`
-	Name       string `json:"name"`
-	Type       string `json:"type"`
-	Status     string `json:"status"` // "completed" or "failed"
-	Command    string `json:"command,omitempty"`
-	Log        string `json:"log,omitempty"`
-	StartedAt  string `json:"started_at"`
-	FinishedAt string `json:"finished_at"`
+	StepID          int                   `json:"step_id"`
+	Position        int                   `json:"position"`
+	Name            string                `json:"name"`
+	Type            string                `json:"type"`
+	Status          string                `json:"status"` // "completed" or "failed"
+	Command         string                `json:"command,omitempty"`
+	Log             string                `json:"log,omitempty"`
+	ProcessedScript string                `json:"processed_script,omitempty"`
+	PgbenchSummary  *PgbenchSummary       `json:"pgbench_summary,omitempty"`
+	PgbenchScripts  []PgbenchScriptResult `json:"pgbench_scripts,omitempty"`
+	StartedAt       string                `json:"started_at"`
+	FinishedAt      string                `json:"finished_at"`
+}
+
+type PgbenchSummary struct {
+	TPS                float64 `json:"tps"`
+	LatencyAvgMs       float64 `json:"latency_avg_ms"`
+	LatencyStddevMs    float64 `json:"latency_stddev_ms"`
+	Transactions       int64   `json:"transactions"`
+	FailedTransactions int64   `json:"failed_transactions"`
+}
+
+type PgbenchScriptResult struct {
+	Position           int     `json:"position"`
+	Name               string  `json:"name"`
+	Weight             int     `json:"weight"`
+	Script             string  `json:"script,omitempty"`
+	TPS                float64 `json:"tps"`
+	LatencyAvgMs       float64 `json:"latency_avg_ms"`
+	LatencyStddevMs    float64 `json:"latency_stddev_ms"`
+	Transactions       int64   `json:"transactions"`
+	FailedTransactions int64   `json:"failed_transactions"`
 }
 
 // RunSummary contains the benchmark run metadata and pgbench parsed output.
 type RunSummary struct {
-	Status                  string       `json:"status"` // "completed", "failed", "stopped"
-	StartedAt               string       `json:"started_at"`
-	FinishedAt              string       `json:"finished_at,omitempty"`
-	BenchStartedAt          string       `json:"bench_started_at,omitempty"`
-	PostStartedAt           string       `json:"post_started_at,omitempty"`
-	SnapshotIntervalSeconds int          `json:"snapshot_interval_seconds"`
-	PreCollectSecs          int          `json:"pre_collect_secs"`
-	PostCollectSecs         int          `json:"post_collect_secs"`
-	TPS                     float64      `json:"tps,omitempty"`
-	LatencyAvgMs            float64      `json:"latency_avg_ms,omitempty"`
-	LatencyStddevMs         float64      `json:"latency_stddev_ms,omitempty"`
-	Transactions            int64        `json:"transactions,omitempty"`
-	ProfileName             string       `json:"profile_name,omitempty"`
-	Params                  []RunParam   `json:"params,omitempty"`
+	Status                  string     `json:"status"` // "completed", "failed", "stopped"
+	StartedAt               string     `json:"started_at"`
+	FinishedAt              string     `json:"finished_at,omitempty"`
+	BenchStartedAt          string     `json:"bench_started_at,omitempty"`
+	PostStartedAt           string     `json:"post_started_at,omitempty"`
+	SnapshotIntervalSeconds int        `json:"snapshot_interval_seconds"`
+	PreCollectSecs          int        `json:"pre_collect_secs"`
+	PostCollectSecs         int        `json:"post_collect_secs"`
+	TPS                     float64    `json:"tps,omitempty"`
+	LatencyAvgMs            float64    `json:"latency_avg_ms,omitempty"`
+	LatencyStddevMs         float64    `json:"latency_stddev_ms,omitempty"`
+	Transactions            int64      `json:"transactions,omitempty"`
+	ProfileName             string     `json:"profile_name,omitempty"`
+	Params                  []RunParam `json:"params,omitempty"`
 }
 
 // RunParam is a resolved param name-value pair as actually used for this run.

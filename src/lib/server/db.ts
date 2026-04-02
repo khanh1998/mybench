@@ -582,6 +582,10 @@ function migrate(db: Database.Database) {
       stdout TEXT NOT NULL DEFAULT '',
       stderr TEXT NOT NULL DEFAULT '',
       exit_code INTEGER,
+      command TEXT NOT NULL DEFAULT '',
+      processed_script TEXT NOT NULL DEFAULT '',
+      pgbench_summary_json TEXT NOT NULL DEFAULT '',
+      pgbench_scripts_json TEXT NOT NULL DEFAULT '',
       started_at TEXT,
       finished_at TEXT
     );
@@ -639,10 +643,12 @@ function migrate(db: Database.Database) {
   const hasSslCol = (db.prepare(`PRAGMA table_info(pg_servers)`).all() as { name: string }[]).some(c => c.name === 'ssl');
   if (!hasSslCol) db.exec(`ALTER TABLE pg_servers ADD COLUMN ssl INTEGER NOT NULL DEFAULT 0`);
 
-  // Add command + processed_script to run_step_results (idempotent)
+  // Add step detail columns to run_step_results (idempotent)
   const stepResultCols = (db.prepare(`PRAGMA table_info(run_step_results)`).all() as { name: string }[]).map(c => c.name);
   if (!stepResultCols.includes('command')) db.exec(`ALTER TABLE run_step_results ADD COLUMN command TEXT NOT NULL DEFAULT ''`);
   if (!stepResultCols.includes('processed_script')) db.exec(`ALTER TABLE run_step_results ADD COLUMN processed_script TEXT NOT NULL DEFAULT ''`);
+  if (!stepResultCols.includes('pgbench_summary_json')) db.exec(`ALTER TABLE run_step_results ADD COLUMN pgbench_summary_json TEXT NOT NULL DEFAULT ''`);
+  if (!stepResultCols.includes('pgbench_scripts_json')) db.exec(`ALTER TABLE run_step_results ADD COLUMN pgbench_scripts_json TEXT NOT NULL DEFAULT ''`);
 
 
   // One-time backfill: migrate existing pgbench step scripts (idempotent)

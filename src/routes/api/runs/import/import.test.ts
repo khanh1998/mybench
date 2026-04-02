@@ -52,6 +52,24 @@ function createTestDb() {
       latency_stddev_ms REAL,
       transactions INTEGER
     );
+    CREATE TABLE run_step_results (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      step_id INTEGER NOT NULL,
+      position INTEGER NOT NULL DEFAULT 0,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      stdout TEXT NOT NULL DEFAULT '',
+      stderr TEXT NOT NULL DEFAULT '',
+      exit_code INTEGER,
+      command TEXT NOT NULL DEFAULT '',
+      processed_script TEXT NOT NULL DEFAULT '',
+      pgbench_summary_json TEXT NOT NULL DEFAULT '',
+      pgbench_scripts_json TEXT NOT NULL DEFAULT '',
+      started_at TEXT,
+      finished_at TEXT
+    );
   `);
 	return db;
 }
@@ -76,6 +94,36 @@ interface ImportResult {
 		latency_stddev_ms?: number;
 		transactions?: number;
 	};
+	steps?: Array<{
+		step_id: number;
+		position: number;
+		name: string;
+		type: string;
+		status: string;
+		command?: string;
+		log?: string;
+		processed_script?: string;
+		pgbench_summary?: {
+			tps?: number;
+			latency_avg_ms?: number;
+			latency_stddev_ms?: number;
+			transactions?: number;
+			failed_transactions?: number;
+		};
+		pgbench_scripts?: Array<{
+			position: number;
+			name: string;
+			weight?: number;
+			script?: string;
+			tps?: number;
+			latency_avg_ms?: number;
+			latency_stddev_ms?: number;
+			transactions?: number;
+			failed_transactions?: number;
+		}>;
+		started_at: string;
+		finished_at: string;
+	}>;
 	snapshots?: Record<string, Record<string, unknown>[]>;
 }
 
@@ -135,6 +183,36 @@ function importRun(
 	);
 
 	const runId = insertResult.lastInsertRowid as number;
+
+	if (result.steps?.length) {
+		const insStep = db.prepare(`
+			INSERT INTO run_step_results (
+				run_id, step_id, position, name, type, status, command, stdout,
+				processed_script, pgbench_summary_json, pgbench_scripts_json, started_at, finished_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`);
+
+		db.transaction(() => {
+			for (const step of result.steps ?? []) {
+				insStep.run(
+					runId,
+					step.step_id,
+					step.position,
+					step.name,
+					step.type,
+					step.status,
+					step.command ?? '',
+					step.log ?? '',
+					step.processed_script ?? '',
+					step.pgbench_summary ? JSON.stringify(step.pgbench_summary) : '',
+					step.pgbench_scripts ? JSON.stringify(step.pgbench_scripts) : '',
+					step.started_at,
+					step.finished_at
+				);
+			}
+		})();
+	}
 
 	const snapshots = result.snapshots;
 	if (snapshots) {
@@ -428,6 +506,79 @@ describe('Import endpoint logic', () => {
 			expect(Number(rows[0].num_requested)).toBe(1);
 			expect(Number(rows[0].buffers_written)).toBe(512);
 			expect(Number(rows[0].write_time)).toBeCloseTo(7.25);
+		}
+	});
+
+	it('persists structured pgbench step details for imported runs', () => {
+		const importWithSteps: ImportResult = {
+			run: { status: 'completed', started_at: '2025-01-01T00:00:00Z', finished_at: '2025-01-01T00:01:00Z' },
+			steps: [
+				{
+					step_id: 47,
+					position: 3,
+					name: 'Mixed workload',
+					type: 'pgbench',
+					status: 'completed',
+					command: 'pgbench ...',
+					log: 'pgbench output',
+					processed_script: '-- [main @10]\nSELECT 1;',
+					pgbench_summary: {
+						tps: 64.854015,
+						latency_avg_ms: 898.249,
+						latency_stddev_ms: 7394.088,
+						transactions: 19646,
+						failed_transactions: 0
+					},
+					pgbench_scripts: [
+						{
+							position: 0,
+							name: 'main',
+							weight: 10,
+							script: 'SELECT 1;',
+							tps: 6.579154,
+							latency_avg_ms: 85.066,
+							latency_stddev_ms: 278.99,
+							transactions: 1993,
+							failed_transactions: 0
+						}
+					],
+					started_at: '2025-01-01T00:00:10Z',
+					finished_at: '2025-01-01T00:01:00Z'
+				}
+			]
+		};
+
+		const result = importRun(db, 1, importWithSteps);
+		expect('run_id' in result).toBe(true);
+		if ('run_id' in result) {
+			const row = db.prepare(`
+				SELECT command, stdout, processed_script, pgbench_summary_json, pgbench_scripts_json
+				FROM run_step_results
+				WHERE run_id = ? AND step_id = 47
+			`).get(result.run_id) as {
+				command: string;
+				stdout: string;
+				processed_script: string;
+				pgbench_summary_json: string;
+				pgbench_scripts_json: string;
+			};
+
+			expect(row.command).toBe('pgbench ...');
+			expect(row.stdout).toBe('pgbench output');
+			expect(row.processed_script).toContain('[main @10]');
+			expect(JSON.parse(row.pgbench_summary_json)).toMatchObject({
+				tps: 64.854015,
+				transactions: 19646,
+				failed_transactions: 0
+			});
+			expect(JSON.parse(row.pgbench_scripts_json)).toMatchObject([
+				expect.objectContaining({
+					name: 'main',
+					weight: 10,
+					tps: 6.579154,
+					transactions: 1993
+				})
+			]);
 		}
 	});
 });

@@ -27,6 +27,25 @@ export interface RunnerResultStep {
 	status: string;
 	command?: string;
 	log?: string;
+	processed_script?: string;
+	pgbench_summary?: {
+		tps?: number;
+		latency_avg_ms?: number;
+		latency_stddev_ms?: number;
+		transactions?: number;
+		failed_transactions?: number;
+	};
+	pgbench_scripts?: Array<{
+		position: number;
+		name: string;
+		weight?: number;
+		script?: string;
+		tps?: number;
+		latency_avg_ms?: number;
+		latency_stddev_ms?: number;
+		transactions?: number;
+		failed_transactions?: number;
+	}>;
 	started_at: string;
 	finished_at: string;
 }
@@ -107,12 +126,29 @@ export function importResultIntoRun(runId: number, result: RunnerResult): void {
 	const steps = result.steps;
 	if (steps?.length) {
 		const insStep = db.prepare(`
-			INSERT INTO run_step_results (run_id, step_id, position, name, type, status, command, stdout, started_at, finished_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			INSERT INTO run_step_results (
+				run_id, step_id, position, name, type, status, command, stdout,
+				processed_script, pgbench_summary_json, pgbench_scripts_json, started_at, finished_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`);
 		db.transaction(() => {
 			for (const s of steps) {
-				insStep.run(runId, s.step_id, s.position, s.name, s.type, s.status, s.command ?? '', s.log ?? '', s.started_at, s.finished_at);
+				insStep.run(
+					runId,
+					s.step_id,
+					s.position,
+					s.name,
+					s.type,
+					s.status,
+					s.command ?? '',
+					s.log ?? '',
+					s.processed_script ?? '',
+					s.pgbench_summary ? JSON.stringify(s.pgbench_summary) : '',
+					s.pgbench_scripts ? JSON.stringify(s.pgbench_scripts) : '',
+					s.started_at,
+					s.finished_at
+				);
 			}
 		})();
 	}
