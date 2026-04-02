@@ -1,4 +1,4 @@
-import { writeFileSync, readFileSync, unlinkSync } from 'fs';
+import { writeFileSync, readFileSync, unlinkSync, existsSync } from 'fs';
 import { randomUUID } from 'crypto';
 import getDb from '$lib/server/db';
 import { createRun, completeRun, getActiveRun } from '$lib/server/run-manager';
@@ -98,6 +98,161 @@ export function startEc2Run(
 	});
 
 	return runId;
+}
+
+interface StaleEc2Run {
+	id: number;
+	ec2_run_token: string;
+	ec2_server_id: number;
+	host: string;
+	user: string;
+	port: number;
+	private_key: string;
+	remote_dir: string;
+	log_dir: string;
+}
+
+const POLL_INTERVAL_MS = 15_000;
+const POLL_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+/**
+ * Called at startup. For each benchmark_run that was still 'running' on an EC2 server,
+ * checks whether mybench-runner has since finished (result file exists) or is still in
+ * progress (pgrep finds the process), and recovers accordingly.
+ */
+export function recoverEc2Runs(): void {
+	const db = getDb();
+
+	const staleRuns = db.prepare(`
+		SELECT br.id, br.ec2_run_token, br.ec2_server_id,
+		       e.host, e.user, e.port, e.private_key, e.remote_dir, e.log_dir
+		FROM benchmark_runs br
+		JOIN ec2_servers e ON br.ec2_server_id = e.id
+		WHERE br.status = 'running'
+		  AND br.ec2_run_token IS NOT NULL
+		  AND br.ec2_server_id IS NOT NULL
+	`).all() as StaleEc2Run[];
+
+	if (staleRuns.length === 0) return;
+
+	console.log(`[ec2-recovery] Found ${staleRuns.length} interrupted EC2 run(s), checking status...`);
+
+	for (const run of staleRuns) {
+		recoverSingleEc2Run(run).catch((err) => {
+			console.error(`[ec2-recovery] Run ${run.id} recovery error: ${err instanceof Error ? err.message : err}`);
+			db.prepare(`UPDATE benchmark_runs SET status = 'failed', finished_at = ? WHERE id = ?`)
+				.run(new Date().toISOString(), run.id);
+		});
+	}
+}
+
+async function recoverSingleEc2Run(run: StaleEc2Run): Promise<void> {
+	const db = getDb();
+	const ec2Server: import('$lib/types').Ec2Server = {
+		id: run.ec2_server_id,
+		name: '',
+		host: run.host,
+		user: run.user,
+		port: run.port,
+		private_key: run.private_key,
+		remote_dir: run.remote_dir,
+		log_dir: run.log_dir
+	};
+
+	const localResultPath = `/tmp/mybench-ec2-result-${run.ec2_run_token}.json`;
+
+	let conn: import('ssh2').Client | undefined;
+	try {
+		conn = await connectSsh(ec2Server);
+		const homeDir = (await exec(conn, 'echo $HOME')).stdout.trim();
+		const remoteDir = ec2Server.remote_dir.replace(/^~/, homeDir);
+		const remoteResultPath = `${remoteDir}/result-${run.ec2_run_token}.json`;
+		const remotePlanPath = `${remoteDir}/plan-${run.ec2_run_token}.json`;
+
+		const resultExists = (await exec(conn, `test -f ${shellQuote(remoteResultPath)} && echo yes || echo no`)).stdout.trim() === 'yes';
+
+		if (resultExists) {
+			console.log(`[ec2-recovery] Run ${run.id}: result file found, importing...`);
+			await downloadFile(conn, remoteResultPath, localResultPath);
+			conn.end(); conn = undefined;
+			importResultIntoRun(run.id, JSON.parse(readFileSync(localResultPath, 'utf8')));
+			console.log(`[ec2-recovery] Run ${run.id}: recovered successfully`);
+			return;
+		}
+
+		// Result not ready yet — check if mybench-runner is still alive
+		const pgrepOut = (await exec(conn, `pgrep -f ${shellQuote(`plan-${run.ec2_run_token}.json`)} || true`)).stdout.trim();
+		conn.end(); conn = undefined;
+
+		if (!pgrepOut) {
+			console.log(`[ec2-recovery] Run ${run.id}: process dead, no result — marking failed`);
+			db.prepare(`UPDATE benchmark_runs SET status = 'failed', finished_at = ? WHERE id = ?`)
+				.run(new Date().toISOString(), run.id);
+			return;
+		}
+
+		// Still running — poll until it finishes
+		console.log(`[ec2-recovery] Run ${run.id}: mybench-runner still running (PID ${pgrepOut}), polling every ${POLL_INTERVAL_MS / 1000}s...`);
+		await pollUntilDone(run, ec2Server, remoteResultPath, remotePlanPath, localResultPath);
+
+	} finally {
+		conn?.end();
+		try { if (existsSync(localResultPath)) unlinkSync(localResultPath); } catch { /* ignore */ }
+	}
+}
+
+async function pollUntilDone(
+	run: StaleEc2Run,
+	ec2Server: import('$lib/types').Ec2Server,
+	remoteResultPath: string,
+	remotePlanPath: string,
+	localResultPath: string
+): Promise<void> {
+	const db = getDb();
+	const deadline = Date.now() + POLL_TIMEOUT_MS;
+
+	while (Date.now() < deadline) {
+		await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+
+		let conn: import('ssh2').Client | undefined;
+		try {
+			conn = await connectSsh(ec2Server);
+
+			const resultExists = (await exec(conn, `test -f ${shellQuote(remoteResultPath)} && echo yes || echo no`)).stdout.trim() === 'yes';
+
+			if (resultExists) {
+				console.log(`[ec2-recovery] Run ${run.id}: result ready, importing...`);
+				await downloadFile(conn, remoteResultPath, localResultPath);
+				conn.end(); conn = undefined;
+				importResultIntoRun(run.id, JSON.parse(readFileSync(localResultPath, 'utf8')));
+				console.log(`[ec2-recovery] Run ${run.id}: recovered successfully`);
+				return;
+			}
+
+			// Check if the process is still alive
+			const pgrepOut = (await exec(conn, `pgrep -f ${shellQuote(`plan-${run.ec2_run_token}.json`)} || true`)).stdout.trim();
+			conn.end(); conn = undefined;
+
+			if (!pgrepOut) {
+				console.log(`[ec2-recovery] Run ${run.id}: process exited without result — marking failed`);
+				db.prepare(`UPDATE benchmark_runs SET status = 'failed', finished_at = ? WHERE id = ?`)
+					.run(new Date().toISOString(), run.id);
+				return;
+			}
+
+			console.log(`[ec2-recovery] Run ${run.id}: still in progress, next check in ${POLL_INTERVAL_MS / 1000}s`);
+		} catch (sshErr) {
+			// Transient SSH failure — log and keep retrying
+			console.warn(`[ec2-recovery] Run ${run.id}: SSH check failed (${sshErr instanceof Error ? sshErr.message : sshErr}), will retry`);
+		} finally {
+			conn?.end();
+		}
+	}
+
+	// Exceeded 24-hour deadline
+	console.error(`[ec2-recovery] Run ${run.id}: timed out after 24h — marking failed`);
+	db.prepare(`UPDATE benchmark_runs SET status = 'failed', finished_at = ? WHERE id = ?`)
+		.run(new Date().toISOString(), run.id);
 }
 
 async function executeEc2RunAsync(

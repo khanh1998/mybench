@@ -71,11 +71,14 @@ export async function stopRun(runId: number) {
 	activeRuns.delete(runId);
 }
 
-// On startup, reset any stale running runs
+// On startup, reset stale local runs to failed. EC2 runs are handled separately by recoverEc2Runs().
 export function recoverStaleRuns() {
 	const db = getDb();
-	const stale = db.prepare(`UPDATE benchmark_runs SET status = 'failed', finished_at = ? WHERE status = 'running'`).run(new Date().toISOString());
+	const stale = db.prepare(`
+		UPDATE benchmark_runs SET status = 'failed', finished_at = ?
+		WHERE status = 'running' AND (ec2_server_id IS NULL OR ec2_run_token IS NULL)
+	`).run(new Date().toISOString());
 	if (stale.changes > 0) {
-		console.log(`[run-manager] Reset ${stale.changes} stale running runs to failed`);
+		console.log(`[run-manager] Reset ${stale.changes} stale local runs to failed`);
 	}
 }

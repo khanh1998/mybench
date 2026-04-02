@@ -1,4 +1,5 @@
 import { recoverStaleRuns } from '$lib/server/run-manager';
+import { recoverEc2Runs } from '$lib/server/ec2-executor';
 import getDb from '$lib/server/db';
 import { redirect } from '@sveltejs/kit';
 import { env } from '$env/dynamic/private';
@@ -6,6 +7,7 @@ import { env } from '$env/dynamic/private';
 // Initialize DB and recover stale runs on startup
 getDb();
 recoverStaleRuns();
+recoverEc2Runs();
 
 const PUBLIC_PATHS = ['/login', '/favicon.ico'];
 
