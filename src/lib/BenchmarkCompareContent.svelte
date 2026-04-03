@@ -41,7 +41,7 @@
     { key: 'transactions' as const, label: 'Transactions', decimals: 0, higherBetter: true }
   ];
 
-  let activeCompareTab = $state<'load' | 'telemetry'>('load');
+  let activeCompareTab = $state<'load' | 'telemetry' | 'cloudwatch'>('load');
 
   function getRunForId(runId: number): CompareRunInfo | undefined {
     return allRuns.find((run) => run.id === runId);
@@ -353,14 +353,35 @@
     >
       Database Telemetry
     </button>
+    <button
+      class="tab-btn"
+      class:active={activeCompareTab === 'cloudwatch'}
+      onclick={() => activeCompareTab = 'cloudwatch'}
+    >
+      CloudWatch
+    </button>
   </div>
 
   {#if activeCompareTab === 'load'}
     <div class="card">
       <LoadAnalysis runs={selectedRuns} showPhaseFilter={true} />
     </div>
-  {:else}
-    <DatabaseTelemetryCompare runs={selectedRuns} active={activeCompareTab === 'telemetry'} />
+  {:else if activeCompareTab === 'telemetry'}
+    <DatabaseTelemetryCompare
+      runs={selectedRuns}
+      active={activeCompareTab === 'telemetry'}
+      excludeSectionKeys={['cloudwatch']}
+    />
+  {:else if activeCompareTab === 'cloudwatch'}
+    <DatabaseTelemetryCompare
+      runs={selectedRuns}
+      active={activeCompareTab === 'cloudwatch'}
+      title="CloudWatch"
+      subtitle="Compare CloudWatch and Enhanced Monitoring telemetry across the selected runs."
+      includeSectionKeys={['cloudwatch']}
+      showHeroCards={false}
+      showInsightSummary={false}
+    />
   {/if}
 {:else if !canCompare}
   <div class="card empty-state">

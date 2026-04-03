@@ -26,10 +26,22 @@
 
   let {
     runs = [],
-    active = false
+    active = false,
+    title = 'Database Telemetry',
+    subtitle = 'Compare database internals section-by-section across the selected runs.',
+    includeSectionKeys = null,
+    excludeSectionKeys = null,
+    showHeroCards = true,
+    showInsightSummary = true
   }: {
     runs: CompareRun[];
     active?: boolean;
+    title?: string;
+    subtitle?: string;
+    includeSectionKeys?: string[] | null;
+    excludeSectionKeys?: string[] | null;
+    showHeroCards?: boolean;
+    showInsightSummary?: boolean;
   } = $props();
 
   const PHASES: TelemetryPhase[] = ['pre', 'bench', 'post'];
@@ -125,7 +137,13 @@
   const sectionGroups = $derived.by((): SectionCompareGroup[] => {
     const firstTelemetry = runs.map((run) => getRunTelemetry(run.id)).find(Boolean);
     if (!firstTelemetry) return [];
-    return firstTelemetry.sections.map((section) => ({
+    return firstTelemetry.sections
+      .filter((section) => {
+        if (includeSectionKeys && !includeSectionKeys.includes(section.key)) return false;
+        if (excludeSectionKeys && excludeSectionKeys.includes(section.key)) return false;
+        return true;
+      })
+      .map((section) => ({
       key: section.key,
       label: section.label,
       sections: Object.fromEntries(
@@ -241,8 +259,8 @@
   <div class="card compare-toolbar-card">
     <div class="compare-toolbar">
       <div>
-        <h3 style="margin:0">Database Telemetry</h3>
-        <div class="compare-subtitle">Compare database internals section-by-section across the selected runs.</div>
+        <h3 style="margin:0">{title}</h3>
+        <div class="compare-subtitle">{subtitle}</div>
       </div>
       <div class="phase-filter">
         <span class="phase-label">Phases</span>
@@ -272,7 +290,7 @@
   {:else if error}
     <div class="card telemetry-empty telemetry-error">{error}</div>
   {:else}
-    {#if insightBullets.length > 0}
+    {#if showInsightSummary && insightBullets.length > 0}
       <div class="card insight-summary-card">
         <div class="insight-header">Insight Summary</div>
         <ul class="insight-list">
@@ -283,7 +301,7 @@
       </div>
     {/if}
 
-    {#if heroCompareCards.length > 0}
+    {#if showHeroCards && heroCompareCards.length > 0}
       <div class="hero-compare-grid">
         {#each heroCompareCards as card}
           <div class="hero-compare-card">
