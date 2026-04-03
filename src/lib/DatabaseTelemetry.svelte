@@ -7,11 +7,17 @@
   let {
     runId,
     active = false,
-    title = 'Database Telemetry'
+    title = 'Database Telemetry',
+    includeSectionKeys = null,
+    excludeSectionKeys = null,
+    showHeroCards = true
   }: {
     runId: number;
     active?: boolean;
     title?: string;
+    includeSectionKeys?: string[] | null;
+    excludeSectionKeys?: string[] | null;
+    showHeroCards?: boolean;
   } = $props();
 
   const PHASES: TelemetryPhase[] = ['pre', 'bench', 'post'];
@@ -25,6 +31,15 @@
 
   const phaseKey = $derived(`${runId}:${selectedPhases.join(',')}`);
   const originMs = $derived(telemetry ? new Date(telemetry.originTs).getTime() : null);
+  const visibleSections = $derived.by(() => {
+    if (!telemetry) return [];
+
+    return telemetry.sections.filter((section) => {
+      if (includeSectionKeys && !includeSectionKeys.includes(section.key)) return false;
+      if (excludeSectionKeys && excludeSectionKeys.includes(section.key)) return false;
+      return true;
+    });
+  });
 
   async function loadTelemetry() {
     const seq = ++requestSeq;
@@ -86,14 +101,16 @@
   {:else if error}
     <div class="telemetry-empty telemetry-error">{error}</div>
   {:else if telemetry}
-    <div class="hero-grid">
-      {#each telemetry.heroCards as card}
-        <TelemetryValueCard {card} variant="hero" />
-      {/each}
-    </div>
+    {#if showHeroCards}
+      <div class="hero-grid">
+        {#each telemetry.heroCards as card}
+          <TelemetryValueCard {card} variant="hero" />
+        {/each}
+      </div>
+    {/if}
 
     <div class="section-list">
-      {#each telemetry.sections as section}
+      {#each visibleSections as section}
         <TelemetrySectionPanel
           {section}
           markers={telemetry.markers}

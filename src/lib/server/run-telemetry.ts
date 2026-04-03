@@ -43,6 +43,11 @@ export interface TelemetryMarker {
 	color?: string;
 }
 
+export interface TelemetryTableSnapshot {
+	t: number;
+	rows: Record<string, unknown>[];
+}
+
 export interface TelemetrySection {
 	key: string;
 	label: string;
@@ -56,6 +61,7 @@ export interface TelemetrySection {
 	tableTitle: string;
 	tableColumns: TelemetryTableColumn[];
 	tableRows: Record<string, unknown>[];
+	tableSnapshots?: TelemetryTableSnapshot[];
 }
 
 export interface RunTelemetry {
@@ -230,6 +236,14 @@ function elapsedSeconds(rows: SnapshotRow[]): number | null {
 	return (last - first) / 1000;
 }
 
+function elapsedSecondsAt(rows: SnapshotRow[], index: number): number | null {
+	if (rows.length < 2 || index <= 0 || index >= rows.length) return null;
+	const first = toMs(rows[0]._collected_at);
+	const current = toMs(rows[index]._collected_at);
+	if (first === null || current === null || current <= first) return null;
+	return (current - first) / 1000;
+}
+
 function makeMetricRows(metrics: Array<{ metric: string; value: unknown; kind?: TelemetryValueKind }>): Record<string, unknown>[] {
 	return metrics.map(({ metric, value, kind }) => ({ metric, value, value_kind: kind ?? 'text' }));
 }
@@ -239,9 +253,14 @@ function metricCard(key: string, label: string, kind: TelemetryValueKind, value:
 }
 
 function relPoint(row: SnapshotRow, runStartMs: number, value: number): TelemetrySeriesPoint | null {
+	const t = relTime(row, runStartMs);
+	if (t === null || !Number.isFinite(value)) return null;
+	return { t, v: value };
+}
+
+function relTime(row: SnapshotRow, runStartMs: number): number | null {
 	const collectedMs = toMs(row._collected_at);
-	if (collectedMs === null || !Number.isFinite(value)) return null;
-	return { t: collectedMs - runStartMs, v: value };
+	return collectedMs === null ? null : collectedMs - runStartMs;
 }
 
 function buildCumulativeSeries(
@@ -399,6 +418,47 @@ function buildGroupedMetricCharts<T extends { key: string; label: string; rows: 
 		.filter((metric): metric is TelemetryChartMetric => metric !== null);
 }
 
+function buildMetricTableSnapshots(
+	rows: SnapshotRow[],
+	runStartMs: number,
+	rowsAtIndex: (rows: SnapshotRow[], index: number) => Record<string, unknown>[]
+): TelemetryTableSnapshot[] {
+	return rows
+		.map((row, index) => {
+			const t = relTime(row, runStartMs);
+			if (t === null) return null;
+			return { t, rows: rowsAtIndex(rows, index) };
+		})
+		.filter((snapshot): snapshot is TelemetryTableSnapshot => snapshot !== null);
+}
+
+function buildGroupedTableSnapshots<T extends { rows: SnapshotRow[] }>(
+	entries: T[],
+	runStartMs: number,
+	buildRow: (entry: T, index: number) => Record<string, unknown> | null
+): TelemetryTableSnapshot[] {
+	const timestamps = new Set<string>();
+	for (const entry of entries) {
+		for (const row of entry.rows) timestamps.add(String(row._collected_at));
+	}
+
+	return [...timestamps]
+		.sort((a, b) => a.localeCompare(b))
+		.map((collectedAt) => {
+			const t = relTime({ _collected_at: collectedAt, _phase: 'bench' }, runStartMs);
+			if (t === null) return null;
+			const rows = entries
+				.map((entry) => {
+					const index = entry.rows.findIndex((row) => String(row._collected_at) === collectedAt);
+					return index >= 0 ? buildRow(entry, index) : null;
+				})
+				.filter((row): row is Record<string, unknown> => row !== null);
+			if (rows.length === 0) return null;
+			return { t, rows };
+		})
+		.filter((snapshot): snapshot is TelemetryTableSnapshot => snapshot !== null);
+}
+
 function aggregateByTimestamp(
 	rows: SnapshotRow[],
 	runStartMs: number,
@@ -440,6 +500,10 @@ function topEntries<T>(items: T[], scoreFn: (item: T) => number | null, limit = 
 		.sort((a, b) => (scoreFn(b) ?? -Infinity) - (scoreFn(a) ?? -Infinity))
 		.filter((item) => (scoreFn(item) ?? -Infinity) > -Infinity)
 		.slice(0, limit);
+}
+
+function prioritizeItems<T>(items: T[], predicate: (item: T) => boolean): T[] {
+	return [...items.filter(predicate), ...items.filter((item) => !predicate(item))];
 }
 
 function fetchRows(
@@ -514,7 +578,8 @@ function buildDatabaseSection(rows: SnapshotRow[], runStartMs: number): Telemetr
 			chartSeries: [],
 			tableTitle: 'Database metrics',
 			tableColumns: [],
-			tableRows: []
+			tableRows: [],
+			tableSnapshots: []
 		};
 	}
 
@@ -616,7 +681,28 @@ function buildDatabaseSection(rows: SnapshotRow[], runStartMs: number): Telemetr
 			{ metric: 'Deadlocks', value: deadlocks, kind: 'count' },
 			{ metric: 'Block read time (ms)', value: delta(rows, 'blk_read_time'), kind: 'duration_ms' },
 			{ metric: 'Block write time (ms)', value: delta(rows, 'blk_write_time'), kind: 'duration_ms' }
-		])
+		]),
+		tableSnapshots: buildMetricTableSnapshots(rows, runStartMs, (snapshotRows, index) => {
+			const commit = deltaAt(snapshotRows, index, 'xact_commit');
+			const rollback = deltaAt(snapshotRows, index, 'xact_rollback');
+			const transactions = sum([commit, rollback]);
+			return makeMetricRows([
+				{ metric: 'Transactions', value: transactions, kind: 'count' },
+				{ metric: 'Commits', value: commit, kind: 'count' },
+				{ metric: 'Rollbacks', value: rollback, kind: 'count' },
+				{ metric: 'DB-stat TPS', value: safeRatio(transactions, elapsedSecondsAt(snapshotRows, index)), kind: 'tps' },
+				{ metric: 'Buffer hit ratio', value: ratioAt(snapshotRows, index, 'blks_hit', ['blks_hit', 'blks_read']), kind: 'percent' },
+				{ metric: 'Blocks read', value: deltaAt(snapshotRows, index, 'blks_read'), kind: 'count' },
+				{ metric: 'Blocks hit', value: deltaAt(snapshotRows, index, 'blks_hit'), kind: 'count' },
+				{ metric: 'Rows inserted', value: deltaAt(snapshotRows, index, 'tup_inserted'), kind: 'count' },
+				{ metric: 'Rows updated', value: deltaAt(snapshotRows, index, 'tup_updated'), kind: 'count' },
+				{ metric: 'Rows deleted', value: deltaAt(snapshotRows, index, 'tup_deleted'), kind: 'count' },
+				{ metric: 'Temp bytes', value: deltaAt(snapshotRows, index, 'temp_bytes'), kind: 'bytes' },
+				{ metric: 'Deadlocks', value: deltaAt(snapshotRows, index, 'deadlocks'), kind: 'count' },
+				{ metric: 'Block read time (ms)', value: deltaAt(snapshotRows, index, 'blk_read_time'), kind: 'duration_ms' },
+				{ metric: 'Block write time (ms)', value: deltaAt(snapshotRows, index, 'blk_write_time'), kind: 'duration_ms' }
+			]);
+		})
 	};
 }
 
@@ -637,7 +723,8 @@ function buildWalSection(rows: SnapshotRow[], runStartMs: number, transactions: 
 			chartSeries: [],
 			tableTitle: 'WAL metrics',
 			tableColumns: [],
-			tableRows: []
+			tableRows: [],
+			tableSnapshots: []
 		};
 	}
 
@@ -682,7 +769,20 @@ function buildWalSection(rows: SnapshotRow[], runStartMs: number, transactions: 
 			{ metric: 'Full page images', value: walFpi, kind: 'count' },
 			{ metric: 'FPI ratio', value: safeRatio(walFpi, walRecords), kind: 'percent' },
 			{ metric: 'WAL buffers full', value: walBuffersFull, kind: 'count' }
-		])
+		]),
+		tableSnapshots: buildMetricTableSnapshots(rows, runStartMs, (snapshotRows, index) =>
+			makeMetricRows([
+				{ metric: 'WAL bytes', value: deltaAt(snapshotRows, index, 'wal_bytes'), kind: 'bytes' },
+				{ metric: 'WAL records', value: deltaAt(snapshotRows, index, 'wal_records'), kind: 'count' },
+				{ metric: 'Full page images', value: deltaAt(snapshotRows, index, 'wal_fpi'), kind: 'count' },
+				{
+					metric: 'FPI ratio',
+					value: safeRatio(deltaAt(snapshotRows, index, 'wal_fpi'), deltaAt(snapshotRows, index, 'wal_records')),
+					kind: 'percent'
+				},
+				{ metric: 'WAL buffers full', value: deltaAt(snapshotRows, index, 'wal_buffers_full'), kind: 'count' }
+			])
+		)
 	};
 }
 
@@ -702,7 +802,8 @@ function buildBgwriterSection(rows: SnapshotRow[], runStartMs: number): Telemetr
 			chartSeries: [],
 			tableTitle: 'BGWriter metrics',
 			tableColumns: [],
-			tableRows: []
+			tableRows: [],
+			tableSnapshots: []
 		};
 	}
 
@@ -732,7 +833,15 @@ function buildBgwriterSection(rows: SnapshotRow[], runStartMs: number): Telemetr
 			{ metric: 'Maxwritten clean', value: maxwrittenClean, kind: 'count' },
 			{ metric: 'Buffers alloc', value: buffersAlloc, kind: 'count' },
 			{ metric: 'Stats reset', value: latestText(rows, 'stats_reset'), kind: 'text' }
-		])
+		]),
+		tableSnapshots: buildMetricTableSnapshots(rows, runStartMs, (snapshotRows, index) =>
+			makeMetricRows([
+				{ metric: 'Buffers clean', value: deltaAt(snapshotRows, index, 'buffers_clean'), kind: 'count' },
+				{ metric: 'Maxwritten clean', value: deltaAt(snapshotRows, index, 'maxwritten_clean'), kind: 'count' },
+				{ metric: 'Buffers alloc', value: deltaAt(snapshotRows, index, 'buffers_alloc'), kind: 'count' },
+				{ metric: 'Stats reset', value: snapshotRows[index].stats_reset == null ? null : String(snapshotRows[index].stats_reset), kind: 'text' }
+			])
+		)
 	};
 }
 
@@ -748,7 +857,8 @@ function buildArchiverSection(rows: SnapshotRow[], runStartMs: number): Telemetr
 			chartSeries: [],
 			tableTitle: 'Archiver metrics',
 			tableColumns: [],
-			tableRows: []
+			tableRows: [],
+			tableSnapshots: []
 		};
 	}
 
@@ -787,7 +897,17 @@ function buildArchiverSection(rows: SnapshotRow[], runStartMs: number): Telemetr
 			{ metric: 'Last archived at', value: latestText(rows, 'last_archived_time'), kind: 'text' },
 			{ metric: 'Last failed WAL', value: latestText(rows, 'last_failed_wal'), kind: 'text' },
 			{ metric: 'Last failure at', value: latestText(rows, 'last_failed_time'), kind: 'text' }
-		])
+		]),
+		tableSnapshots: buildMetricTableSnapshots(rows, runStartMs, (snapshotRows, index) =>
+			makeMetricRows([
+				{ metric: 'Archived segments', value: deltaAt(snapshotRows, index, 'archived_count'), kind: 'count' },
+				{ metric: 'Archive failures', value: deltaAt(snapshotRows, index, 'failed_count'), kind: 'count' },
+				{ metric: 'Last archived WAL', value: snapshotRows[index].last_archived_wal == null ? null : String(snapshotRows[index].last_archived_wal), kind: 'text' },
+				{ metric: 'Last archived at', value: snapshotRows[index].last_archived_time == null ? null : String(snapshotRows[index].last_archived_time), kind: 'text' },
+				{ metric: 'Last failed WAL', value: snapshotRows[index].last_failed_wal == null ? null : String(snapshotRows[index].last_failed_wal), kind: 'text' },
+				{ metric: 'Last failure at', value: snapshotRows[index].last_failed_time == null ? null : String(snapshotRows[index].last_failed_time), kind: 'text' }
+			])
+		)
 	};
 }
 
@@ -803,7 +923,8 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 			chartSeries: [],
 			tableTitle: 'IO groups',
 			tableColumns: [],
-			tableRows: []
+			tableRows: [],
+			tableSnapshots: []
 		};
 	}
 
@@ -1045,6 +1166,18 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 			hits: entry.hits,
 			evictions: entry.evictions,
 			fsyncs: entry.fsyncs
+		})),
+		tableSnapshots: buildGroupedTableSnapshots(topGroups, runStartMs, (entry, index) => ({
+			group: entry.label,
+			reads: deltaAt(entry.rows, index, 'reads'),
+			read_bytes: deltaAt(entry.rows, index, 'read_bytes'),
+			writes: deltaAt(entry.rows, index, 'writes'),
+			write_bytes: deltaAt(entry.rows, index, 'write_bytes'),
+			extends: deltaAt(entry.rows, index, 'extends'),
+			extend_bytes: deltaAt(entry.rows, index, 'extend_bytes'),
+			hits: deltaAt(entry.rows, index, 'hits'),
+			evictions: deltaAt(entry.rows, index, 'evictions'),
+			fsyncs: deltaAt(entry.rows, index, 'fsyncs')
 		}))
 	};
 }
@@ -1061,7 +1194,8 @@ function buildUserTablesSection(rows: SnapshotRow[], runStartMs: number): Teleme
 			chartSeries: [],
 			tableTitle: 'Top tables',
 			tableColumns: [],
-			tableRows: []
+			tableRows: [],
+			tableSnapshots: []
 		};
 	}
 
@@ -1227,6 +1361,13 @@ function buildUserTablesSection(rows: SnapshotRow[], runStartMs: number): Teleme
 			seq_scan_ratio: entry.seqScanRatio,
 			hot_update_ratio: entry.hotRatio,
 			dead_tuple_growth: entry.deadTupleGrowth
+		})),
+		tableSnapshots: buildGroupedTableSnapshots(topTables, runStartMs, (entry, index) => ({
+			table: entry.label,
+			writes: sumDeltaAt(entry.rows, index, ['n_tup_ins', 'n_tup_upd', 'n_tup_del']),
+			seq_scan_ratio: ratioAt(entry.rows, index, 'seq_scan', ['seq_scan', 'idx_scan']),
+			hot_update_ratio: safeRatio(deltaAt(entry.rows, index, 'n_tup_hot_upd'), deltaAt(entry.rows, index, 'n_tup_upd')),
+			dead_tuple_growth: deltaAt(entry.rows, index, 'n_dead_tup')
 		}))
 	};
 }
@@ -1243,7 +1384,8 @@ function buildUserIndexesSection(rows: SnapshotRow[], runStartMs: number): Telem
 			chartSeries: [],
 			tableTitle: 'Top indexes',
 			tableColumns: [],
-			tableRows: []
+			tableRows: [],
+			tableSnapshots: []
 		};
 	}
 
@@ -1330,7 +1472,18 @@ function buildUserIndexesSection(rows: SnapshotRow[], runStartMs: number): Telem
 			idx_tup_fetch: entry.idxFetch,
 			selectivity: entry.selectivity,
 			unused: entry.unused
-		}))
+		})),
+		tableSnapshots: buildGroupedTableSnapshots(topIndexes, runStartMs, (entry, index) => {
+			const idxScans = deltaAt(entry.rows, index, 'idx_scan');
+			return {
+				index: entry.label,
+				idx_scans: idxScans,
+				idx_tup_read: deltaAt(entry.rows, index, 'idx_tup_read'),
+				idx_tup_fetch: deltaAt(entry.rows, index, 'idx_tup_fetch'),
+				selectivity: safeRatio(deltaAt(entry.rows, index, 'idx_tup_fetch'), deltaAt(entry.rows, index, 'idx_tup_read')),
+				unused: (idxScans ?? 0) === 0
+			};
+		})
 	};
 }
 
@@ -1346,7 +1499,8 @@ function buildStatioUserTablesSection(rows: SnapshotRow[], runStartMs: number): 
 			chartSeries: [],
 			tableTitle: 'Top tables',
 			tableColumns: [],
-			tableRows: []
+			tableRows: [],
+			tableSnapshots: []
 		};
 	}
 
@@ -1485,6 +1639,14 @@ function buildStatioUserTablesSection(rows: SnapshotRow[], runStartMs: number): 
 			heap_reads: entry.heapReads,
 			heap_hit_ratio: entry.heapHitRatio,
 			toast_reads: entry.toasts
+		})),
+		tableSnapshots: buildGroupedTableSnapshots(topTables, runStartMs, (entry, index) => ({
+			table: entry.label,
+			heap_activity: sumDeltaAt(entry.rows, index, ['heap_blks_read', 'heap_blks_hit']),
+			heap_hits: deltaAt(entry.rows, index, 'heap_blks_hit'),
+			heap_reads: deltaAt(entry.rows, index, 'heap_blks_read'),
+			heap_hit_ratio: ratioAt(entry.rows, index, 'heap_blks_hit', ['heap_blks_hit', 'heap_blks_read']),
+			toast_reads: deltaAt(entry.rows, index, 'toast_blks_read')
 		}))
 	};
 }
@@ -1501,7 +1663,8 @@ function buildStatioUserIndexesSection(rows: SnapshotRow[], runStartMs: number):
 			chartSeries: [],
 			tableTitle: 'Top indexes',
 			tableColumns: [],
-			tableRows: []
+			tableRows: [],
+			tableSnapshots: []
 		};
 	}
 
@@ -1572,6 +1735,12 @@ function buildStatioUserIndexesSection(rows: SnapshotRow[], runStartMs: number):
 			idx_blks_read: entry.idxReads,
 			idx_blks_hit: entry.idxHits,
 			idx_hit_ratio: entry.idxHitRatio
+		})),
+		tableSnapshots: buildGroupedTableSnapshots(topIndexes, runStartMs, (entry, index) => ({
+			index: entry.label,
+			idx_blks_read: deltaAt(entry.rows, index, 'idx_blks_read'),
+			idx_blks_hit: deltaAt(entry.rows, index, 'idx_blks_hit'),
+			idx_hit_ratio: ratioAt(entry.rows, index, 'idx_blks_hit', ['idx_blks_hit', 'idx_blks_read'])
 		}))
 	};
 }
@@ -1588,7 +1757,8 @@ function buildStatioUserSequencesSection(rows: SnapshotRow[], runStartMs: number
 			chartSeries: [],
 			tableTitle: 'Top sequences',
 			tableColumns: [],
-			tableRows: []
+			tableRows: [],
+			tableSnapshots: []
 		};
 	}
 
@@ -1670,6 +1840,13 @@ function buildStatioUserSequencesSection(rows: SnapshotRow[], runStartMs: number
 			sequence_hits: entry.sequenceHits,
 			sequence_reads: entry.sequenceReads,
 			sequence_hit_ratio: entry.sequenceHitRatio
+		})),
+		tableSnapshots: buildGroupedTableSnapshots(topSequences, runStartMs, (entry, index) => ({
+			sequence: entry.label,
+			sequence_activity: sumDeltaAt(entry.rows, index, ['blks_read', 'blks_hit']),
+			sequence_hits: deltaAt(entry.rows, index, 'blks_hit'),
+			sequence_reads: deltaAt(entry.rows, index, 'blks_read'),
+			sequence_hit_ratio: ratioAt(entry.rows, index, 'blks_hit', ['blks_hit', 'blks_read'])
 		}))
 	};
 }
@@ -1691,7 +1868,8 @@ function buildCheckpointerSection(rows: SnapshotRow[], runStartMs: number): Tele
 			chartSeries: [],
 			tableTitle: 'Checkpointer metrics',
 			tableColumns: [],
-			tableRows: []
+			tableRows: [],
+			tableSnapshots: []
 		};
 	}
 
@@ -1762,7 +1940,20 @@ function buildCheckpointerSection(rows: SnapshotRow[], runStartMs: number): Tele
 			{ metric: 'Sync time (ms)', value: syncTime, kind: 'duration_ms' },
 			{ metric: 'Buffers written', value: delta(rows, 'buffers_written'), kind: 'count' },
 			{ metric: 'Stats reset', value: latestText(rows, 'stats_reset'), kind: 'text' }
-		])
+		]),
+		tableSnapshots: buildMetricTableSnapshots(rows, runStartMs, (snapshotRows, index) =>
+			makeMetricRows([
+				{ metric: 'Requested checkpoints', value: deltaAt(snapshotRows, index, 'num_requested'), kind: 'count' },
+				{ metric: 'Timed checkpoints', value: deltaAt(snapshotRows, index, 'num_timed'), kind: 'count' },
+				{ metric: 'Timed restartpoints', value: deltaAt(snapshotRows, index, 'restartpoints_timed'), kind: 'count' },
+				{ metric: 'Requested restartpoints', value: deltaAt(snapshotRows, index, 'restartpoints_req'), kind: 'count' },
+				{ metric: 'Restartpoints done', value: deltaAt(snapshotRows, index, 'restartpoints_done'), kind: 'count' },
+				{ metric: 'Write time (ms)', value: deltaAt(snapshotRows, index, 'write_time'), kind: 'duration_ms' },
+				{ metric: 'Sync time (ms)', value: deltaAt(snapshotRows, index, 'sync_time'), kind: 'duration_ms' },
+				{ metric: 'Buffers written', value: deltaAt(snapshotRows, index, 'buffers_written'), kind: 'count' },
+				{ metric: 'Stats reset', value: snapshotRows[index].stats_reset == null ? null : String(snapshotRows[index].stats_reset), kind: 'text' }
+			])
+		)
 	};
 }
 
@@ -1777,7 +1968,8 @@ function buildCloudWatchSection(db: Database.Database, runId: number, runStartMs
 		chartSeries: [],
 		tableTitle: 'CloudWatch metrics',
 		tableColumns: [],
-		tableRows: []
+		tableRows: [],
+		tableSnapshots: []
 	};
 
 	if (!tableExists(db, 'cloudwatch_datapoints')) return noData;
@@ -1893,7 +2085,7 @@ function buildCloudWatchSection(db: Database.Database, runId: number, runStartMs
 			fsNames.map((name) => `em_fs_${name}_used_pct`), 'percent')
 		: null;
 
-	const chartMetrics: TelemetryChartMetric[] = [
+	const chartMetrics = prioritizeItems([
 		...staticGroups,
 		emCpuGroup,
 		emLoadGroup,
@@ -1901,7 +2093,7 @@ function buildCloudWatchSection(db: Database.Database, runId: number, runStartMs
 		...emDiskGroups,
 		emNetGroup,
 		emFsGroup
-	].filter((g): g is TelemetryChartMetric => g !== null);
+	].filter((g): g is TelemetryChartMetric => g !== null), (metric) => metric.label.startsWith('EM '));
 
 	// Summary cards
 	const cpuPts = byMetric.get('CPUUtilization') ?? byMetric.get('em_cpu_total');
@@ -1909,7 +2101,7 @@ function buildCloudWatchSection(db: Database.Database, runId: number, runStartMs
 	const connPts = byMetric.get('DatabaseConnections');
 	const emMemFreePts = byMetric.get('em_memory_free');
 	const emCpuWaitPts = byMetric.get('em_cpu_wait');
-	const summary: TelemetryCard[] = [
+	const summary = prioritizeItems([
 		metricCard('cw_cpu_peak', 'Peak CPU', 'percent', cpuPts && cpuPts.length > 0 ? Math.max(...cpuPts.map((p) => p.value)) / 100 : null),
 		metricCard('cw_mem_min', 'Min Free Memory', 'bytes', memPts && memPts.length > 0 ? Math.min(...memPts.map((p) => p.value)) : null),
 		metricCard('cw_conn_peak', 'Peak Connections', 'count', connPts && connPts.length > 0 ? Math.max(...connPts.map((p) => p.value)) : null),
@@ -1919,16 +2111,38 @@ function buildCloudWatchSection(db: Database.Database, runId: number, runStartMs
 		...(emCpuWaitPts && emCpuWaitPts.length > 0
 			? [metricCard('em_cpu_wait_peak', 'EM Peak IO Wait', 'percent', Math.max(...emCpuWaitPts.map((p) => p.value)) / 100)]
 			: [])
-	];
+	], (card) => card.label.startsWith('EM '));
 
 	// Table: last value per metric
-	const tableRows = [...byMetric.entries()].map(([name, pts]) => ({
+	const tableRows = prioritizeItems([...byMetric.entries()].map(([name, pts]) => ({
 		metric: name,
 		value: pts[pts.length - 1]?.value ?? null,
 		unit: pts[pts.length - 1]?.unit ?? '',
 		samples: pts.length,
 		value_kind: 'count' as const
-	}));
+	})), (row) => String(row.metric).startsWith('em_'));
+	const tableSnapshots: TelemetryTableSnapshot[] = [...new Set(rows.map((row) => row.timestamp))]
+		.sort((a, b) => a.localeCompare(b))
+		.map((timestamp) => {
+			const tMs = toMs(timestamp);
+			if (tMs === null) return null;
+			const rowsAtTime: Record<string, unknown>[] = prioritizeItems([...byMetric.entries()]
+				.map(([name, pts]) => {
+					const point = pts.find((entry) => entry.timestamp === timestamp);
+					if (!point) return null;
+					return {
+						metric: name,
+						value: point.value,
+						unit: point.unit ?? '',
+						samples: pts.length,
+						value_kind: 'count' as const
+					};
+				})
+				.filter((row): row is NonNullable<typeof row> => row !== null), (row) => String(row.metric).startsWith('em_'));
+			if (rowsAtTime.length === 0) return null;
+			return { t: tMs - runStartMs, rows: rowsAtTime };
+		})
+		.filter((snapshot): snapshot is NonNullable<typeof snapshot> => snapshot !== null);
 
 	return {
 		key: 'cloudwatch',
@@ -1946,7 +2160,8 @@ function buildCloudWatchSection(db: Database.Database, runId: number, runStartMs
 			{ key: 'unit', label: 'Unit', kind: 'text' },
 			{ key: 'samples', label: 'Data Points', kind: 'count' }
 		],
-		tableRows
+		tableRows,
+		tableSnapshots
 	};
 }
 

@@ -40,6 +40,11 @@ export interface TelemetryMarker {
   color?: string;
 }
 
+export interface TelemetryTableSnapshot {
+  t: number;
+  rows: Record<string, unknown>[];
+}
+
 export interface TelemetrySection {
   key: string;
   label: string;
@@ -53,6 +58,7 @@ export interface TelemetrySection {
   tableTitle: string;
   tableColumns: TelemetryTableColumn[];
   tableRows: Record<string, unknown>[];
+  tableSnapshots?: TelemetryTableSnapshot[];
 }
 
 export interface RunTelemetry {

@@ -284,6 +284,8 @@ describe('buildRunTelemetry', () => {
 		expect(checkpointer?.summary.map((card) => [card.key, card.value])).toEqual([
 			['num_requested', 2],
 			['num_timed', 3],
+			['checkpoint_pressure', 0.4],
+			['avg_checkpoint_write_ms', 16],
 			['write_time', 80],
 			['sync_time', 15]
 		]);
@@ -302,17 +304,22 @@ describe('buildRunTelemetry', () => {
 			'blocks read',
 			'blocks hit',
 			'temp bytes',
-			'deadlocks'
+			'deadlocks',
+			'⟳ cache hit rate',
+			'⟳ rollback rate'
 		]);
 		expect(telemetry.sections.some((section) => section.key === 'database_conflicts')).toBe(false);
 		expect(wal?.chartSeries.map((series) => series.label)).toEqual([
 			'wal bytes',
 			'wal records',
 			'full page images',
-			'wal buffers full'
+			'wal buffers full',
+			'⟳ FPI ratio (fpi / records)',
+			'⟳ avg WAL bytes / record'
 		]);
 		expect(wal?.summary.map((card) => card.key)).toEqual([
 			'wal_bytes',
+			'wal_bytes_per_sec',
 			'wal_bytes_per_tx',
 			'fpi_ratio',
 			'wal_buffers_full'
@@ -324,6 +331,11 @@ describe('buildRunTelemetry', () => {
 			expect.objectContaining({ metric: 'FPI ratio', value: 0.2 }),
 			expect.objectContaining({ metric: 'WAL buffers full', value: 3 })
 		]);
+		expect(database?.tableSnapshots).toHaveLength(2);
+		expect(database?.tableSnapshots?.[0]?.rows.find((row) => row.metric === 'Transactions')?.value).toBe(0);
+		expect(database?.tableSnapshots?.[1]?.rows.find((row) => row.metric === 'Transactions')?.value).toBe(22);
+		expect(wal?.tableSnapshots?.[0]?.rows.find((row) => row.metric === 'WAL bytes')?.value).toBe(0);
+		expect(wal?.tableSnapshots?.[1]?.rows.find((row) => row.metric === 'WAL bytes')?.value).toBe(1200);
 
 		expect(io?.summary.map((card) => [card.key, card.value])).toEqual([
 			['reads', 5],
@@ -343,7 +355,8 @@ describe('buildRunTelemetry', () => {
 			'extends',
 			'hits',
 			'evictions',
-			'fsyncs'
+			'fsyncs',
+			'read_miss_ratio'
 		]);
 		expect(io?.tableRows).toEqual([
 			{
@@ -359,6 +372,9 @@ describe('buildRunTelemetry', () => {
 				fsyncs: 1
 			}
 		]);
+		expect(io?.tableSnapshots).toHaveLength(2);
+		expect(io?.tableSnapshots?.[0]?.rows[0]?.read_bytes).toBe(0);
+		expect(io?.tableSnapshots?.[1]?.rows[0]?.read_bytes).toBe(40960);
 	});
 
 	it('uses the checkpointer section for requested checkpoint hero cards and keeps bgwriter schema-specific metrics', () => {
@@ -416,7 +432,8 @@ describe('buildRunTelemetry', () => {
 			'writes',
 			'seq_scan_ratio',
 			'hot_update_ratio',
-			'dead_tuple_growth'
+			'dead_tuple_growth',
+			'index_scan_ratio'
 		]);
 	});
 

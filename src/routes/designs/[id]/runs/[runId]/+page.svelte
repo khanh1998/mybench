@@ -83,7 +83,7 @@
   let expandedBenchmarkScript = $state<string | null>(null);
   let scrollPending = false;
   let phases: PhaseState[] = $state([]);
-  let activeTab = $state<'overview' | 'load' | 'telemetry'>('overview');
+  let activeTab = $state<'overview' | 'load' | 'telemetry' | 'cloudwatch'>('overview');
   let nameInput = $state<HTMLInputElement | null>(null);
   let ec2StatusLoading = $state(false);
   let ec2Status = $state<Ec2Status | null>(null);
@@ -607,6 +607,10 @@
     disabled={!done}
     title={!done ? 'Available after run completes' : ''}
     onclick={() => activeTab = 'telemetry'}>Database Telemetry</button>
+  <button class="tab-btn" class:active={activeTab === 'cloudwatch'}
+    disabled={!done}
+    title={!done ? 'Available after run completes' : ''}
+    onclick={() => activeTab = 'cloudwatch'}>CloudWatch</button>
 </div>
 
 {#if activeTab === 'overview'}
@@ -954,7 +958,19 @@
     />
   </div>
 {:else if activeTab === 'telemetry'}
-  <DatabaseTelemetry {runId} active={activeTab === 'telemetry' && done} />
+  <DatabaseTelemetry
+    {runId}
+    active={activeTab === 'telemetry' && done}
+    excludeSectionKeys={['cloudwatch']}
+  />
+{:else if activeTab === 'cloudwatch'}
+  <DatabaseTelemetry
+    {runId}
+    active={activeTab === 'cloudwatch' && done}
+    title="CloudWatch"
+    includeSectionKeys={['cloudwatch']}
+    showHeroCards={false}
+  />
 {/if}
 
 <style>

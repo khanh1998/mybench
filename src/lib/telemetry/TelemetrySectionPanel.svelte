@@ -2,7 +2,7 @@
   import LineChart from '$lib/LineChart.svelte';
   import { formatValue } from '$lib/telemetry/format';
   import TelemetryValueCard from '$lib/telemetry/TelemetryValueCard.svelte';
-  import type { TelemetryMarker, TelemetrySection, TelemetryValueKind } from '$lib/telemetry/types';
+  import type { TelemetryMarker, TelemetrySection, TelemetryTableSnapshot, TelemetryValueKind } from '$lib/telemetry/types';
 
   let {
     section,
@@ -21,6 +21,9 @@
   } = $props();
 
   let selectedChartMetricKey = $state<string | null>(null);
+  let tableExpanded = $state(false);
+  let selectedTableTime = $state<number | null>(null);
+  let lastSectionKey = $state('');
 
   const activeChartMetric = $derived.by(() => {
     if (!section.chartMetrics?.length) return null;
@@ -28,6 +31,17 @@
       selectedChartMetricKey ?? section.defaultChartMetricKey ?? section.chartMetrics[0].key;
     return section.chartMetrics.find((metric) => metric.key === selected) ?? section.chartMetrics[0];
   });
+
+  const tableSnapshots = $derived(section.tableSnapshots ?? []);
+  const latestTableSnapshot = $derived(tableSnapshots.length > 0 ? tableSnapshots[tableSnapshots.length - 1] : null);
+  const displayedTableSnapshot = $derived.by(() => {
+    if (tableSnapshots.length === 0) return null;
+    if (selectedTableTime !== null) {
+      return tableSnapshots.find((snapshot) => snapshot.t === selectedTableTime) ?? latestTableSnapshot;
+    }
+    return latestTableSnapshot;
+  });
+  const displayedTableRows = $derived(displayedTableSnapshot?.rows ?? section.tableRows);
 
   $effect(() => {
     const metrics = section.chartMetrics ?? [];
@@ -38,6 +52,51 @@
     if (selectedChartMetricKey && metrics.some((metric) => metric.key === selectedChartMetricKey)) return;
     selectedChartMetricKey = section.defaultChartMetricKey ?? metrics[0].key;
   });
+
+  $effect(() => {
+    if (lastSectionKey === section.key) return;
+    lastSectionKey = section.key;
+    tableExpanded = false;
+  });
+
+  $effect(() => {
+    if (tableSnapshots.length === 0) {
+      selectedTableTime = null;
+      return;
+    }
+    if (selectedTableTime !== null && tableSnapshots.some((snapshot) => snapshot.t === selectedTableTime)) return;
+    selectedTableTime = latestTableSnapshot?.t ?? null;
+  });
+
+  function findNearestSnapshot(time: number): TelemetryTableSnapshot | null {
+    if (tableSnapshots.length === 0) return null;
+    return tableSnapshots.reduce((nearest, snapshot) =>
+      Math.abs(snapshot.t - time) < Math.abs(nearest.t - time) ? snapshot : nearest
+    );
+  }
+
+  function handleChartHoverTime(time: number | null) {
+    if (time === null) return;
+    const snapshot = findNearestSnapshot(time);
+    if (snapshot) selectedTableTime = snapshot.t;
+  }
+
+  function formatSnapshotTime(t: number): string {
+    if (originMs != null) {
+      return new Date(originMs + t).toLocaleString('en-US', {
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+      });
+    }
+
+    const seconds = Math.round(t / 1000);
+    if (seconds < 60) return `+${seconds}s`;
+    return `+${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  }
 </script>
 
 <section class="telemetry-section-panel" style={accentColor ? `--accent:${accentColor}` : ''}>
@@ -88,38 +147,61 @@
       {markers}
       {originMs}
       showAllSeriesByDefault={!!activeChartMetric}
+      onHoverTimeChange={handleChartHoverTime}
     />
 
-    {#if section.tableRows.length > 0}
+    {#if displayedTableRows.length > 0}
       <div class="table-block">
-        <div class="table-title">{section.tableTitle}</div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                {#each section.tableColumns as column}
-                  <th>{column.label}</th>
-                {/each}
-              </tr>
-            </thead>
-            <tbody>
-              {#each section.tableRows as row}
+        <div class="table-header">
+          <div>
+            <div class="table-title">{section.tableTitle}</div>
+            <div class="table-subtitle">
+              {#if displayedTableSnapshot}
+                Snapshot: {formatSnapshotTime(displayedTableSnapshot.t)}
+              {:else}
+                Final snapshot
+              {/if}
+            </div>
+          </div>
+          <button
+            type="button"
+            class="table-toggle"
+            aria-expanded={tableExpanded}
+            onclick={() => tableExpanded = !tableExpanded}
+          >
+            {tableExpanded ? 'Hide table' : 'Show table'}
+          </button>
+        </div>
+
+        {#if tableExpanded}
+          <div class="table-wrap">
+            <table>
+              <thead>
                 <tr>
                   {#each section.tableColumns as column}
-                    <td class:mono={column.kind !== 'text' && column.kind !== 'flag'}>
-                      {formatValue(
-                        row[column.key],
-                        column.key === 'value'
-                          ? ((row.value_kind as TelemetryValueKind | undefined) ?? column.kind ?? 'text')
-                          : (column.kind ?? 'text')
-                      )}
-                    </td>
+                    <th>{column.label}</th>
                   {/each}
                 </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {#each displayedTableRows as row}
+                  <tr>
+                    {#each section.tableColumns as column}
+                      <td class:mono={column.kind !== 'text' && column.kind !== 'flag'}>
+                        {formatValue(
+                          row[column.key],
+                          column.key === 'value'
+                            ? ((row.value_kind as TelemetryValueKind | undefined) ?? column.kind ?? 'text')
+                            : (column.kind ?? 'text')
+                        )}
+                      </td>
+                    {/each}
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/if}
       </div>
     {/if}
   {/if}
@@ -245,11 +327,41 @@
     gap: 8px;
   }
 
+  .table-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
   .table-title {
     font-size: 12px;
     font-weight: 700;
     color: #444;
     text-transform: uppercase;
+  }
+
+  .table-subtitle {
+    margin-top: 2px;
+    font-size: 12px;
+    color: #6b7280;
+  }
+
+  .table-toggle {
+    border: 1px solid #d9d9d9;
+    background: #fff;
+    color: #444;
+    border-radius: 999px;
+    padding: 5px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .table-toggle:hover {
+    border-color: var(--accent);
+    color: var(--accent);
   }
 
   .table-wrap {
@@ -258,8 +370,30 @@
     overflow-y: auto;
   }
 
-  .mono {
-    font-family: monospace;
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+
+  th, td {
+    padding: 6px 8px;
+    border-bottom: 1px solid #eee;
+    text-align: left;
+    vertical-align: top;
+  }
+
+  th {
+    position: sticky;
+    top: 0;
+    background: #fff;
+    z-index: 1;
+    font-weight: 700;
+    color: #555;
+  }
+
+  td.mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   }
 
   @media (max-width: 720px) {

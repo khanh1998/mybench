@@ -8,13 +8,15 @@
     title,
     markers = [],
     originMs = null,
-    showAllSeriesByDefault = false
+    showAllSeriesByDefault = false,
+    onHoverTimeChange
   }: {
     series: ChartSeries[];
     title: string;
     markers?: Marker[];
     originMs?: number | null;
     showAllSeriesByDefault?: boolean;
+    onHoverTimeChange?: (hoveredTime: number | null) => void;
   } = $props();
 
   const ML = 60, MR = 20, MT = 8, MB = 28;
@@ -47,7 +49,7 @@
     if (signature !== lastSeriesSignature) {
       lastSeriesSignature = signature;
       hiddenSeries = showAllSeriesByDefault ? [] : series.slice(1).map((s) => s.label);
-      hoveredTime = null;
+      setHoveredTime(null);
       hoveredSeries = null;
     }
   });
@@ -57,7 +59,7 @@
     const nextHidden = hiddenSeries.filter((label) => labels.has(label));
     if (nextHidden.join('\u001f') !== hiddenSeries.join('\u001f')) hiddenSeries = nextHidden;
     if (hoveredSeries && !visibleSeries.some((s) => s.label === hoveredSeries)) hoveredSeries = null;
-    if (visibleSeries.length === 0) hoveredTime = null;
+    if (visibleSeries.length === 0) setHoveredTime(null);
   });
 
   function tx(t: number) { return ((t - tMin) / tRange) * IW; }
@@ -96,6 +98,12 @@
   let tooltipX = $state(0);
   let tooltipY = $state(0);
 
+  function setHoveredTime(next: number | null) {
+    if (hoveredTime === next) return;
+    hoveredTime = next;
+    onHoverTimeChange?.(next);
+  }
+
   function toggleSeries(label: string) {
     if (hiddenSeries.includes(label)) {
       hiddenSeries = hiddenSeries.filter((item) => item !== label);
@@ -118,10 +126,10 @@
     const chartX = vbX - ML;
     const chartY = vbY - MT;
     if (chartX < 0 || chartX > IW || chartY < 0 || chartY > IH) {
-      hoveredTime = null; hoveredSeries = null; return;
+      setHoveredTime(null); hoveredSeries = null; return;
     }
     const t = tMin + (chartX / IW) * tRange;
-    hoveredTime = snapTime(t);
+    setHoveredTime(snapTime(t));
 
     // Find nearest series by y-proximity (threshold: 22 viewBox units)
     if (hoveredTime !== null) {
@@ -186,7 +194,7 @@
   {:else}
     <svg bind:this={svgEl} role="img" aria-label={title} width="100%" viewBox="0 0 {W} {H}" preserveAspectRatio="none"
          style="display:block;cursor:crosshair"
-         onmousemove={onMouseMove} onmouseleave={() => { hoveredTime = null; hoveredSeries = null; }}>
+         onmousemove={onMouseMove} onmouseleave={() => { setHoveredTime(null); hoveredSeries = null; }}>
       <g transform="translate({ML},{MT})">
         <!-- Grid + Y axis -->
         {#each [0, 0.25, 0.5, 0.75, 1] as f}
