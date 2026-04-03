@@ -103,7 +103,15 @@ const METRIC_INFO: Partial<Record<string, string>> = {
 		'Share of block access served from shared buffers instead of disk: blks_hit / (blks_hit + blks_read). Higher is usually better.',
 	temp_bytes:
 		'Bytes written to temporary files during the selected phases. Higher values often mean sorts or hashes spilled to disk.',
+	temp_bytes_per_tx:
+		'Average temporary-file bytes per transaction: temp_bytes divided by total transactions. Higher values often indicate spills from sorts or hashes.',
+	rollback_ratio:
+		'Share of transactions that rolled back: xact_rollback / (xact_commit + xact_rollback). Higher values can point to contention, retries, or application errors.',
+	blk_read_time_per_tx:
+		'Average block read time per transaction: blk_read_time divided by total transactions. This is a quick signal for how much disk-read latency each transaction absorbed.',
 	wal_bytes: 'Total WAL volume generated, calculated from the pg_stat_wal.wal_bytes delta.',
+	wal_bytes_per_sec:
+		'Average WAL generation rate in bytes per second: WAL bytes divided by elapsed time between the first and last pg_stat_wal snapshots.',
 	wal_bytes_per_tx:
 		'Average WAL volume per transaction: WAL bytes divided by total transactions. This helps compare write amplification between designs.',
 	wal_per_tx:
@@ -146,6 +154,7 @@ const METRIC_INFO: Partial<Record<string, string>> = {
 		'Average share of heap block access served from cache across tracked tables: heap_blks_hit / (heap_blks_hit + heap_blks_read).',
 	toast_reads: 'TOAST blocks read from disk for user tables.',
 	index_reads: 'Index blocks read from disk across tracked user indexes.',
+	index_hits: 'Index blocks found in shared buffers across tracked user indexes.',
 	index_hit_ratio:
 		'Average share of index block access served from cache across tracked indexes.',
 	num_requested:
@@ -153,16 +162,32 @@ const METRIC_INFO: Partial<Record<string, string>> = {
 	requested_checkpoints:
 		'Checkpoints requested before the normal schedule, often because PostgreSQL hit WAL pressure.',
 	num_timed: 'Checkpoints started by the regular checkpoint_timeout schedule.',
+	checkpoint_pressure:
+		'Share of checkpoints that were forced instead of timed: num_requested / (num_requested + num_timed). Higher values often mean WAL pressure or aggressive write bursts.',
+	avg_checkpoint_write_ms:
+		'Average checkpoint write time: total write_time divided by requested + timed checkpoints in the selected phases.',
 	write_time:
 		'Total time PostgreSQL spent writing buffers during checkpoints, shown as the delta of pg_stat_checkpointer.write_time.',
 	sync_time:
 		'Total time PostgreSQL spent syncing checkpoint files to disk, shown as the delta of pg_stat_checkpointer.sync_time.',
 	deadlocks: 'Number of deadlocks reported by pg_stat_database during the selected phases.',
+	dead_tuples_per_1k_writes:
+		'Dead tuples created per 1,000 writes across tracked user tables. This normalizes dead tuple growth by write volume so bloat pressure is easier to compare between runs.',
 	sequence_activity: 'Sequence block activity, calculated as blks_read + blks_hit across tracked user sequences.',
 	sequence_hits: 'Sequence blocks served from shared buffers across tracked user sequences.',
 	sequence_reads: 'Sequence blocks read from disk across tracked user sequences.',
 	sequence_hit_ratio:
-		'Average share of sequence block access served from cache across tracked user sequences.'
+		'Average share of sequence block access served from cache across tracked user sequences.',
+	cw_cpu_peak:
+		'Peak CPU utilization seen in the selected CloudWatch samples. Uses the maximum sampled CPUUtilization value, or EM CPU total when standard CPUUtilization is unavailable.',
+	cw_mem_min:
+		'Lowest FreeableMemory value seen in the selected CloudWatch samples. This is the minimum sampled amount of reclaimable memory reported by RDS.',
+	cw_conn_peak:
+		'Highest DatabaseConnections value seen in the selected CloudWatch samples. This is the maximum sampled number of open database connections.',
+	em_mem_free_min:
+		'Lowest Enhanced Monitoring free-memory value seen in the selected samples. Uses the minimum sampled em_memory_free metric.',
+	em_cpu_wait_peak:
+		'Highest Enhanced Monitoring CPU IO-wait percentage seen in the selected samples. Uses the maximum sampled em_cpu_wait value.'
 };
 
 function parsePhases(phases?: string[]): TelemetryPhase[] {
