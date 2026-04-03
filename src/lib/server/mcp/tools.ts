@@ -35,7 +35,10 @@ function scrubPgServer(server: PgServer) {
 		host: server.host,
 		port: server.port,
 		username: server.username,
-		ssl: !!server.ssl
+		ssl: !!server.ssl,
+		rds_instance_id: server.rds_instance_id,
+		aws_region: server.aws_region,
+		enhanced_monitoring: !!server.enhanced_monitoring
 	};
 }
 
@@ -266,7 +269,7 @@ and the recommended workflow for creating and running a benchmark plan.`
 	server.registerTool(
 		'save_pg_server',
 		{
-			description: 'Creates or updates a saved PostgreSQL connection in Settings. If server_id is omitted, creates a new connection. When updating, omitted fields keep their current values.',
+			description: 'Creates or updates a saved PostgreSQL connection in Settings. If server_id is omitted, creates a new connection. When updating, omitted fields keep their current values. For RDS endpoints, rds_instance_id and aws_region are auto-parsed from the hostname if not provided.',
 			inputSchema: {
 				server_id: z.number().int().optional().describe('Omit to create a new PostgreSQL connection'),
 				name: z.string().optional(),
@@ -274,12 +277,15 @@ and the recommended workflow for creating and running a benchmark plan.`
 				port: z.number().int().optional(),
 				username: z.string().optional(),
 				password: z.string().optional().describe('Optional password; omitted on update keeps the current password'),
-				ssl: z.boolean().optional()
+				ssl: z.boolean().optional(),
+				rds_instance_id: z.string().optional().describe('RDS instance identifier (auto-parsed from RDS hostname if omitted)'),
+				aws_region: z.string().optional().describe('AWS region (auto-parsed from RDS hostname if omitted)'),
+				enhanced_monitoring: z.boolean().optional().describe('Set to true if RDS Enhanced Monitoring is enabled on this instance')
 			}
 		},
-		async ({ server_id, name, host, port, username, password, ssl }) => {
+		async ({ server_id, name, host, port, username, password, ssl, rds_instance_id, aws_region, enhanced_monitoring }) => {
 			try {
-				const result = savePgServer({ server_id, name, host, port, username, password, ssl });
+				const result = savePgServer({ server_id, name, host, port, username, password, ssl, rds_instance_id, aws_region, enhanced_monitoring });
 				return text({ action: result.action, server: scrubPgServer(result.server) });
 			} catch (err) {
 				return text({ error: err instanceof Error ? err.message : String(err) });
@@ -430,7 +436,7 @@ and the recommended workflow for creating and running a benchmark plan.`
 	server.registerTool(
 		'test_ec2_server',
 		{
-			description: 'Tests an EC2 runner connection. If ec2_server_id is provided, tests the saved server; otherwise tests the provided fields without saving.',
+			description: 'Tests an EC2 runner connection. If ec2_server_id is provided, tests the saved server; otherwise tests the provided fields without saving. The result includes three checks: ssh (connection), binary (mybench-runner present), and iam (IAM instance profile for CloudWatch access). If iam.ok is false, attach an IAM role with CloudWatchReadOnlyAccess to the EC2 instance in AWS Console → EC2 → Actions → Security → Modify IAM role.',
 			inputSchema: {
 				ec2_server_id: z.number().int().optional().describe('Optional saved EC2 runner ID'),
 				host: z.string().optional().describe('Required when ec2_server_id is omitted'),

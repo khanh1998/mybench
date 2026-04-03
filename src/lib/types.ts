@@ -13,6 +13,9 @@ export interface PgServer {
 	username: string;
 	password: string;
 	ssl: number; // 0 or 1
+	rds_instance_id: string;
+	aws_region: string;
+	enhanced_monitoring: number; // 0 or 1
 }
 
 export interface PgStatTableSelection {

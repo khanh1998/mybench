@@ -2,12 +2,26 @@ package result
 
 // Result is the top-level structure written to result.json.
 type Result struct {
-	Version       int                      `json:"version"`
-	DesignID      int                      `json:"design_id"`
-	RunnerVersion string                   `json:"runner_version"`
-	Run           RunSummary               `json:"run"`
-	Steps         []StepResult             `json:"steps"`
-	Snapshots     map[string][]SnapshotRow `json:"snapshots"`
+	Version          int                      `json:"version"`
+	DesignID         int                      `json:"design_id"`
+	RunnerVersion    string                   `json:"runner_version"`
+	Run              RunSummary               `json:"run"`
+	Steps            []StepResult             `json:"steps"`
+	Snapshots        map[string][]SnapshotRow `json:"snapshots"`
+	CloudWatchMetrics *CloudWatchResult       `json:"cloudwatch_metrics,omitempty"`
+}
+
+// CloudWatchResult holds all CloudWatch data points collected for a run.
+type CloudWatchResult struct {
+	DataPoints []CloudWatchDataPoint `json:"data_points"`
+}
+
+// CloudWatchDataPoint is a single metric observation from CloudWatch.
+type CloudWatchDataPoint struct {
+	MetricName string  `json:"metric_name"`
+	Timestamp  string  `json:"timestamp"` // RFC3339
+	Value      float64 `json:"value"`
+	Unit       string  `json:"unit"`
 }
 
 // StepResult records execution metadata for a single step.

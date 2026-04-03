@@ -547,7 +547,19 @@ function buildDatabaseSection(rows: SnapshotRow[], runStartMs: number): Telemetr
 				{ label: 'temp bytes', valueFn: (row) => toNumber(row.temp_bytes) },
 				{ label: 'deadlocks', valueFn: (row) => toNumber(row.deadlocks) },
 				{ label: 'block read time', valueFn: (row) => toNumber(row.blk_read_time) },
-				{ label: 'block write time', valueFn: (row) => toNumber(row.blk_write_time) }
+				{ label: 'block write time', valueFn: (row) => toNumber(row.blk_write_time) },
+				{ label: 'rows returned', valueFn: (row) => toNumber(row.tup_returned) },
+				{ label: 'rows fetched', valueFn: (row) => toNumber(row.tup_fetched) },
+				{ label: 'temp files', valueFn: (row) => toNumber(row.temp_files) },
+				{ label: 'conflicts', valueFn: (row) => toNumber(row.conflicts) },
+				{ label: 'checksum failures', valueFn: (row) => toNumber(row.checksum_failures) },
+				{ label: 'sessions', valueFn: (row) => toNumber(row.sessions) },
+				{ label: 'sessions abandoned', valueFn: (row) => toNumber(row.sessions_abandoned) },
+				{ label: 'sessions fatal', valueFn: (row) => toNumber(row.sessions_fatal) },
+				{ label: 'sessions killed', valueFn: (row) => toNumber(row.sessions_killed) },
+				{ label: 'session time (ms)', valueFn: (row) => toNumber(row.session_time) },
+				{ label: 'active time (ms)', valueFn: (row) => toNumber(row.active_time) },
+				{ label: 'idle in txn time (ms)', valueFn: (row) => toNumber(row.idle_in_transaction_time) }
 			]),
 			...buildDerivedSeries(rows, runStartMs, [
 				{
@@ -561,8 +573,28 @@ function buildDatabaseSection(rows: SnapshotRow[], runStartMs: number): Telemetr
 				{
 					label: '⟳ avg block read time (ms/block)',
 					seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'blk_read_time'), deltaAt(r, i, 'blks_read'))
+				},
+				{
+					label: '⟳ active backends',
+					seriesValueAt: (r, i) => toNumber(r[i].numbackends)
+				},
+				{
+					label: '⟳ active time ratio',
+					seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'active_time'), deltaAt(r, i, 'session_time'))
+				},
+				{
+					label: '⟳ idle in txn ratio',
+					seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'idle_in_transaction_time'), deltaAt(r, i, 'session_time'))
+				},
+				{
+					label: '⟳ rows returned / tx',
+					seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'tup_returned'), sum([deltaAt(r, i, 'xact_commit'), deltaAt(r, i, 'xact_rollback')]))
+				},
+				{
+					label: '⟳ session error rate',
+					seriesValueAt: (r, i) => safeRatio(sum([deltaAt(r, i, 'sessions_abandoned'), deltaAt(r, i, 'sessions_fatal'), deltaAt(r, i, 'sessions_killed')]), deltaAt(r, i, 'sessions'))
 				}
-			], 12)
+			], 24)
 		],
 		tableTitle: 'Database metrics',
 		tableColumns: [
@@ -731,7 +763,18 @@ function buildArchiverSection(rows: SnapshotRow[], runStartMs: number): Telemetr
 			metricCard('last_failed_time', 'Last Failure At', 'text', latestText(rows, 'last_failed_time'))
 		],
 		chartTitle: 'Archived WAL segments over time',
-		chartSeries: buildCumulativeSeries(rows, 'archived', runStartMs, (row) => toNumber(row.archived_count)),
+		chartSeries: [
+			...buildMetricSeries(rows, runStartMs, [
+				{ label: 'archived', valueFn: (row) => toNumber(row.archived_count) },
+				{ label: 'failed', valueFn: (row) => toNumber(row.failed_count) }
+			]),
+			...buildDerivedSeries(rows, runStartMs, [
+				{
+					label: '⟳ archive failure rate',
+					seriesValueAt: (r, i) => ratioAt(r, i, 'failed_count', ['archived_count', 'failed_count'])
+				}
+			], 2)
+		],
 		tableTitle: 'Archiver metrics',
 		tableColumns: [
 			{ key: 'metric', label: 'Metric', kind: 'text' },
@@ -771,6 +814,14 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 		const writeBytes = delta(bucket, 'write_bytes');
 		const extendBytes = delta(bucket, 'extend_bytes');
 		const totalBytes = sum([readBytes, writeBytes, extendBytes]);
+		const reads = delta(bucket, 'reads');
+		const writes = delta(bucket, 'writes');
+		const fsyncs = delta(bucket, 'fsyncs');
+		const hits = delta(bucket, 'hits');
+		const readTime = delta(bucket, 'read_time');
+		const writeTime = delta(bucket, 'write_time');
+		const extendTime = delta(bucket, 'extend_time');
+		const fsyncTime = delta(bucket, 'fsync_time');
 		return {
 			key,
 			label: `${backend_type}/${object}/${context}`,
@@ -779,15 +830,22 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 			context,
 			rows: bucket,
 			totalBytes,
-			reads: delta(bucket, 'reads'),
+			reads,
 			readBytes,
-			writes: delta(bucket, 'writes'),
+			writes,
 			writeBytes,
 			extends: delta(bucket, 'extends'),
 			extendBytes,
-			hits: delta(bucket, 'hits'),
+			hits,
 			evictions: delta(bucket, 'evictions'),
-			fsyncs: delta(bucket, 'fsyncs')
+			fsyncs,
+			writebacks: delta(bucket, 'writebacks'),
+			writebackTime: delta(bucket, 'writeback_time'),
+			reuses: delta(bucket, 'reuses'),
+			readTime,
+			writeTime,
+			extendTime,
+			fsyncTime
 		};
 	});
 	const topGroups = topEntries(entries, (entry) => entry.totalBytes ?? sum([entry.reads, entry.writes]));
@@ -863,6 +921,86 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 			title: 'Top IO groups by fsyncs over time',
 			scoreFn: (entry) => entry.fsyncs,
 			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'fsyncs')
+		},
+		{
+			key: 'read_time',
+			label: 'Read Time (ms)',
+			kind: 'duration_ms',
+			title: 'Top IO groups by read time over time',
+			scoreFn: (entry) => entry.readTime,
+			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'read_time')
+		},
+		{
+			key: 'write_time',
+			label: 'Write Time (ms)',
+			kind: 'duration_ms',
+			title: 'Top IO groups by write time over time',
+			scoreFn: (entry) => entry.writeTime,
+			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'write_time')
+		},
+		{
+			key: 'extend_time',
+			label: 'Extend Time (ms)',
+			kind: 'duration_ms',
+			title: 'Top IO groups by extend time over time',
+			scoreFn: (entry) => entry.extendTime,
+			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'extend_time')
+		},
+		{
+			key: 'fsync_time',
+			label: 'FSync Time (ms)',
+			kind: 'duration_ms',
+			title: 'Top IO groups by fsync time over time',
+			scoreFn: (entry) => entry.fsyncTime,
+			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'fsync_time')
+		},
+		{
+			key: 'writebacks',
+			label: 'Writebacks',
+			kind: 'count',
+			title: 'Top IO groups by writebacks over time',
+			scoreFn: (entry) => entry.writebacks,
+			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'writebacks')
+		},
+		{
+			key: 'reuses',
+			label: 'Reuses',
+			kind: 'count',
+			title: 'Top IO groups by buffer reuses over time',
+			scoreFn: (entry) => entry.reuses,
+			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'reuses')
+		},
+		{
+			key: 'avg_read_time_ms',
+			label: '⟳ Avg Read Time (ms)',
+			kind: 'duration_ms',
+			title: 'Average time per read operation over time',
+			scoreFn: (entry) => safeRatio(entry.readTime, entry.reads),
+			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'read_time'), deltaAt(groupRows, index, 'reads'))
+		},
+		{
+			key: 'avg_write_time_ms',
+			label: '⟳ Avg Write Time (ms)',
+			kind: 'duration_ms',
+			title: 'Average time per write operation over time',
+			scoreFn: (entry) => safeRatio(entry.writeTime, entry.writes),
+			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'write_time'), deltaAt(groupRows, index, 'writes'))
+		},
+		{
+			key: 'avg_fsync_time_ms',
+			label: '⟳ Avg FSync Time (ms)',
+			kind: 'duration_ms',
+			title: 'Average time per fsync call over time',
+			scoreFn: (entry) => safeRatio(entry.fsyncTime, entry.fsyncs),
+			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'fsync_time'), deltaAt(groupRows, index, 'fsyncs'))
+		},
+		{
+			key: 'read_miss_ratio',
+			label: '⟳ Read Miss Ratio',
+			kind: 'percent',
+			title: 'Cache miss rate (reads / (reads + hits)) over time — lower is better',
+			scoreFn: (entry) => safeRatio(entry.reads, sum([entry.reads, entry.hits])),
+			seriesValueAt: (groupRows, index) => ratioAt(groupRows, index, 'reads', ['reads', 'hits'])
 		}
 	]);
 
@@ -934,6 +1072,10 @@ function buildUserTablesSection(rows: SnapshotRow[], runStartMs: number): Teleme
 		const idxScans = delta(bucket, 'idx_scan');
 		const hotUpdates = delta(bucket, 'n_tup_hot_upd');
 		const updates = delta(bucket, 'n_tup_upd');
+		const seqTupRead = delta(bucket, 'seq_tup_read');
+		const idxTupFetch = delta(bucket, 'idx_tup_fetch');
+		const newpageUpd = delta(bucket, 'n_tup_newpage_upd');
+		const vacuumActivity = sum([delta(bucket, 'vacuum_count'), delta(bucket, 'autovacuum_count')]);
 		return {
 			key: relname,
 			label: relname,
@@ -946,7 +1088,11 @@ function buildUserTablesSection(rows: SnapshotRow[], runStartMs: number): Teleme
 				const last = toNumber(bucket[bucket.length - 1].n_dead_tup);
 				if (first === null || last === null) return null;
 				return last - first;
-			})()
+			})(),
+			seqTupRead,
+			idxTupFetch,
+			newpageUpd,
+			vacuumActivity
 		};
 	});
 	const topTables = topEntries(entries, (entry) => entry.writes);
@@ -1004,6 +1150,46 @@ function buildUserTablesSection(rows: SnapshotRow[], runStartMs: number): Teleme
 			title: 'Index scan ratio over time (idx_scan / total scans) — inverse of seq scan ratio',
 			scoreFn: (entry) => entry.writes,
 			seriesValueAt: (groupRows, index) => ratioAt(groupRows, index, 'idx_scan', ['seq_scan', 'idx_scan'])
+		},
+		{
+			key: 'seq_tup_read',
+			label: 'Seq Tuples Read',
+			kind: 'count',
+			title: 'Top tables by rows returned from sequential scans over time',
+			scoreFn: (entry) => entry.seqTupRead,
+			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'seq_tup_read')
+		},
+		{
+			key: 'idx_tup_fetch',
+			label: 'Idx Tuples Fetched',
+			kind: 'count',
+			title: 'Top tables by rows fetched via index scans over time',
+			scoreFn: (entry) => entry.idxTupFetch,
+			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'idx_tup_fetch')
+		},
+		{
+			key: 'vacuum_activity',
+			label: '⟳ Vacuum Activity',
+			kind: 'count',
+			title: 'Vacuum + autovacuum runs per table over time',
+			scoreFn: (entry) => entry.vacuumActivity,
+			seriesValueAt: (groupRows, index) => sumDeltaAt(groupRows, index, ['vacuum_count', 'autovacuum_count'])
+		},
+		{
+			key: 'newpage_update_ratio',
+			label: '⟳ New-Page Update Ratio',
+			kind: 'percent',
+			title: 'Share of updates that moved tuples to a new page (bloat indicator, PG16+)',
+			scoreFn: (entry) => entry.newpageUpd,
+			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'n_tup_newpage_upd'), deltaAt(groupRows, index, 'n_tup_upd'))
+		},
+		{
+			key: 'rows_per_seq_scan',
+			label: '⟳ Rows / Seq Scan',
+			kind: 'count',
+			title: 'Average rows returned per sequential scan over time — large values on large tables suggest missing indexes',
+			scoreFn: (entry) => entry.seqTupRead,
+			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'seq_tup_read'), deltaAt(groupRows, index, 'seq_scan'))
 		}
 	]);
 
@@ -1169,6 +1355,14 @@ function buildStatioUserTablesSection(rows: SnapshotRow[], runStartMs: number): 
 		const heapReads = delta(bucket, 'heap_blks_read');
 		const heapHits = delta(bucket, 'heap_blks_hit');
 		const heapActivity = sum([heapReads, heapHits]);
+		const idxReads = delta(bucket, 'idx_blks_read');
+		const idxHits = delta(bucket, 'idx_blks_hit');
+		const toastReads = delta(bucket, 'toast_blks_read');
+		const toastHits = delta(bucket, 'toast_blks_hit');
+		const tidxReads = delta(bucket, 'tidx_blks_read');
+		const tidxHits = delta(bucket, 'tidx_blks_hit');
+		const totalHits = sum([heapHits, idxHits, toastHits, tidxHits]);
+		const totalReads = sum([heapReads, idxReads, toastReads, tidxReads]);
 		return {
 			key: relname,
 			label: relname,
@@ -1177,7 +1371,15 @@ function buildStatioUserTablesSection(rows: SnapshotRow[], runStartMs: number): 
 			heapReads,
 			heapHits,
 			heapHitRatio: safeRatio(heapHits, sum([heapHits, heapReads])),
-			toasts: delta(bucket, 'toast_blks_read')
+			toasts: toastReads,
+			toastReads,
+			toastHits,
+			idxReads,
+			idxHits,
+			idxHitRatio: safeRatio(idxHits, sum([idxHits, idxReads])),
+			tidxReads,
+			tidxHits,
+			overallHitRatio: safeRatio(totalHits, sum([totalHits, totalReads]))
 		};
 	});
 	const topTables = topEntries(entries, (entry) => entry.heapActivity);
@@ -1221,6 +1423,34 @@ function buildStatioUserTablesSection(rows: SnapshotRow[], runStartMs: number): 
 			title: 'Top tables by TOAST reads over time',
 			scoreFn: (entry) => entry.toasts,
 			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'toast_blks_read')
+		},
+		{
+			key: 'idx_blks_read',
+			label: 'Idx Blocks Read',
+			kind: 'count',
+			title: 'Top tables by index block reads over time',
+			scoreFn: (entry) => entry.idxReads,
+			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'idx_blks_read')
+		},
+		{
+			key: 'idx_hit_ratio',
+			label: '⟳ Idx Hit Ratio',
+			kind: 'percent',
+			title: 'Per-table index cache hit ratio over time',
+			scoreFn: (entry) => entry.idxHitRatio,
+			seriesValueAt: (groupRows, index) => ratioAt(groupRows, index, 'idx_blks_hit', ['idx_blks_hit', 'idx_blks_read'])
+		},
+		{
+			key: 'overall_hit_ratio',
+			label: '⟳ Overall Hit Ratio',
+			kind: 'percent',
+			title: 'Combined cache hit ratio across heap + index + TOAST blocks per table over time',
+			scoreFn: (entry) => entry.overallHitRatio,
+			seriesValueAt: (groupRows, index) => {
+				const hits = sumDeltaAt(groupRows, index, ['heap_blks_hit', 'idx_blks_hit', 'toast_blks_hit', 'tidx_blks_hit']);
+				const reads = sumDeltaAt(groupRows, index, ['heap_blks_read', 'idx_blks_read', 'toast_blks_read', 'tidx_blks_read']);
+				return safeRatio(hits, sum([hits, reads]));
+			}
 		}
 	]);
 
@@ -1285,6 +1515,7 @@ function buildStatioUserIndexesSection(rows: SnapshotRow[], runStartMs: number):
 			label: `${relname}.${indexrelname}`,
 			rows: bucket,
 			idxReads,
+			idxHits,
 			idxHitRatio: safeRatio(idxHits, sum([idxHits, idxReads]))
 		};
 	});
@@ -1297,6 +1528,14 @@ function buildStatioUserIndexesSection(rows: SnapshotRow[], runStartMs: number):
 			title: 'Top indexes by block reads over time',
 			scoreFn: (entry) => entry.idxReads,
 			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'idx_blks_read')
+		},
+		{
+			key: 'idx_blks_hit',
+			label: 'Idx Blocks Hit',
+			kind: 'count',
+			title: 'Top indexes by index block hits (from shared buffers) over time',
+			scoreFn: (entry) => entry.idxHits,
+			seriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'idx_blks_hit')
 		},
 		{
 			key: 'idx_hit_ratio',
@@ -1314,6 +1553,7 @@ function buildStatioUserIndexesSection(rows: SnapshotRow[], runStartMs: number):
 		status: 'ok',
 		summary: [
 			metricCard('index_reads', 'Index Block Reads', 'count', sum(entries.map((entry) => entry.idxReads))),
+			metricCard('index_hits', 'Index Block Hits', 'count', sum(entries.map((entry) => entry.idxHits))),
 			metricCard('index_hit_ratio', 'Index Hit Ratio', 'percent', safeRatio(sum(entries.map((entry) => entry.idxHitRatio)), entries.length || null))
 		],
 		chartTitle: chartMetrics[0]?.title ?? 'Top indexes by block reads over time',
@@ -1324,11 +1564,13 @@ function buildStatioUserIndexesSection(rows: SnapshotRow[], runStartMs: number):
 		tableColumns: [
 			{ key: 'index', label: 'Index', kind: 'text' },
 			{ key: 'idx_blks_read', label: 'Idx Blocks Read', kind: 'count' },
+			{ key: 'idx_blks_hit', label: 'Idx Blocks Hit', kind: 'count' },
 			{ key: 'idx_hit_ratio', label: 'Idx Hit Ratio', kind: 'percent' }
 		],
 		tableRows: topIndexes.map((entry) => ({
 			index: entry.label,
 			idx_blks_read: entry.idxReads,
+			idx_blks_hit: entry.idxHits,
 			idx_hit_ratio: entry.idxHitRatio
 		}))
 	};
@@ -1472,7 +1714,11 @@ function buildCheckpointerSection(rows: SnapshotRow[], runStartMs: number): Tele
 			...buildMetricSeries(rows, runStartMs, [
 				{ label: 'requested', valueFn: (row) => toNumber(row.num_requested) },
 				{ label: 'timed', valueFn: (row) => toNumber(row.num_timed) },
+				{ label: 'restartpoints timed', valueFn: (row) => toNumber(row.restartpoints_timed) },
+				{ label: 'restartpoints requested', valueFn: (row) => toNumber(row.restartpoints_req) },
+				{ label: 'restartpoints done', valueFn: (row) => toNumber(row.restartpoints_done) },
 				{ label: 'buffers written', valueFn: (row) => toNumber(row.buffers_written) },
+				{ label: 'slru written', valueFn: (row) => toNumber(row.slru_written) },
 				{ label: 'write time (ms)', valueFn: (row) => toNumber(row.write_time) },
 				{ label: 'sync time (ms)', valueFn: (row) => toNumber(row.sync_time) }
 			]),
@@ -1487,8 +1733,19 @@ function buildCheckpointerSection(rows: SnapshotRow[], runStartMs: number): Tele
 						deltaAt(r, i, 'write_time'),
 						sum([deltaAt(r, i, 'num_requested'), deltaAt(r, i, 'num_timed')])
 					)
+				},
+				{
+					label: '⟳ buffers / checkpoint',
+					seriesValueAt: (r, i) => safeRatio(
+						deltaAt(r, i, 'buffers_written'),
+						sum([deltaAt(r, i, 'num_requested'), deltaAt(r, i, 'num_timed')])
+					)
+				},
+				{
+					label: '⟳ sync / write time ratio',
+					seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'sync_time'), deltaAt(r, i, 'write_time'))
 				}
-			], 5)
+			], 9)
 		],
 		tableTitle: 'Checkpointer metrics',
 		tableColumns: [
@@ -1506,6 +1763,190 @@ function buildCheckpointerSection(rows: SnapshotRow[], runStartMs: number): Tele
 			{ metric: 'Buffers written', value: delta(rows, 'buffers_written'), kind: 'count' },
 			{ metric: 'Stats reset', value: latestText(rows, 'stats_reset'), kind: 'text' }
 		])
+	};
+}
+
+function buildCloudWatchSection(db: Database.Database, runId: number, runStartMs: number, selectedPhases: TelemetryPhase[]): TelemetrySection {
+	const noData: TelemetrySection = {
+		key: 'cloudwatch',
+		label: 'CloudWatch',
+		status: 'no_data',
+		reason: 'No CloudWatch metrics were collected for this run. Requires AWS region and RDS instance ID configured on the PostgreSQL server, and an IAM role with CloudWatchReadOnlyAccess on the EC2 instance.',
+		summary: [],
+		chartTitle: 'CloudWatch RDS metrics',
+		chartSeries: [],
+		tableTitle: 'CloudWatch metrics',
+		tableColumns: [],
+		tableRows: []
+	};
+
+	if (!tableExists(db, 'cloudwatch_datapoints')) return noData;
+
+	// Filter by selected phases ('' = old data without phase tag, always include).
+	const phaseClause = selectedPhases.length === ALL_PHASES.length
+		? ''
+		: `AND (phase = '' OR phase IN (${selectedPhases.map(() => '?').join(',')}))`;
+	const phaseArgs = selectedPhases.length === ALL_PHASES.length ? [] : selectedPhases;
+
+	const rows = db.prepare(
+		`SELECT metric_name, timestamp, value, unit FROM cloudwatch_datapoints WHERE run_id = ? ${phaseClause} ORDER BY metric_name, timestamp`
+	).all(runId, ...phaseArgs) as Array<{ metric_name: string; timestamp: string; value: number; unit: string }>;
+
+	if (rows.length === 0) return noData;
+
+	// Group by metric_name
+	const byMetric = new Map<string, Array<{ timestamp: string; value: number; unit: string }>>();
+	for (const row of rows) {
+		const bucket = byMetric.get(row.metric_name) ?? [];
+		bucket.push({ timestamp: row.timestamp, value: row.value, unit: row.unit });
+		byMetric.set(row.metric_name, bucket);
+	}
+
+	// Helper: build a TelemetryChartMetric from a list of metric names (skips missing ones)
+	const buildGroup = (
+		key: string,
+		label: string,
+		title: string,
+		metrics: string[],
+		kind: TelemetryValueKind = 'count'
+	): TelemetryChartMetric | null => {
+		const series: TelemetrySeries[] = [];
+		let colorIdx = 0;
+		for (const metricName of metrics) {
+			const pts = byMetric.get(metricName);
+			if (!pts || pts.length === 0) continue;
+			const points = pts
+				.map((p) => {
+					const tsMs = toMs(p.timestamp);
+					if (tsMs === null) return null;
+					return { t: tsMs - runStartMs, v: p.value } as TelemetrySeriesPoint;
+				})
+				.filter((p): p is TelemetrySeriesPoint => p !== null);
+			if (points.length > 0) {
+				series.push({ label: metricName, color: COLORS[colorIdx % COLORS.length], points });
+				colorIdx++;
+			}
+		}
+		if (series.length === 0) return null;
+		return { key, label, kind, title, series };
+	};
+
+	// Basic CloudWatch metric groups
+	const staticGroups = [
+		buildGroup('cpu_memory', 'CPU & Memory', 'CPU & Memory', ['CPUUtilization', 'FreeableMemory', 'SwapUsage', 'DatabaseConnections']),
+		buildGroup('iops', 'IOPS', 'IOPS', ['ReadIOPS', 'WriteIOPS', 'DiskQueueDepth']),
+		buildGroup('latency', 'Latency', 'Latency', ['ReadLatency', 'WriteLatency']),
+		buildGroup('throughput', 'Throughput', 'Throughput', ['ReadThroughput', 'WriteThroughput', 'NetworkReceiveThroughput', 'NetworkTransmitThroughput']),
+		buildGroup('storage', 'Storage', 'Storage', ['FreeStorageSpace'])
+	];
+
+	// Enhanced Monitoring groups — static metrics
+	const emCpuGroup = buildGroup('em_cpu', 'EM CPU Breakdown', 'EM CPU Breakdown (%)',
+		['em_cpu_total', 'em_cpu_user', 'em_cpu_system', 'em_cpu_wait', 'em_cpu_steal', 'em_cpu_nice'], 'percent');
+	const emLoadGroup = buildGroup('em_load', 'EM Load Average', 'EM Load Average',
+		['em_load_1m', 'em_load_5m', 'em_load_15m']);
+	const emMemGroup = buildGroup('em_memory', 'EM Memory', 'EM Memory (bytes)',
+		['em_memory_total', 'em_memory_free', 'em_memory_cached', 'em_memory_active', 'em_memory_buffers', 'em_memory_dirty'], 'bytes');
+
+	// Enhanced Monitoring — discover dynamic device/interface/filesystem names
+	const allMetricNames = [...byMetric.keys()];
+
+	const diskDevices = [...new Set(
+		allMetricNames
+			.filter((n) => n.startsWith('em_disk_') && n.endsWith('_util'))
+			.map((n) => n.replace(/^em_disk_/, '').replace(/_util$/, ''))
+	)];
+	const emDiskGroups = diskDevices.map((dev) =>
+		buildGroup(
+			`em_disk_${dev}`,
+			`EM Disk ${dev}`,
+			`EM Disk ${dev}`,
+			[
+				`em_disk_${dev}_read_kbps`,
+				`em_disk_${dev}_write_kbps`,
+				`em_disk_${dev}_read_iops`,
+				`em_disk_${dev}_write_iops`,
+				`em_disk_${dev}_await`,
+				`em_disk_${dev}_util`,
+				`em_disk_${dev}_queue_len`
+			]
+		)
+	);
+
+	const netIfaces = [...new Set(
+		allMetricNames
+			.filter((n) => n.startsWith('em_net_') && n.endsWith('_rx'))
+			.map((n) => n.replace(/^em_net_/, '').replace(/_rx$/, ''))
+	)];
+	const emNetGroup = netIfaces.length > 0
+		? buildGroup('em_net', 'EM Network', 'EM Network (KB/s)',
+			netIfaces.flatMap((iface) => [`em_net_${iface}_rx`, `em_net_${iface}_tx`]))
+		: null;
+
+	const fsNames = [...new Set(
+		allMetricNames
+			.filter((n) => n.startsWith('em_fs_') && n.endsWith('_used_pct'))
+			.map((n) => n.replace(/^em_fs_/, '').replace(/_used_pct$/, ''))
+	)];
+	const emFsGroup = fsNames.length > 0
+		? buildGroup('em_fs', 'EM Filesystem', 'EM Filesystem Usage (%)',
+			fsNames.map((name) => `em_fs_${name}_used_pct`), 'percent')
+		: null;
+
+	const chartMetrics: TelemetryChartMetric[] = [
+		...staticGroups,
+		emCpuGroup,
+		emLoadGroup,
+		emMemGroup,
+		...emDiskGroups,
+		emNetGroup,
+		emFsGroup
+	].filter((g): g is TelemetryChartMetric => g !== null);
+
+	// Summary cards
+	const cpuPts = byMetric.get('CPUUtilization') ?? byMetric.get('em_cpu_total');
+	const memPts = byMetric.get('FreeableMemory');
+	const connPts = byMetric.get('DatabaseConnections');
+	const emMemFreePts = byMetric.get('em_memory_free');
+	const emCpuWaitPts = byMetric.get('em_cpu_wait');
+	const summary: TelemetryCard[] = [
+		metricCard('cw_cpu_peak', 'Peak CPU', 'percent', cpuPts && cpuPts.length > 0 ? Math.max(...cpuPts.map((p) => p.value)) / 100 : null),
+		metricCard('cw_mem_min', 'Min Free Memory', 'bytes', memPts && memPts.length > 0 ? Math.min(...memPts.map((p) => p.value)) : null),
+		metricCard('cw_conn_peak', 'Peak Connections', 'count', connPts && connPts.length > 0 ? Math.max(...connPts.map((p) => p.value)) : null),
+		...(emMemFreePts && emMemFreePts.length > 0
+			? [metricCard('em_mem_free_min', 'EM Min Free Mem', 'bytes', Math.min(...emMemFreePts.map((p) => p.value)))]
+			: []),
+		...(emCpuWaitPts && emCpuWaitPts.length > 0
+			? [metricCard('em_cpu_wait_peak', 'EM Peak IO Wait', 'percent', Math.max(...emCpuWaitPts.map((p) => p.value)) / 100)]
+			: [])
+	];
+
+	// Table: last value per metric
+	const tableRows = [...byMetric.entries()].map(([name, pts]) => ({
+		metric: name,
+		value: pts[pts.length - 1]?.value ?? null,
+		unit: pts[pts.length - 1]?.unit ?? '',
+		samples: pts.length,
+		value_kind: 'count' as const
+	}));
+
+	return {
+		key: 'cloudwatch',
+		label: 'CloudWatch',
+		status: 'ok',
+		summary,
+		chartTitle: 'CloudWatch RDS metrics',
+		chartSeries: chartMetrics[0]?.series ?? [],
+		chartMetrics,
+		defaultChartMetricKey: chartMetrics[0]?.key,
+		tableTitle: 'CloudWatch metrics (last value per metric)',
+		tableColumns: [
+			{ key: 'metric', label: 'Metric', kind: 'text' },
+			{ key: 'value', label: 'Last Value', kind: 'count' },
+			{ key: 'unit', label: 'Unit', kind: 'text' },
+			{ key: 'samples', label: 'Data Points', kind: 'count' }
+		],
+		tableRows
 	};
 }
 
@@ -1554,7 +1995,8 @@ export function buildRunTelemetry(db: Database.Database, runId: number, phases?:
 		buildUserIndexesSection(userIndexRows, runStartMs),
 		buildStatioUserTablesSection(statioUserTableRows, runStartMs),
 		buildStatioUserIndexesSection(statioUserIndexRows, runStartMs),
-		buildStatioUserSequencesSection(statioUserSequenceRows, runStartMs)
+		buildStatioUserSequencesSection(statioUserSequenceRows, runStartMs),
+		buildCloudWatchSection(db, runId, runStartMs, selectedPhases)
 	];
 
 	const markers: TelemetryMarker[] = [];

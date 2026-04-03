@@ -27,14 +27,17 @@ type ProfileValue struct {
 	Value     string `json:"value"`
 }
 
-// ServerConfig holds the PostgreSQL connection parameters.
+// ServerConfig holds the PostgreSQL connection parameters and optional AWS/RDS config.
 type ServerConfig struct {
-	Host     string `json:"host"`
-	Port     int    `json:"port"`
-	Username string `json:"username"`
-	Password string `json:"password"`
-	Database string `json:"database"`
-	SSL      bool   `json:"ssl"`
+	Host               string `json:"host"`
+	Port               int    `json:"port"`
+	Username           string `json:"username"`
+	Password           string `json:"password"`
+	Database           string `json:"database"`
+	SSL                bool   `json:"ssl"`
+	AWSRegion          string `json:"aws_region"`
+	RDSInstanceID      string `json:"rds_instance_id"`
+	EnhancedMonitoring bool   `json:"enhanced_monitoring"`
 }
 
 // RunSettings holds timing configuration for snapshot collection.

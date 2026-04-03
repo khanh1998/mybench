@@ -367,6 +367,20 @@ async function executeEc2RunAsync(
 
 		if (exitCode !== 0) {
 			emit(`[ERROR] mybench-runner exited with code ${exitCode}`);
+		}
+
+		// Always try to download and import the result — the runner writes result.json
+		// even when a step fails, so we can show partial results and step logs in the UI.
+		const resultExists = (await exec(conn, `test -f ${shellQuote(remoteResultPath)} && echo yes || echo no`)).stdout.trim() === 'yes';
+		if (resultExists) {
+			emit(`Downloading result from EC2...`);
+			await downloadFile(conn, remoteResultPath, localResultPath);
+
+			emit(`Importing result...`);
+			const resultJson = JSON.parse(readFileSync(localResultPath, 'utf8'));
+			importResultIntoRun(runId, resultJson);
+		} else if (exitCode !== 0) {
+			// No result file and non-zero exit — mark as failed now
 			db.prepare(`UPDATE benchmark_runs SET status = 'failed', finished_at = ? WHERE id = ?`).run(
 				now(),
 				runId
@@ -374,14 +388,6 @@ async function executeEc2RunAsync(
 			completeRun(runId);
 			return;
 		}
-
-		// Download and import result
-		emit(`Downloading result from EC2...`);
-		await downloadFile(conn, remoteResultPath, localResultPath);
-
-		emit(`Importing result...`);
-		const resultJson = JSON.parse(readFileSync(localResultPath, 'utf8'));
-		importResultIntoRun(runId, resultJson);
 
 		// Ensure finished_at is set (importResultIntoRun writes the value from the result JSON,
 		// but if it's missing for any reason, fall back to now)

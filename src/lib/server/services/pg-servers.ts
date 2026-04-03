@@ -3,6 +3,13 @@ import { SNAP_TABLE_MAP } from '$lib/server/pg-stats';
 import { discoverPgStatTables, testConnection } from '$lib/server/pg-client';
 import type { PgServer } from '$lib/types';
 
+// Parses RDS endpoint: <instance-id>.<hash>.<region>.rds.amazonaws.com
+function parseRdsHostname(host: string): { rdsInstanceId: string; awsRegion: string } {
+	const match = host.match(/^([^.]+)\.[^.]+\.([\w-]+)\.rds\.amazonaws\.com$/i);
+	if (match) return { rdsInstanceId: match[1], awsRegion: match[2] };
+	return { rdsInstanceId: '', awsRegion: '' };
+}
+
 export interface SavePgServerInput {
 	server_id?: number;
 	name?: string;
@@ -11,6 +18,9 @@ export interface SavePgServerInput {
 	username?: string;
 	password?: string;
 	ssl?: boolean | number;
+	rds_instance_id?: string;
+	aws_region?: string;
+	enhanced_monitoring?: boolean | number;
 }
 
 export interface TestPgServerInput {
@@ -44,26 +54,31 @@ export function savePgServer(input: SavePgServerInput): { action: 'created' | 'u
 	const existing = input.server_id ? getPgServer(input.server_id) : undefined;
 	if (input.server_id && !existing) throw new Error(`PostgreSQL connection ${input.server_id} not found`);
 
+	const newHost = input.host ?? existing?.host ?? 'localhost';
+	const parsed = parseRdsHostname(newHost);
 	const next = {
 		name: input.name ?? existing?.name ?? '',
-		host: input.host ?? existing?.host ?? 'localhost',
+		host: newHost,
 		port: input.port ?? existing?.port ?? 5432,
 		username: input.username ?? existing?.username ?? 'postgres',
 		password: input.password ?? existing?.password ?? '',
-		ssl: input.ssl !== undefined ? (input.ssl ? 1 : 0) : (existing?.ssl ?? 0)
+		ssl: input.ssl !== undefined ? (input.ssl ? 1 : 0) : (existing?.ssl ?? 0),
+		rds_instance_id: input.rds_instance_id ?? (input.host ? parsed.rdsInstanceId : (existing?.rds_instance_id ?? '')),
+		aws_region: input.aws_region ?? (input.host ? parsed.awsRegion : (existing?.aws_region ?? '')),
+		enhanced_monitoring: input.enhanced_monitoring !== undefined ? (input.enhanced_monitoring ? 1 : 0) : (existing?.enhanced_monitoring ?? 0)
 	};
 	if (!next.name.trim()) throw new Error('name is required');
 
 	if (existing) {
 		db.prepare(
-			'UPDATE pg_servers SET name=?, host=?, port=?, username=?, password=?, ssl=? WHERE id=?'
-		).run(next.name, next.host, next.port, next.username, next.password, next.ssl, input.server_id);
+			'UPDATE pg_servers SET name=?, host=?, port=?, username=?, password=?, ssl=?, rds_instance_id=?, aws_region=?, enhanced_monitoring=? WHERE id=?'
+		).run(next.name, next.host, next.port, next.username, next.password, next.ssl, next.rds_instance_id, next.aws_region, next.enhanced_monitoring, input.server_id);
 		return { action: 'updated', server: getPgServer(input.server_id!)! };
 	}
 
 	const result = db.prepare(
-		'INSERT INTO pg_servers (name, host, port, username, password, ssl) VALUES (?, ?, ?, ?, ?, ?)'
-	).run(next.name, next.host, next.port, next.username, next.password, next.ssl);
+		'INSERT INTO pg_servers (name, host, port, username, password, ssl, rds_instance_id, aws_region, enhanced_monitoring) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+	).run(next.name, next.host, next.port, next.username, next.password, next.ssl, next.rds_instance_id, next.aws_region, next.enhanced_monitoring);
 	return { action: 'created', server: getPgServer(result.lastInsertRowid as number)! };
 }
 
@@ -103,7 +118,10 @@ export async function testPgServer(input: TestPgServerInput): Promise<{
 			port: input.port ?? 5432,
 			username: input.username ?? 'postgres',
 			password: input.password ?? '',
-			ssl: input.ssl ? 1 : 0
+			ssl: input.ssl ? 1 : 0,
+			rds_instance_id: '',
+			aws_region: '',
+			enhanced_monitoring: 0
 		};
 	}
 

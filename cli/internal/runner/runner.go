@@ -33,13 +33,14 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 		runParams = append(runParams, result.RunParam{Name: p.Name, Value: p.Value})
 	}
 
+	runStartTime := time.Now().UTC()
 	res := &result.Result{
 		Version:       1,
 		DesignID:      opts.Plan.DesignID,
 		RunnerVersion: RunnerVersion,
 		Run: result.RunSummary{
 			Status:                  "running",
-			StartedAt:               time.Now().UTC().Format(time.RFC3339),
+			StartedAt:               runStartTime.Format(time.RFC3339),
 			SnapshotIntervalSeconds: opts.Plan.RunSettings.SnapshotIntervalSeconds,
 			PreCollectSecs:          opts.Plan.RunSettings.PreCollectSecs,
 			PostCollectSecs:         opts.Plan.RunSettings.PostCollectSecs,
@@ -61,6 +62,7 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 	})
 
 	seenPgbench := false
+	var benchStartTime, benchEndTime time.Time
 
 	for _, step := range steps {
 		// Determine phase.
@@ -142,8 +144,10 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 			if opts.Progress {
 				fmt.Printf("[pgbench] %s\n", step.Name)
 			}
-			res.Run.BenchStartedAt = time.Now().UTC().Format(time.RFC3339)
+			benchStartTime = time.Now().UTC()
+			res.Run.BenchStartedAt = benchStartTime.Format(time.RFC3339)
 			pbRes, err := runPgbenchStep(ctx, opts, step, pool, res.Snapshots, opts.Plan.RunSettings.SnapshotIntervalSeconds)
+			benchEndTime = time.Now().UTC()
 			seenPgbench = true
 			stepRes.Command = pbRes.Command
 			stepRes.Log = tailFile(pbRes.LogPath, opts.LogTailLines)
@@ -189,6 +193,20 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 			res.Run.PostStartedAt = time.Now().UTC().Format(time.RFC3339)
 		}
 	}
+
+	// Collect CloudWatch metrics covering the full run window (pre + bench + post).
+	runEndTime := time.Now().UTC()
+	{
+		runStartTime = runStartTime.Truncate(time.Minute)              // round down to include full minute of start time
+		runEndTime = runEndTime.Truncate(time.Minute).Add(time.Minute) // round up to include last minute
+		cwResult, cwErr := collectCloudWatchMetrics(ctx, opts.Plan.Server, runStartTime, runEndTime)
+		if cwErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: cloudwatch metrics: %v\n", cwErr)
+		} else {
+			res.CloudWatchMetrics = cwResult
+		}
+	}
+	_ = benchEndTime // no longer used for CW window; kept for future use
 
 	res.Run.Status = "completed"
 	res.Run.FinishedAt = time.Now().UTC().Format(time.RFC3339)

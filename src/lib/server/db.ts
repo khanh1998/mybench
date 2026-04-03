@@ -1010,6 +1010,53 @@ FROM snap_pg_stat_bgwriter WHERE _run_id = ? ORDER BY _collected_at DESC LIMIT 1
 
 	migrateBgwriterQueriesAndMetrics(db);
 	backfillPgStatCheckpointerSelections(db);
+
+	// Add RDS/CloudWatch fields to pg_servers (idempotent)
+	const pgServerCols = (db.prepare(`PRAGMA table_info(pg_servers)`).all() as { name: string }[]).map(c => c.name);
+	if (!pgServerCols.includes('rds_instance_id')) db.exec(`ALTER TABLE pg_servers ADD COLUMN rds_instance_id TEXT NOT NULL DEFAULT ''`);
+	if (!pgServerCols.includes('aws_region')) db.exec(`ALTER TABLE pg_servers ADD COLUMN aws_region TEXT NOT NULL DEFAULT ''`);
+	if (!pgServerCols.includes('enhanced_monitoring')) db.exec(`ALTER TABLE pg_servers ADD COLUMN enhanced_monitoring INTEGER NOT NULL DEFAULT 0`);
+
+	// Backfill rds_instance_id and aws_region for existing servers from their RDS hostnames
+	const cwBackfillMigrated = db.prepare(`SELECT id FROM schema_migrations WHERE id = 'cloudwatch_rds_backfill_v1'`).get();
+	if (!cwBackfillMigrated) {
+		const rdsServers = db.prepare(
+			`SELECT id, host FROM pg_servers WHERE host LIKE '%.rds.amazonaws.com' AND rds_instance_id = ''`
+		).all() as { id: number; host: string }[];
+		const update = db.prepare(`UPDATE pg_servers SET rds_instance_id = ?, aws_region = ? WHERE id = ?`);
+		for (const s of rdsServers) {
+			const match = s.host.match(/^([^.]+)\.[^.]+\.([\w-]+)\.rds\.amazonaws\.com$/i);
+			if (match) update.run(match[1], match[2], s.id);
+		}
+		db.prepare(`INSERT INTO schema_migrations (id) VALUES (?)`).run('cloudwatch_rds_backfill_v1');
+	}
+
+	// CloudWatch datapoints table
+	const cwMigrated = db.prepare(`SELECT id FROM schema_migrations WHERE id = 'cloudwatch_v1'`).get();
+	if (!cwMigrated) {
+		db.exec(`
+      CREATE TABLE IF NOT EXISTS cloudwatch_datapoints (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+        metric_name TEXT NOT NULL,
+        timestamp TEXT NOT NULL,
+        value REAL NOT NULL,
+        unit TEXT NOT NULL DEFAULT ''
+      );
+      CREATE INDEX IF NOT EXISTS idx_cw_run_id ON cloudwatch_datapoints(run_id);
+    `);
+		db.prepare(`INSERT INTO schema_migrations (id) VALUES (?)`).run('cloudwatch_v1');
+	}
+
+	// Add phase column to cloudwatch_datapoints
+	const cwPhaseMigrated = db.prepare(`SELECT id FROM schema_migrations WHERE id = 'cloudwatch_phase_v1'`).get();
+	if (!cwPhaseMigrated) {
+		const cwCols = (db.pragma(`table_info(cloudwatch_datapoints)`) as { name: string }[]).map((c) => c.name);
+		if (!cwCols.includes('phase')) {
+			db.exec(`ALTER TABLE cloudwatch_datapoints ADD COLUMN phase TEXT NOT NULL DEFAULT ''`);
+		}
+		db.prepare(`INSERT INTO schema_migrations (id) VALUES (?)`).run('cloudwatch_phase_v1');
+	}
 }
 
 export default getDb;
