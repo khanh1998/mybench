@@ -42,7 +42,7 @@ export const PUT: RequestHandler = async ({ params: routeParams, request }) => {
 
 	const deleteScripts = db.prepare('DELETE FROM pgbench_scripts WHERE step_id = ?');
 	const insertScript = db.prepare(
-		'INSERT INTO pgbench_scripts (step_id, position, name, weight, script) VALUES (?, ?, ?, ?, ?)'
+		'INSERT INTO pgbench_scripts (step_id, position, name, weight, weight_expr, script) VALUES (?, ?, ?, ?, ?, ?)'
 	);
 	const deleteParams = db.prepare('DELETE FROM design_params WHERE design_id = ?');
 	const insertParam = db.prepare(
@@ -65,7 +65,7 @@ export const PUT: RequestHandler = async ({ params: routeParams, request }) => {
 				if (s.type === 'pgbench') {
 					deleteScripts.run(s.id);
 					for (const ps of s.pgbench_scripts ?? []) {
-						insertScript.run(s.id, ps.position, ps.name, ps.weight, ps.script);
+						insertScript.run(s.id, ps.position, ps.name, ps.weight, ps.weight_expr ?? null, ps.script);
 					}
 				}
 			}

@@ -7,7 +7,7 @@ import {
 	getEnabledTablesForRun,
 	resetPgStatStatements
 } from '$lib/server/pg-stats';
-import { getRunnablePgbenchScripts } from '$lib/params';
+import { getRunnablePgbenchScripts, resolveScriptWeight } from '$lib/params';
 import { formatProcessedPgbenchScripts } from '$lib/pgbench-results';
 import { runPgbench, runSqlStep, type SqlStepOptions } from '$lib/server/pgbench';
 import { createRun, completeRun, setPool, setSnapshotTimer, setActivePhase } from '$lib/server/run-manager';
@@ -103,6 +103,30 @@ export function startRun(designId: number, opts: StartRunOptions = {}): number {
 	}
 
 	const activeRun = createRun(runId);
+	executeLocalRunAsync(runId, activeRun, server, resolvedDatabase, resolvedParams, steps, scriptsByStep, snapshot_interval_seconds, hasCollectSteps, preCollectSecs, postCollectSecs).catch(() => {});
+
+	return runId;
+}
+
+/**
+ * Executes the async body of a local run. Called by startRun (fire-and-forget)
+ * and by series-executor (awaited, for sequential series execution).
+ * Assumes the benchmark_runs row and run_step_results rows already exist.
+ */
+export async function executeLocalRunAsync(
+	runId: number,
+	activeRun: import('./run-manager').ActiveRun,
+	server: PgServer,
+	resolvedDatabase: string,
+	resolvedParams: DesignParam[],
+	steps: DesignStep[],
+	scriptsByStep: Map<number, PgbenchScript[]>,
+	snapshot_interval_seconds: number,
+	hasCollectSteps: boolean,
+	preCollectSecs: number,
+	postCollectSecs: number
+): Promise<void> {
+	const db = getDb();
 
 	async function collectForDuration(
 		pool: import('pg').Pool,
@@ -122,224 +146,223 @@ export function startRun(designId: number, opts: StartRunOptions = {}): number {
 		} while (Date.now() < end);
 	}
 
-	(async () => {
-		const pool = createPool(server, resolvedDatabase);
-		setPool(runId, pool);
-		const enabledTables = getEnabledTablesForRun(server.id);
+	const pool = createPool(server, resolvedDatabase);
+	setPool(runId, pool);
+	const enabledTables = getEnabledTablesForRun(server.id);
 
-		try {
-			if (!hasCollectSteps && preCollectSecs > 0 && enabledTables.length > 0) {
-				const prePhase = { name: 'pre' as const, status: 'running' as const, duration_secs: preCollectSecs, started_ms: Date.now() };
-				setActivePhase(runId, prePhase);
-				activeRun.emitter.emit('phase', prePhase);
-				activeRun.emitter.emit('line', `[snapshot] Pre-benchmark collection (${preCollectSecs}s)...`);
-				await collectForDuration(pool, runId, enabledTables, 'pre', preCollectSecs, snapshot_interval_seconds);
-				const prePhoneDone = { ...prePhase, status: 'completed' as const };
-				setActivePhase(runId, prePhoneDone);
-				activeRun.emitter.emit('phase', prePhoneDone);
-			}
+	try {
+		if (!hasCollectSteps && preCollectSecs > 0 && enabledTables.length > 0) {
+			const prePhase = { name: 'pre' as const, status: 'running' as const, duration_secs: preCollectSecs, started_ms: Date.now() };
+			setActivePhase(runId, prePhase);
+			activeRun.emitter.emit('phase', prePhase);
+			activeRun.emitter.emit('line', `[snapshot] Pre-benchmark collection (${preCollectSecs}s)...`);
+			await collectForDuration(pool, runId, enabledTables, 'pre', preCollectSecs, snapshot_interval_seconds);
+			const prePhoneDone = { ...prePhase, status: 'completed' as const };
+			setActivePhase(runId, prePhoneDone);
+			activeRun.emitter.emit('phase', prePhoneDone);
+		}
 
-			let seenPgbench = false;
-			for (const step of steps) {
-				const startedAt = new Date().toISOString();
-				db.prepare(`UPDATE run_step_results SET status='running', started_at=? WHERE run_id=? AND step_id=?`).run(startedAt, runId, step.id);
-				activeRun.emitter.emit('step', { step_id: step.id, status: 'running', started_at: startedAt });
-				activeRun.emitter.emit('line', `\n=== Step: ${step.name} (${step.type}) ===`);
+		let seenPgbench = false;
+		for (const step of steps) {
+			const startedAt = new Date().toISOString();
+			db.prepare(`UPDATE run_step_results SET status='running', started_at=? WHERE run_id=? AND step_id=?`).run(startedAt, runId, step.id);
+			activeRun.emitter.emit('step', { step_id: step.id, status: 'running', started_at: startedAt });
+			activeRun.emitter.emit('line', `\n=== Step: ${step.name} (${step.type}) ===`);
 
-				let stdout = '';
-				let stderr = '';
-				let exitCode: number | null = null;
-				const LOG_CAP = 500_000; // 500KB per stream
+			let stdout = '';
+			let stderr = '';
+			let exitCode: number | null = null;
+			const LOG_CAP = 500_000; // 500KB per stream
 
-				const onLine = (line: string, stream: 'stdout' | 'stderr') => {
-					if (stream === 'stdout') {
-						if (stdout.length < LOG_CAP) stdout += line + '\n';
-						else if (!stdout.endsWith('[truncated]\n')) stdout += '[truncated]\n';
-					} else {
-						if (stderr.length < LOG_CAP) stderr += line + '\n';
-						else if (!stderr.endsWith('[truncated]\n')) stderr += '[truncated]\n';
+			const onLine = (line: string, stream: 'stdout' | 'stderr') => {
+				if (stream === 'stdout') {
+					if (stdout.length < LOG_CAP) stdout += line + '\n';
+					else if (!stdout.endsWith('[truncated]\n')) stdout += '[truncated]\n';
+				} else {
+					if (stderr.length < LOG_CAP) stderr += line + '\n';
+					else if (!stderr.endsWith('[truncated]\n')) stderr += '[truncated]\n';
+				}
+			};
+			const logStepLine = (line: string, stream: 'stdout' | 'stderr' = 'stdout') => {
+				activeRun.emitter.emit('line', line);
+				onLine(line, stream);
+			};
+
+			if (step.type === 'collect') {
+				const phase = seenPgbench ? 'post' : 'pre';
+				const durationSecs = step.duration_secs ?? 0;
+				if (durationSecs > 0 && enabledTables.length > 0) {
+					const phaseObj = { name: phase as 'pre' | 'post', status: 'running' as const, duration_secs: durationSecs, started_ms: Date.now() };
+					setActivePhase(runId, phaseObj);
+					activeRun.emitter.emit('phase', phaseObj);
+					activeRun.emitter.emit('line', `[snapshot] Collecting pg_stat_* for ${durationSecs}s...`);
+					if (phase === 'post') {
+						db.prepare(`UPDATE benchmark_runs SET post_started_at=? WHERE id=?`).run(new Date().toISOString(), runId);
 					}
-				};
-				const logStepLine = (line: string, stream: 'stdout' | 'stderr' = 'stdout') => {
-					activeRun.emitter.emit('line', line);
-					onLine(line, stream);
-				};
+					await collectForDuration(pool, runId, enabledTables, phase, durationSecs, snapshot_interval_seconds);
+					const phaseDone = { ...phaseObj, status: 'completed' as const };
+					setActivePhase(runId, phase === 'post' ? null : phaseDone);
+					activeRun.emitter.emit('phase', phaseDone);
+				} else {
+					activeRun.emitter.emit('line', durationSecs <= 0 ? '[snapshot] Duration is 0, skipping.' : '[snapshot] No tables enabled, skipping.');
+				}
+				exitCode = 0;
+			} else if (step.type === 'pg_stat_statements_reset') {
+				logStepLine('[pg_stat_statements] Resetting query stats...');
+				const result = await resetPgStatStatements(pool);
+				if (result.warning) {
+					logStepLine(`[warning] ${result.warning}`, 'stderr');
+				} else {
+					logStepLine('[pg_stat_statements] Reset complete.');
+				}
+				exitCode = 0;
+			} else if (step.type === 'pg_stat_statements_collect') {
+				logStepLine('[pg_stat_statements] Collecting query stats snapshot...');
+				const result = await collectPgStatStatementsSnapshot(pool, runId, step.id);
+				if (result.warning) {
+					logStepLine(`[warning] ${result.warning}`, 'stderr');
+				} else {
+					logStepLine(`[pg_stat_statements] Stored ${result.rowCount} row(s) for the current database.`);
+				}
+				exitCode = 0;
+			} else if (step.type === 'pgbench') {
+				const benchStartedAt = new Date().toISOString();
+				db.prepare(`UPDATE benchmark_runs SET bench_started_at=? WHERE id=? AND bench_started_at IS NULL`)
+					.run(benchStartedAt, runId);
+				seenPgbench = true;
 
-				if (step.type === 'collect') {
-					const phase = seenPgbench ? 'post' : 'pre';
-					const durationSecs = step.duration_secs ?? 0;
-					if (durationSecs > 0 && enabledTables.length > 0) {
-						const phaseObj = { name: phase as 'pre' | 'post', status: 'running' as const, duration_secs: durationSecs, started_ms: Date.now() };
-						setActivePhase(runId, phaseObj);
-						activeRun.emitter.emit('phase', phaseObj);
-						activeRun.emitter.emit('line', `[snapshot] Collecting pg_stat_* for ${durationSecs}s...`);
-						if (phase === 'post') {
-							db.prepare(`UPDATE benchmark_runs SET post_started_at=? WHERE id=?`).run(new Date().toISOString(), runId);
-						}
-						await collectForDuration(pool, runId, enabledTables, phase, durationSecs, snapshot_interval_seconds);
-						const phaseDone = { ...phaseObj, status: 'completed' as const };
-						setActivePhase(runId, phase === 'post' ? null : phaseDone);
-						activeRun.emitter.emit('phase', phaseDone);
-					} else {
-						activeRun.emitter.emit('line', durationSecs <= 0 ? '[snapshot] Duration is 0, skipping.' : '[snapshot] No tables enabled, skipping.');
-					}
-					exitCode = 0;
-				} else if (step.type === 'pg_stat_statements_reset') {
-					logStepLine('[pg_stat_statements] Resetting query stats...');
-					const result = await resetPgStatStatements(pool);
-					if (result.warning) {
-						logStepLine(`[warning] ${result.warning}`, 'stderr');
-					} else {
-						logStepLine('[pg_stat_statements] Reset complete.');
-					}
-					exitCode = 0;
-				} else if (step.type === 'pg_stat_statements_collect') {
-					logStepLine('[pg_stat_statements] Collecting query stats snapshot...');
-					const result = await collectPgStatStatementsSnapshot(pool, runId, step.id);
-					if (result.warning) {
-						logStepLine(`[warning] ${result.warning}`, 'stderr');
-					} else {
-						logStepLine(`[pg_stat_statements] Stored ${result.rowCount} row(s) for the current database.`);
-					}
-					exitCode = 0;
-				} else if (step.type === 'pgbench') {
-					const benchStartedAt = new Date().toISOString();
-					db.prepare(`UPDATE benchmark_runs SET bench_started_at=? WHERE id=? AND bench_started_at IS NULL`)
-						.run(benchStartedAt, runId);
-					seenPgbench = true;
-
-					const timer = setInterval(async () => {
-						await collectSnapshot(pool, runId, enabledTables, 'bench');
-						await collectPgLocksSnapshot(pool, runId, 'bench');
-					}, snapshot_interval_seconds * 1000);
-					setSnapshotTimer(runId, timer);
-
-					let scripts = scriptsByStep.get(step.id) ?? [];
-					if (scripts.length === 0 && step.script) {
-						scripts = [{ id: step.id, name: 'script', weight: 1, script: step.script, step_id: step.id, position: 0 }];
-					}
-					const runnableScripts = getRunnablePgbenchScripts(scripts);
-					if (scripts.length > 0 && runnableScripts.length === 0) {
-						logStepLine('[pgbench] All custom scripts have weight 0. Running pgbench built-in scenario.');
-					} else if (runnableScripts.length < scripts.length) {
-						logStepLine(`[pgbench] Ignoring ${scripts.length - runnableScripts.length} script(s) with weight 0.`);
-					}
-
-					const substitutedScripts = runnableScripts.map(ps => ({
-						...ps,
-						script: substituteParams(ps.script, resolvedParams)
-					}));
-
-					const result = await runPgbench(
-						{
-							host: server.host,
-							port: server.port,
-							user: server.username,
-							password: server.password,
-							database: resolvedDatabase,
-							scripts: substitutedScripts,
-							options: substituteParams(step.pgbench_options, resolvedParams),
-							runId,
-							stepId: step.id
-						},
-						activeRun.emitter,
-						onLine
-					);
-
-					clearInterval(timer);
-					exitCode = result.exitCode;
-
-					const pgbenchScript = formatProcessedPgbenchScripts(substitutedScripts);
-					const pgbenchScriptsJson = substitutedScripts.length > 0
-						? JSON.stringify(substitutedScripts.map((script, index) => {
-							const parsedScript = result.pgbenchScripts.find((item) => item.position === index);
-							return {
-								position: index,
-								name: script.name,
-								weight: script.weight,
-								script: script.script,
-								tps: parsedScript?.tps ?? null,
-								latency_avg_ms: parsedScript?.latency_avg_ms ?? null,
-								latency_stddev_ms: parsedScript?.latency_stddev_ms ?? null,
-								transactions: parsedScript?.transactions ?? null,
-								failed_transactions: parsedScript?.failed_transactions ?? null
-							};
-						}))
-						: '';
-					db.prepare(`
-						UPDATE run_step_results
-						SET command=?, processed_script=?, pgbench_summary_json=?, pgbench_scripts_json=?
-						WHERE run_id=? AND step_id=?
-					`).run(
-						result.command,
-						pgbenchScript,
-						result.pgbenchSummary ? JSON.stringify(result.pgbenchSummary) : '',
-						pgbenchScriptsJson,
-						runId,
-						step.id
-					);
-
+				const timer = setInterval(async () => {
 					await collectSnapshot(pool, runId, enabledTables, 'bench');
 					await collectPgLocksSnapshot(pool, runId, 'bench');
+				}, snapshot_interval_seconds * 1000);
+				setSnapshotTimer(runId, timer);
 
-					if (result.tps !== null) {
-						db.prepare(
-							`UPDATE benchmark_runs SET tps=?, latency_avg_ms=?, latency_stddev_ms=?, transactions=? WHERE id=?`
-						).run(result.tps, result.latencyAvgMs, result.latencyStddevMs, result.transactions, runId);
-					}
-				} else {
-					const sqlOpts: SqlStepOptions = {
+				let scripts = scriptsByStep.get(step.id) ?? [];
+				if (scripts.length === 0 && step.script) {
+					scripts = [{ id: step.id, name: 'script', weight: 1, weight_expr: null, script: step.script, step_id: step.id, position: 0 }];
+				}
+				const runnableScripts = getRunnablePgbenchScripts(scripts);
+				if (scripts.length > 0 && runnableScripts.length === 0) {
+					logStepLine('[pgbench] All custom scripts have weight 0. Running pgbench built-in scenario.');
+				} else if (runnableScripts.length < scripts.length) {
+					logStepLine(`[pgbench] Ignoring ${scripts.length - runnableScripts.length} script(s) with weight 0.`);
+				}
+
+				const substitutedScripts = runnableScripts
+					.map(ps => ({
+						...ps,
+						weight: resolveScriptWeight(ps, resolvedParams),
+						script: substituteParams(ps.script, resolvedParams)
+					}))
+					.filter(ps => ps.weight > 0);
+
+				const result = await runPgbench(
+					{
 						host: server.host,
 						port: server.port,
 						user: server.username,
 						password: server.password,
-						database: resolvedDatabase
-					};
-					const processedSqlScript = substituteParams(step.script, resolvedParams);
-					const result = await runSqlStep(sqlOpts, processedSqlScript, activeRun.emitter, onLine, !!step.no_transaction);
-					exitCode = result.exitCode;
-					db.prepare(`UPDATE run_step_results SET command=?, processed_script=? WHERE run_id=? AND step_id=?`)
-						.run(result.command, processedSqlScript, runId, step.id);
-				}
+						database: resolvedDatabase,
+						scripts: substitutedScripts,
+						options: substituteParams(step.pgbench_options, resolvedParams),
+						runId,
+						stepId: step.id
+					},
+					activeRun.emitter,
+					onLine
+				);
 
-				const stepStatus = exitCode === 0 ? 'completed' : 'failed';
-				const finishedAt = new Date().toISOString();
-				db.prepare(
-					`UPDATE run_step_results SET status=?, stdout=?, stderr=?, exit_code=?, finished_at=? WHERE run_id=? AND step_id=?`
-				).run(stepStatus, stdout, stderr, exitCode, finishedAt, runId, step.id);
-				activeRun.emitter.emit('step', { step_id: step.id, status: stepStatus, finished_at: finishedAt });
+				clearInterval(timer);
+				exitCode = result.exitCode;
 
-				if (stepStatus === 'failed') {
-					activeRun.emitter.emit('line', `\n[ERROR] Step "${step.name}" failed with exit code ${exitCode}. Stopping.`);
-					db.prepare(`UPDATE benchmark_runs SET status='failed', finished_at=? WHERE id=?`).run(new Date().toISOString(), runId);
-					return;
+				const pgbenchScript = formatProcessedPgbenchScripts(substitutedScripts);
+				const pgbenchScriptsJson = substitutedScripts.length > 0
+					? JSON.stringify(substitutedScripts.map((script, index) => {
+						const parsedScript = result.pgbenchScripts.find((item) => item.position === index);
+						return {
+							position: index,
+							name: script.name,
+							weight: script.weight,
+							script: script.script,
+							tps: parsedScript?.tps ?? null,
+							latency_avg_ms: parsedScript?.latency_avg_ms ?? null,
+							latency_stddev_ms: parsedScript?.latency_stddev_ms ?? null,
+							transactions: parsedScript?.transactions ?? null,
+							failed_transactions: parsedScript?.failed_transactions ?? null
+						};
+					}))
+					: '';
+				db.prepare(`
+					UPDATE run_step_results
+					SET command=?, processed_script=?, pgbench_summary_json=?, pgbench_scripts_json=?
+					WHERE run_id=? AND step_id=?
+				`).run(
+					result.command,
+					pgbenchScript,
+					result.pgbenchSummary ? JSON.stringify(result.pgbenchSummary) : '',
+					pgbenchScriptsJson,
+					runId,
+					step.id
+				);
+
+				await collectSnapshot(pool, runId, enabledTables, 'bench');
+				await collectPgLocksSnapshot(pool, runId, 'bench');
+
+				if (result.tps !== null) {
+					db.prepare(
+						`UPDATE benchmark_runs SET tps=?, latency_avg_ms=?, latency_stddev_ms=?, transactions=? WHERE id=?`
+					).run(result.tps, result.latencyAvgMs, result.latencyStddevMs, result.transactions, runId);
 				}
+			} else {
+				const sqlOpts: SqlStepOptions = {
+					host: server.host,
+					port: server.port,
+					user: server.username,
+					password: server.password,
+					database: resolvedDatabase
+				};
+				const processedSqlScript = substituteParams(step.script, resolvedParams);
+				const result = await runSqlStep(sqlOpts, processedSqlScript, activeRun.emitter, onLine, !!step.no_transaction);
+				exitCode = result.exitCode;
+				db.prepare(`UPDATE run_step_results SET command=?, processed_script=? WHERE run_id=? AND step_id=?`)
+					.run(result.command, processedSqlScript, runId, step.id);
 			}
 
-			if (!hasCollectSteps && postCollectSecs > 0 && enabledTables.length > 0) {
-				const postStartedAt = new Date().toISOString();
-				db.prepare(`UPDATE benchmark_runs SET post_started_at=? WHERE id=?`).run(postStartedAt, runId);
-				const postPhase = { name: 'post' as const, status: 'running' as const, duration_secs: postCollectSecs, started_ms: Date.now() };
-				setActivePhase(runId, postPhase);
-				activeRun.emitter.emit('phase', postPhase);
-				activeRun.emitter.emit('line', `\n[snapshot] Post-benchmark collection (${postCollectSecs}s)...`);
-				await collectForDuration(pool, runId, enabledTables, 'post', postCollectSecs, snapshot_interval_seconds);
-				const postPhaseDone = { ...postPhase, status: 'completed' as const };
-				setActivePhase(runId, null);
-				activeRun.emitter.emit('phase', postPhaseDone);
-			}
+			const stepStatus = exitCode === 0 ? 'completed' : 'failed';
+			const finishedAt = new Date().toISOString();
+			db.prepare(
+				`UPDATE run_step_results SET status=?, stdout=?, stderr=?, exit_code=?, finished_at=? WHERE run_id=? AND step_id=?`
+			).run(stepStatus, stdout, stderr, exitCode, finishedAt, runId, step.id);
+			activeRun.emitter.emit('step', { step_id: step.id, status: stepStatus, finished_at: finishedAt });
 
-			db.prepare(`UPDATE benchmark_runs SET status='completed', finished_at=? WHERE id=?`).run(new Date().toISOString(), runId);
-			activeRun.emitter.emit('line', '\n=== Benchmark completed successfully ===');
-		} catch (err: unknown) {
-			const msg = err instanceof Error ? err.message : String(err);
-			db.prepare(`UPDATE benchmark_runs SET status='failed', finished_at=? WHERE id=?`).run(new Date().toISOString(), runId);
-			activeRun.emitter.emit('line', `\n[FATAL ERROR] ${msg}`);
-		} finally {
-			await pool.end().catch(() => {});
-			completeRun(runId);
+			if (stepStatus === 'failed') {
+				activeRun.emitter.emit('line', `\n[ERROR] Step "${step.name}" failed with exit code ${exitCode}. Stopping.`);
+				db.prepare(`UPDATE benchmark_runs SET status='failed', finished_at=? WHERE id=?`).run(new Date().toISOString(), runId);
+				return;
+			}
 		}
-	})();
 
-	return runId;
+		if (!hasCollectSteps && postCollectSecs > 0 && enabledTables.length > 0) {
+			const postStartedAt = new Date().toISOString();
+			db.prepare(`UPDATE benchmark_runs SET post_started_at=? WHERE id=?`).run(postStartedAt, runId);
+			const postPhase = { name: 'post' as const, status: 'running' as const, duration_secs: postCollectSecs, started_ms: Date.now() };
+			setActivePhase(runId, postPhase);
+			activeRun.emitter.emit('phase', postPhase);
+			activeRun.emitter.emit('line', `\n[snapshot] Post-benchmark collection (${postCollectSecs}s)...`);
+			await collectForDuration(pool, runId, enabledTables, 'post', postCollectSecs, snapshot_interval_seconds);
+			const postPhaseDone = { ...postPhase, status: 'completed' as const };
+			setActivePhase(runId, null);
+			activeRun.emitter.emit('phase', postPhaseDone);
+		}
+
+		db.prepare(`UPDATE benchmark_runs SET status='completed', finished_at=? WHERE id=?`).run(new Date().toISOString(), runId);
+		activeRun.emitter.emit('line', '\n=== Benchmark completed successfully ===');
+	} catch (err: unknown) {
+		const msg = err instanceof Error ? err.message : String(err);
+		db.prepare(`UPDATE benchmark_runs SET status='failed', finished_at=? WHERE id=?`).run(new Date().toISOString(), runId);
+		activeRun.emitter.emit('line', `\n[FATAL ERROR] ${msg}`);
+	} finally {
+		await pool.end().catch(() => {});
+		completeRun(runId);
+	}
 }

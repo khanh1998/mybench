@@ -69,10 +69,11 @@ type Step struct {
 
 // PgbenchScript is a named pgbench custom script with a weight.
 type PgbenchScript struct {
-	ID     int    `json:"id"`
-	Name   string `json:"name"`
-	Weight int    `json:"weight"`
-	Script string `json:"script"`
+	ID         int    `json:"id"`
+	Name       string `json:"name"`
+	Weight     int    `json:"weight"`
+	WeightExpr string `json:"weight_expr,omitempty"`
+	Script     string `json:"script"`
 }
 
 // SnapTableSpec describes which pg_stat view to collect and which columns to select.

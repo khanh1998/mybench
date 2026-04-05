@@ -633,8 +633,8 @@ Use {{PARAM_NAME}} in scripts and pgbench_options — values come from set_param
 			}
 			if (type === 'pgbench' && pgbench_scripts) {
 				db.prepare('DELETE FROM pgbench_scripts WHERE step_id = ?').run(resolvedStepId);
-				const ins = db.prepare('INSERT INTO pgbench_scripts (step_id, position, name, weight, script) VALUES (?, ?, ?, ?, ?)');
-				pgbench_scripts.forEach((ps, i) => ins.run(resolvedStepId, i, ps.name, ps.weight, ps.script));
+				const ins = db.prepare('INSERT INTO pgbench_scripts (step_id, position, name, weight, weight_expr, script) VALUES (?, ?, ?, ?, ?, ?)');
+				pgbench_scripts.forEach((ps, i) => ins.run(resolvedStepId, i, ps.name, ps.weight, null, ps.script));
 			}
 			return text({ step_id: resolvedStepId, action: step_id ? 'updated' : 'created' });
 		}

@@ -40,6 +40,7 @@ export const load: PageServerLoad = ({ params }) => {
 		.prepare(
 			`SELECT br.id, br.name, br.status, br.tps, br.latency_avg_ms, br.latency_stddev_ms, br.transactions,
 			        br.profile_name, br.run_params, br.started_at, br.bench_started_at, br.post_started_at, br.finished_at,
+			        br.series_id,
 			        rs.pgbench_summary_json,
 			        substr(rs.stdout, 1, 5000) AS pgbench_stdout,
 			        substr(rs.stderr, 1, 2000) AS pgbench_stderr
@@ -53,7 +54,7 @@ export const load: PageServerLoad = ({ params }) => {
 			 )
 			 WHERE br.design_id = ? AND br.status = 'completed' ORDER BY br.id DESC`
 		)
-		.all(id) as CompareRunRow[];
+		.all(id) as (CompareRunRow & { series_id: number | null })[];
 
 	const runs = rawRuns.map((run) => {
 		const summary = resolvePgbenchSummary({
@@ -86,5 +87,9 @@ export const load: PageServerLoad = ({ params }) => {
 				.all(decision.id)
 		: [];
 
-	return { design, decision, runs, metrics };
+	const seriesList = db
+		.prepare('SELECT id, name FROM benchmark_series WHERE design_id = ? ORDER BY id')
+		.all(id) as { id: number; name: string }[];
+
+	return { design, decision, runs, metrics, seriesList };
 };

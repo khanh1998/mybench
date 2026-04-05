@@ -1057,6 +1057,30 @@ FROM snap_pg_stat_bgwriter WHERE _run_id = ? ORDER BY _collected_at DESC LIMIT 1
 		}
 		db.prepare(`INSERT INTO schema_migrations (id) VALUES (?)`).run('cloudwatch_phase_v1');
 	}
+
+	// weight_expr on pgbench_scripts (allows {{PARAM}} expressions for weights)
+	const scriptCols = (db.prepare(`PRAGMA table_info(pgbench_scripts)`).all() as { name: string }[]).map(c => c.name);
+	if (!scriptCols.includes('weight_expr')) {
+		db.exec(`ALTER TABLE pgbench_scripts ADD COLUMN weight_expr TEXT DEFAULT NULL`);
+	}
+
+	// benchmark_series table + series_id on benchmark_runs
+	db.exec(`
+    CREATE TABLE IF NOT EXISTS benchmark_series (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      design_id      INTEGER NOT NULL REFERENCES designs(id) ON DELETE CASCADE,
+      name           TEXT    NOT NULL DEFAULT '',
+      delay_seconds  INTEGER NOT NULL DEFAULT 0,
+      status         TEXT    NOT NULL DEFAULT 'running',
+      ec2_run_token  TEXT,
+      created_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+      finished_at    TEXT
+    );
+  `);
+	const runCols2 = (db.prepare(`PRAGMA table_info(benchmark_runs)`).all() as { name: string }[]).map(c => c.name);
+	if (!runCols2.includes('series_id')) {
+		db.exec(`ALTER TABLE benchmark_runs ADD COLUMN series_id INTEGER REFERENCES benchmark_series(id)`);
+	}
 }
 
 export default getDb;

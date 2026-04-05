@@ -45,6 +45,7 @@ export interface PgbenchScript {
 	position: number;
 	name: string;
 	weight: number;
+	weight_expr: string | null;
 	script: string;
 }
 
@@ -98,7 +99,7 @@ export interface DesignStep {
 	pgbench_scripts?: PgbenchScript[];
 }
 
-export type RunStatus = 'running' | 'completed' | 'failed' | 'stopped';
+export type RunStatus = 'running' | 'completed' | 'failed' | 'stopped' | 'pending';
 
 export interface BenchmarkRun {
 	id: number;
@@ -119,6 +120,18 @@ export interface BenchmarkRun {
 	is_imported: number;          // 0 or 1
 	ec2_server_id: number | null;
 	ec2_run_token: string | null;
+	series_id: number | null;
+}
+
+export interface BenchmarkSeries {
+	id: number;
+	design_id: number;
+	name: string;
+	delay_seconds: number;
+	status: 'running' | 'completed' | 'failed';
+	ec2_run_token: string | null;
+	created_at: string;
+	finished_at: string | null;
 }
 
 export interface ParamProfile {

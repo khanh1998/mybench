@@ -250,16 +250,27 @@ func runPgbenchStep(
 	scriptFiles := make([]string, 0, len(step.PgbenchScripts))
 	resolvedScripts := make([]plan.PgbenchScript, 0, len(step.PgbenchScripts))
 	for i, ps := range step.PgbenchScripts {
+		// Resolve weight: use weight_expr expression if set, otherwise integer weight.
+		resolvedWeight := ps.Weight
+		if ps.WeightExpr != "" {
+			substituted := strings.TrimSpace(plan.SubstituteParams(ps.WeightExpr, opts.Plan.Params))
+			if w, err := strconv.Atoi(substituted); err == nil && w >= 0 {
+				resolvedWeight = w
+			}
+		}
+		if resolvedWeight <= 0 {
+			continue // skip zero/negative weight scripts
+		}
 		fname := fmt.Sprintf("%s/mybench-%s-%d-%d.pgbench", opts.LogDir, opts.Timestamp, step.ID, i)
 		script := plan.SubstituteParams(ps.Script, opts.Plan.Params)
 		if err := os.WriteFile(fname, []byte(script), 0644); err != nil {
 			return pgbenchResult{}, fmt.Errorf("writing pgbench script: %w", err)
 		}
-		scriptFiles = append(scriptFiles, fmt.Sprintf("%s@%d", fname, ps.Weight))
+		scriptFiles = append(scriptFiles, fmt.Sprintf("%s@%d", fname, resolvedWeight))
 		resolvedScripts = append(resolvedScripts, plan.PgbenchScript{
 			ID:     ps.ID,
 			Name:   ps.Name,
-			Weight: ps.Weight,
+			Weight: resolvedWeight,
 			Script: script,
 		})
 	}

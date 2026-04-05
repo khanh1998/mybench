@@ -3,7 +3,7 @@
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import CodeEditor from '$lib/CodeEditor.svelte';
-  import { getRunnablePgbenchScripts, validateDesignParams, validateScriptWeights, type ValidationError, type WeightError } from '$lib/params';
+  import { getRunnablePgbenchScripts, validateDesignParams, validateScriptWeights, resolveScriptWeight, type ValidationError, type WeightError } from '$lib/params';
   import type { DesignStepType } from '$lib/types';
   import type { PageData } from './$types';
 
@@ -17,6 +17,7 @@
     position: number;
     name: string;
     weight: number;
+    weight_expr: string | null;
     script: string;
   }
   interface Param {
@@ -92,6 +93,18 @@
   let runMode = $state<'local' | 'ec2'>('local');
   let runEc2ServerId = $state<number|null>(null);
 
+  // Series modal state
+  let showSeriesModal = $state(false);
+  let startingSeries = $state(false);
+  let seriesName = $state('');
+  let seriesDelay = $state(0);
+  let seriesProfiles = $state<number[]>([]);
+  let seriesMode = $state<'local' | 'ec2'>('local');
+  let seriesEc2ServerId = $state<number|null>(null);
+  let seriesServer = $state<number|null>(null);
+  let seriesDatabase = $state('');
+  let seriesSnapshotInterval = $state(30);
+
   // Profile management state
   let showProfileForm = $state(false);
   let editingProfileId = $state<number|null>(null);
@@ -109,9 +122,73 @@
     selectedScriptIdx = 0;
   });
 
-  function parseScriptWeight(value: string): number {
-    const parsed = Number.parseInt(value, 10);
-    return Number.isNaN(parsed) ? 0 : Math.max(0, parsed);
+  function parseWeightField(raw: string): { weight: number; weight_expr: string | null } {
+    const trimmed = raw.trim();
+    if (/^\{\{[\w]+\}\}$/.test(trimmed)) return { weight: 1, weight_expr: trimmed };
+    const n = parseInt(trimmed, 10);
+    return { weight: isNaN(n) ? 0 : Math.max(0, n), weight_expr: null };
+  }
+
+  function openSeriesModal() {
+    if (!design) return;
+    if (profiles.length < 2) {
+      msg = 'Series requires at least 2 profiles.';
+      setTimeout(() => msg = '', 3000);
+      return;
+    }
+    seriesName = '';
+    seriesDelay = 0;
+    seriesProfiles = profiles.map(p => p.id);
+    seriesMode = 'local';
+    seriesEc2ServerId = null;
+    seriesServer = design.server_id;
+    seriesDatabase = design.database;
+    seriesSnapshotInterval = design.snapshot_interval_seconds;
+    showSeriesModal = true;
+  }
+
+  function moveSeriesProfile(idx: number, dir: -1 | 1) {
+    const arr = [...seriesProfiles];
+    const target = idx + dir;
+    if (target < 0 || target >= arr.length) return;
+    [arr[idx], arr[target]] = [arr[target], arr[idx]];
+    seriesProfiles = arr;
+  }
+
+  function removeSeriesProfile(idx: number) {
+    seriesProfiles = seriesProfiles.filter((_, i) => i !== idx);
+  }
+
+  function addSeriesProfile(profileId: number) {
+    if (!seriesProfiles.includes(profileId)) {
+      seriesProfiles = [...seriesProfiles, profileId];
+    }
+  }
+
+  async function startSeries() {
+    if (!design) return;
+    showSeriesModal = false;
+    startingSeries = true;
+    const body: Record<string, unknown> = {
+      design_id: id,
+      profile_ids: seriesProfiles,
+      delay_seconds: seriesDelay,
+      name: seriesName || undefined,
+      server_id: seriesServer,
+      database: seriesDatabase,
+      snapshot_interval_seconds: seriesSnapshotInterval,
+    };
+    if (seriesMode === 'ec2') {
+      body.ec2_server_id = seriesEc2ServerId;
+    }
+    const res = await fetch('/api/series', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const { series_id } = await res.json();
+    startingSeries = false;
+    goto(`/designs/${id}/series/${series_id}`);
   }
 
   function openRunModal() {
@@ -188,8 +265,19 @@
   const validationErrors: ValidationError[] = $derived(
     design ? validateDesignParams(design) : []
   );
+
+  // Resolved params for weight preview and validation: merges default params with selected profile overrides
+  const previewParams = $derived((): { name: string; value: string }[] => {
+    if (!design) return [];
+    const base = design.params.map((p: Param) => ({ name: p.name, value: p.value }));
+    const profile = runProfile ? profiles.find(p => p.id === runProfile) : null;
+    if (!profile) return base;
+    const overrideMap = new Map(profile.values.map((v: { param_name: string; value: string }) => [v.param_name, v.value]));
+    return base.map(p => overrideMap.has(p.name) ? { ...p, value: overrideMap.get(p.name)! } : p);
+  });
+
   const weightErrors: WeightError[] = $derived(
-    design ? validateScriptWeights(design) : []
+    design ? validateScriptWeights(design, previewParams()) : []
   );
   const isValid = $derived(validationErrors.length === 0 && weightErrors.length === 0);
 
@@ -302,6 +390,7 @@
       position: idx,
       name: `script_${idx + 1}`,
       weight: 100,
+      weight_expr: null,
       script: ''
     }];
     selectedScriptIdx = step.pgbench_scripts.length - 1;
@@ -416,6 +505,9 @@
     <button onclick={save} disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
     <button class="primary" onclick={openRunModal} disabled={startingRun}>
       {startingRun ? 'Starting…' : '▶ Run'}
+    </button>
+    <button onclick={openSeriesModal} disabled={startingSeries} title="Run multiple profiles sequentially">
+      {startingSeries ? 'Starting…' : '⇄ Series'}
     </button>
     <button class="danger" onclick={deleteDesign}>Delete</button>
   </div>
@@ -580,6 +672,118 @@
       <div class="modal-actions">
         <button onclick={() => showRunModal = false}>Cancel</button>
         <button class="primary" onclick={startRun} disabled={!runServer || !runDatabase || (runMode === 'ec2' && !runEc2ServerId)}>▶ Start Run</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Series modal -->
+{#if showSeriesModal && design}
+  <div
+    class="modal-backdrop"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="series-modal-title"
+    tabindex="-1"
+    onclick={(e) => { if (e.currentTarget === e.target) showSeriesModal = false; }}
+    onkeydown={(e) => { if (e.key === 'Escape') showSeriesModal = false; }}
+  >
+    <div class="modal modal-wide">
+      <h3 id="series-modal-title" style="margin:0 0 16px">Configure Series</h3>
+
+      <div class="form-group">
+        <label for="series-name">Series name <span style="color:#aaa;font-weight:400">(optional)</span></label>
+        <input id="series-name" bind:value={seriesName} placeholder="e.g. read-write mix sweep" />
+      </div>
+
+      <div class="form-group">
+        <label for="series-delay">Delay between runs (seconds)</label>
+        <input id="series-delay" type="number" bind:value={seriesDelay} min="0" max="3600" />
+      </div>
+
+      <div class="form-group">
+        <label>Run order <span style="color:#aaa;font-weight:400">(drag or use arrows)</span></label>
+        <div class="series-profiles-list">
+          {#each seriesProfiles as pid, i}
+            {@const prof = profiles.find(p => p.id === pid)}
+            {#if prof}
+              <div class="series-profile-row">
+                <span class="series-profile-num">{i + 1}</span>
+                <span class="series-profile-name">{prof.name}</span>
+                <div class="series-profile-controls">
+                  <button type="button" onclick={() => moveSeriesProfile(i, -1)} disabled={i === 0} class="icon-btn" title="Move up">↑</button>
+                  <button type="button" onclick={() => moveSeriesProfile(i, 1)} disabled={i === seriesProfiles.length - 1} class="icon-btn" title="Move down">↓</button>
+                  <button type="button" onclick={() => removeSeriesProfile(i)} class="icon-btn danger-icon" title="Remove">✕</button>
+                </div>
+              </div>
+            {/if}
+          {/each}
+          {#if seriesProfiles.length < profiles.length}
+            <div class="series-add-profile">
+              <select onchange={(e) => { const v = Number((e.currentTarget as HTMLSelectElement).value); if (v) addSeriesProfile(v); (e.currentTarget as HTMLSelectElement).value = ''; }}>
+                <option value="">+ Add profile…</option>
+                {#each profiles.filter(p => !seriesProfiles.includes(p.id)) as p}
+                  <option value={p.id}>{p.name}</option>
+                {/each}
+              </select>
+            </div>
+          {/if}
+        </div>
+        {#if seriesProfiles.length < 2}
+          <div style="color:#f38ba8; font-size:11px; margin-top:4px">Select at least 2 profiles</div>
+        {/if}
+      </div>
+
+      <fieldset class="form-group modal-fieldset">
+        <legend>Run location</legend>
+        <div style="display:flex; gap:16px">
+          <label style="font-weight:normal; cursor:pointer; display:flex; align-items:center; gap:6px">
+            <input type="radio" bind:group={seriesMode} value="local" style="width:auto" />
+            Local
+          </label>
+          <label style="font-weight:normal; cursor:pointer; display:flex; align-items:center; gap:6px" class:disabled={ec2Servers.length === 0}>
+            <input type="radio" bind:group={seriesMode} value="ec2" style="width:auto" disabled={ec2Servers.length === 0} />
+            EC2{#if ec2Servers.length === 0}<span style="color:#aaa; font-size:11px; margin-left:4px">(none configured)</span>{/if}
+          </label>
+        </div>
+      </fieldset>
+
+      {#if seriesMode === 'ec2'}
+        <div class="form-group">
+          <label for="series-ec2">EC2 Server</label>
+          <select id="series-ec2" bind:value={seriesEc2ServerId}>
+            <option value={null}>— select EC2 server —</option>
+            {#each ec2Servers as s}
+              <option value={s.id}>{s.name} ({s.user}@{s.host}:{s.port})</option>
+            {/each}
+          </select>
+        </div>
+      {/if}
+
+      <div class="form-group">
+        <label for="series-server">Server</label>
+        <select id="series-server" bind:value={seriesServer}>
+          <option value={null}>— select server —</option>
+          {#each servers as s}
+            <option value={s.id}>{s.name}</option>
+          {/each}
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="series-db">Database</label>
+        <input id="series-db" bind:value={seriesDatabase} placeholder="benchmark_db" />
+      </div>
+      <div class="form-group">
+        <label for="series-snap">Snapshot interval (s)</label>
+        <input id="series-snap" type="number" bind:value={seriesSnapshotInterval} min="5" max="300" />
+      </div>
+
+      <div class="modal-actions">
+        <button onclick={() => showSeriesModal = false}>Cancel</button>
+        <button class="primary" onclick={startSeries}
+          disabled={seriesProfiles.length < 2 || !seriesServer || !seriesDatabase || (seriesMode === 'ec2' && !seriesEc2ServerId)}>
+          ⇄ Start Series
+        </button>
       </div>
     </div>
   </div>
@@ -802,7 +1006,8 @@
       {:else if selectedStep.type === 'pgbench'}
         {@const scripts = selectedStep.pgbench_scripts ?? []}
         {@const runnableScripts = getRunnablePgbenchScripts(scripts)}
-        {@const totalWeight = runnableScripts.reduce((sum, ps) => sum + (ps.weight ?? 1), 0)}
+        {@const defaultParams = design?.params.map((p: Param) => ({ name: p.name, value: p.value })) ?? []}
+        {@const totalWeight = runnableScripts.reduce((sum, ps) => sum + resolveScriptWeight(ps, defaultParams), 0)}
         <div class="pgbench-split">
           <div class="scripts-panel">
             <div class="scripts-list">
@@ -810,7 +1015,7 @@
                 <div
                   class="script-item"
                   class:script-selected={selectedScriptIdx === i}
-                  class:script-ignored={(ps.weight ?? 1) <= 0}
+                  class:script-ignored={ps.weight_expr == null ? (ps.weight ?? 1) <= 0 : resolveScriptWeight(ps, defaultParams) <= 0}
                   role="button"
                   tabindex="0"
                   onclick={() => selectedScriptIdx = i}
@@ -832,15 +1037,26 @@
                   <div class="script-item-controls-row">
                     <span class="weight-label">weight</span>
                     <input
-                      type="number"
+                      type="text"
                       class="weight-input"
-                      value={ps.weight}
-                      oninput={(e) => { ps.weight = parseScriptWeight((e.currentTarget as HTMLInputElement).value); }}
+                      value={ps.weight_expr ?? String(ps.weight)}
+                      oninput={(e) => {
+                        const parsed = parseWeightField((e.currentTarget as HTMLInputElement).value);
+                        ps.weight = parsed.weight;
+                        ps.weight_expr = parsed.weight_expr;
+                      }}
                       onclick={(e) => e.stopPropagation()}
-                      min="0"
+                      placeholder="0–100 or &#123;&#123;PARAM&#125;&#125;"
+                      title="Enter a number (0–100) or a parameter expression like &#123;&#123;WEIGHT_WRITE&#125;&#125;"
                     />
-                    {#if (ps.weight ?? 1) <= 0}
+                    {#if ps.weight_expr}
+                      {@const resolved = resolveScriptWeight(ps, defaultParams)}
+                      <span class="weight-preview" title="Resolved value using default params">→{resolved}</span>
+                    {/if}
+                    {#if ps.weight_expr == null && (ps.weight ?? 1) <= 0}
                       <span class="script-ignored-tag" title="Scripts with weight 0 are skipped when this step runs">ignored</span>
+                    {:else if ps.weight_expr != null && resolveScriptWeight(ps, defaultParams) <= 0}
+                      <span class="script-ignored-tag" title="Resolves to 0 — this script will be skipped">ignored</span>
                     {/if}
                     <button
                       class="icon-btn danger-icon"
@@ -990,6 +1206,16 @@
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
   .modal-fieldset { border: 0; padding: 0; margin: 0 0 14px; min-width: 0; }
   .modal-fieldset legend { font-size: 12px; font-weight: 600; color: #555; margin-bottom: 4px; padding: 0; }
+  .modal-wide { width: 540px !important; }
+
+  .series-profiles-list { border: 1px solid #e0e0e0; border-radius: 4px; overflow: hidden; }
+  .series-profile-row { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid #f0f0f0; background: #fafafa; }
+  .series-profile-row:last-child { border-bottom: none; }
+  .series-profile-num { font-size: 11px; color: #aaa; width: 16px; text-align: right; flex-shrink: 0; }
+  .series-profile-name { flex: 1; font-size: 13px; color: #333; }
+  .series-profile-controls { display: flex; gap: 4px; }
+  .series-add-profile { padding: 6px 10px; background: #f5f5f5; }
+  .series-add-profile select { font-size: 12px; padding: 3px 6px; border: 1px solid #ddd; border-radius: 3px; background: white; color: #555; width: auto; }
 
   /* Phase timeline (config + modal) */
   .phase-timeline, .run-timeline {
@@ -1457,7 +1683,7 @@
   .script-name-input::placeholder { color: #585b70; }
   .weight-label { color: #585b70; font-size: 10px; flex-shrink: 0; }
   .weight-input {
-    width: 40px;
+    width: 60px;
     background: #313244;
     border: 1px solid #45475a;
     color: #cdd6f4;
@@ -1467,14 +1693,11 @@
     text-align: center;
     flex-shrink: 0;
   }
-  .weight-input::-webkit-outer-spin-button,
-  .weight-input::-webkit-inner-spin-button {
-    -webkit-appearance: none;
-    margin: 0;
-  }
-  .weight-input {
-    -moz-appearance: textfield;
-    appearance: textfield;
+  .weight-preview {
+    color: #a6e3a1;
+    font-size: 10px;
+    flex-shrink: 0;
+    font-family: monospace;
   }
   .script-ignored-tag {
     color: #f9e2af;

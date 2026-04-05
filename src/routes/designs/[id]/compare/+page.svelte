@@ -12,7 +12,15 @@
   const designId = $derived(Number($page.params.id));
   const MAX_RUNS = 4;
 
-  const allRuns = $derived((data.runs ?? []) as CompareRunInfo[]);
+  interface SeriesInfo { id: number; name: string; }
+  const allRuns = $derived((data.runs ?? []) as (CompareRunInfo & { series_id: number | null })[]);
+  const seriesList = $derived((data.seriesList ?? []) as SeriesInfo[]);
+  let seriesFilter = $state<'all' | 'none' | number>('all');
+  const visibleRuns = $derived(
+    seriesFilter === 'all' ? allRuns :
+    seriesFilter === 'none' ? allRuns.filter(r => r.series_id == null) :
+    allRuns.filter(r => r.series_id === seriesFilter)
+  );
   let selectedRunIds: number[] = $state([]);
 
   function initFromUrl() {
@@ -64,16 +72,26 @@
   <div class="row section-header">
     <h3 style="margin:0">Select Runs to Compare</h3>
     <span class="section-note">Select 2–{MAX_RUNS} completed runs</span>
+    {#if seriesList.length > 0}
+      <select class="series-filter-select" bind:value={seriesFilter}
+        onchange={() => { selectedRunIds = []; syncUrl(); }}>
+        <option value="all">All runs</option>
+        <option value="none">No series</option>
+        {#each seriesList as s}
+          <option value={s.id}>Series: {s.name || '#' + s.id}</option>
+        {/each}
+      </select>
+    {/if}
     {#if selectedRunIds.length > 0}
       <button onclick={clearSelection} class="clear-btn">Clear</button>
     {/if}
   </div>
 
-  {#if allRuns.length === 0}
-    <p class="empty-copy">No completed runs for this design yet.</p>
+  {#if visibleRuns.length === 0}
+    <p class="empty-copy">{allRuns.length === 0 ? 'No completed runs for this design yet.' : 'No runs match the current filter.'}</p>
   {:else}
     <div class="run-list">
-      {#each allRuns as run}
+      {#each visibleRuns as run}
         {@const colorIdx = selectedRunIds.indexOf(run.id)}
         {@const selected = colorIdx >= 0}
         {@const disabled = !selected && selectedRunIds.length >= MAX_RUNS}
@@ -134,6 +152,14 @@
   .section-note {
     font-size: 12px;
     color: #888;
+  }
+
+  .series-filter-select {
+    font-size: 12px;
+    padding: 3px 8px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    color: #555;
   }
 
   .clear-btn {

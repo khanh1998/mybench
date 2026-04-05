@@ -58,6 +58,7 @@ export function generatePlan(designId: number, overrides: PlanRunSettingsOverrid
 			id: ps.id,
 			name: ps.name,
 			weight: ps.weight,
+			weight_expr: ps.weight_expr ?? null,
 			script: ps.script
 		})) : []
 	}));

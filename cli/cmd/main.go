@@ -20,6 +20,7 @@ executes the benchmark steps against PostgreSQL, and writes a result.json file.`
 
 	rootCmd.SilenceUsage = true
 	rootCmd.AddCommand(newRunCmd())
+	rootCmd.AddCommand(newSeriesCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
