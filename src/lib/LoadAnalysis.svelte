@@ -1077,8 +1077,11 @@
 
   // ── Paging ─────────────────────────────────────────────────────────────────
   const PER_PAGE = 10;
-  let sqlPage   = $state(0);
-  let waitsPage = $state(0);
+  let sqlPage       = $state(0);
+  let waitsPage     = $state(0);
+  let waitsView     = $state<'detail' | 'broad'>('detail');
+  let waitsSort     = $state<'count' | 'aas'>('count');
+  let aasGranularity = $state<'detail' | 'broad'>('detail');
 
   function pagedSql(runId: number): SqlRow[] {
     const all = sortedSql(runId);
@@ -1086,11 +1089,39 @@
   }
   function sqlPageCount(runId: number) { return Math.ceil(sortedSql(runId).length / PER_PAGE); }
 
-  function pagedWaits(runId: number): WaitRow[] {
-    const all = waitsData[runId] ?? [];
-    return all.slice(waitsPage * PER_PAGE, (waitsPage + 1) * PER_PAGE);
+  function broadWaits(runId: number): WaitRow[] {
+    const rows = waitsData[runId] ?? [];
+    const map = new Map<string, { occurrences: number; snapshot_count: number }>();
+    for (const r of rows) {
+      const key = r.wait_event_type;
+      const existing = map.get(key);
+      if (existing) {
+        existing.occurrences += Number(r.occurrences);
+        existing.snapshot_count = Math.max(existing.snapshot_count, Number(r.snapshot_count));
+      } else {
+        map.set(key, { occurrences: Number(r.occurrences), snapshot_count: Number(r.snapshot_count) });
+      }
+    }
+    return [...map.entries()]
+      .map(([type, v]) => ({ wait_event_type: type, wait_event: type, occurrences: v.occurrences, snapshot_count: v.snapshot_count }));
   }
-  function waitsPageCount(runId: number) { return Math.ceil((waitsData[runId] ?? []).length / PER_PAGE); }
+
+  function activeWaits(runId: number): WaitRow[] {
+    const rows = waitsView === 'broad' ? broadWaits(runId) : [...(waitsData[runId] ?? [])];
+    if (waitsSort === 'aas') {
+      return rows.slice().sort((a, b) => {
+        const aasA = Number(a.snapshot_count) > 0 ? Number(a.occurrences) / Number(a.snapshot_count) : 0;
+        const aasB = Number(b.snapshot_count) > 0 ? Number(b.occurrences) / Number(b.snapshot_count) : 0;
+        return aasB - aasA;
+      });
+    }
+    return rows.slice().sort((a, b) => Number(b.occurrences) - Number(a.occurrences));
+  }
+
+  function pagedWaits(runId: number): WaitRow[] {
+    return activeWaits(runId).slice(waitsPage * PER_PAGE, (waitsPage + 1) * PER_PAGE);
+  }
+  function waitsPageCount(runId: number) { return Math.ceil(activeWaits(runId).length / PER_PAGE); }
 
   // ── Flamegraph ─────────────────────────────────────────────────────────────
   interface FlameItem { wtype: string; wevent: string; seconds: number; color: string; }
@@ -1271,7 +1302,15 @@
 
 <!-- ── Section 1: Average Active Sessions ───────────────────────────────── -->
 <div class="section">
-  <h4 class="section-title">Average Active Sessions (AAS)</h4>
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px;flex-wrap:wrap">
+    <h4 class="section-title" style="margin:0">Average Active Sessions (AAS)</h4>
+    {#if isCompare}
+      <div class="mode-toggle">
+        <button class:active={aasGranularity === 'detail'} onclick={() => aasGranularity = 'detail'}>Detail</button>
+        <button class:active={aasGranularity === 'broad'} onclick={() => aasGranularity = 'broad'}>Broad</button>
+      </div>
+    {/if}
+  </div>
   <p class="section-desc">Active sessions at each snapshot, stacked by wait event type. Higher = more database load.</p>
 
   {#if isCompare}
@@ -1286,7 +1325,7 @@
         {@const rawRows = buildAasRawRows(run)}
         <div>
           <div class="run-label" style="color:{run.color}">{run.label}</div>
-          <StackedAreaChart {series} {rawRows} title="AAS by wait type" markers={buildMarkers(run)} originMs={origin(run)} />
+          <StackedAreaChart {series} {rawRows} title="AAS by wait type" markers={buildMarkers(run)} originMs={origin(run)} granularity={aasGranularity} showDetailToggle={false} />
         </div>
       {/each}
     </div>
@@ -1317,9 +1356,15 @@
 
 <!-- ── Section 3: Top Wait Events ───────────────────────────────────────── -->
 <div class="section">
-  <h4 class="section-title">Top Wait Events</h4>
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px;flex-wrap:wrap">
+    <h4 class="section-title" style="margin:0">Top Wait Events</h4>
+    <div class="mode-toggle">
+      <button class:active={waitsView === 'detail'} onclick={() => { waitsView = 'detail'; waitsPage = 0; }}>Detail</button>
+      <button class:active={waitsView === 'broad'} onclick={() => { waitsView = 'broad'; waitsPage = 0; }}>Broad</button>
+    </div>
+  </div>
   <div class="waits-header-row">
-    <p class="section-desc" style="margin:0">Most frequent wait events across active sessions. AAS = avg active sessions (bar scaled to vCPU count).</p>
+    <p class="section-desc" style="margin:0">Most frequent wait events across active sessions. AAS = avg active sessions (bar scaled to vCPU count).{waitsView === 'broad' ? ' Broad mode groups by wait type.' : ''}</p>
     <label class="vcpu-label">
       vCPUs:
       <input type="number" class="vcpu-input" min="1" max="512" bind:value={vcpuCount} />
@@ -1327,22 +1372,22 @@
   </div>
   <div class="waits-grid" style="margin-top:10px">
     {#each runs as run}
-      {@const allRows = waitsData[run.id] ?? []}
+      {@const allRows = activeWaits(run.id)}
       {@const pageRows = pagedWaits(run.id)}
       {@const totalSnapshots = allRows.length ? Math.max(...allRows.map(r => Number(r.snapshot_count || 1))) : 1}
       {@const totalPages = waitsPageCount(run.id)}
       <div class="waits-panel">
         {#if isCompare}<div class="run-label" style="color:{run.color}">{run.label}</div>{/if}
-        {#if allRows.length === 0}
+        {#if (waitsData[run.id] ?? []).length === 0}
           <div class="empty">No wait event data</div>
         {:else}
           <table class="data-table">
             <thead>
               <tr>
                 <th>Wait Type</th>
-                <th>Wait Event</th>
-                <th style="text-align:right">Count</th>
-                <th style="text-align:right">AAS</th>
+                {#if waitsView === 'detail'}<th>Wait Event</th>{/if}
+                <th style="text-align:right;cursor:pointer;user-select:none" onclick={() => { waitsSort = 'count'; waitsPage = 0; }}>Count{waitsSort === 'count' ? ' ▾' : ''}</th>
+                <th style="text-align:right;cursor:pointer;user-select:none" onclick={() => { waitsSort = 'aas'; waitsPage = 0; }}>AAS{waitsSort === 'aas' ? ' ▾' : ''}</th>
                 <th style="width:100px" title="Load by waits (AAS), bar scaled to {vcpuCount} vCPUs">Load (AAS/{vcpuCount} vCPU)</th>
               </tr>
             </thead>
@@ -1352,10 +1397,10 @@
                 {@const snaps = Number(row.snapshot_count || totalSnapshots)}
                 {@const aas = snaps > 0 ? occ / snaps : 0}
                 {@const barW = Math.min(aas / vcpuCount * 100, 100).toFixed(1)}
-                {@const color = getWaitColor(row.wait_event_type, row.wait_event)}
+                {@const color = getWaitColor(row.wait_event_type, waitsView === 'broad' ? row.wait_event_type : row.wait_event)}
                 <tr>
                   <td><span class="wait-badge" style="background:{color}20;color:{color}">{row.wait_event_type}</span></td>
-                  <td style="font-family:monospace;font-size:11px">{row.wait_event}</td>
+                  {#if waitsView === 'detail'}<td style="font-family:monospace;font-size:11px">{row.wait_event}</td>{/if}
                   <td style="text-align:right;font-variant-numeric:tabular-nums">{fmtNum(occ)}</td>
                   <td style="text-align:right;font-variant-numeric:tabular-nums;color:#555">{aas.toFixed(2)}</td>
                   <td><div class="bar-bg"><div class="bar-fill" style="width:{barW}%;background:{color}"></div></div></td>
@@ -1804,7 +1849,8 @@
   .run-label { font-size: 12px; font-weight: 600; margin-bottom: 4px; }
 
   .chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
-  .waits-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+  .waits-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 480px), 1fr)); gap: 16px; }
+  @media (min-width: 1000px) { .waits-grid { grid-template-columns: repeat(2, 1fr); } }
   .sql-panels { display: flex; flex-direction: column; gap: 16px; }
   /* ── Lock sort bar ── */
   .lock-sort-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }

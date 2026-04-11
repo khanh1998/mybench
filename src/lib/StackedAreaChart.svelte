@@ -10,6 +10,7 @@
     markers = [],
     originMs = null,
     showDetailToggle = true,
+    granularity = undefined,
   }: {
     series: ChartSeries[];
     rawRows?: RawRow[];
@@ -17,6 +18,7 @@
     markers?: Marker[];
     originMs?: number | null;
     showDetailToggle?: boolean;
+    granularity?: 'detail' | 'broad';
   } = $props();
 
   // Map typeKey → series color so broad-mode tooltip matches chart polygons
@@ -26,6 +28,9 @@
 
   // Declared early so detailSeries / activeSeries can reference it
   let tooltipGranularity = $state<'detail' | 'broad'>('detail');
+
+  // When granularity is controlled externally, use it; otherwise use internal state
+  const effectiveGranularity = $derived(granularity ?? tooltipGranularity);
 
   // Per-event series derived from rawRows (used in detail mode)
   const detailSeries = $derived.by((): ChartSeries[] => {
@@ -45,7 +50,7 @@
 
   // Which series to render: detail mode uses per-event series, broad mode uses aggregated series
   const activeSeries = $derived(
-    tooltipGranularity === 'detail' && rawRows.length > 0 ? detailSeries : series
+    effectiveGranularity === 'detail' && rawRows.length > 0 ? detailSeries : series
   );
 
   const ML = 60, MR = 20, MT = 8, MB = 28;
@@ -184,7 +189,7 @@
         <span class="leg-item"><span class="leg-dot" style="background:{s.color}"></span>{s.label}</span>
       {/each}
     </span>
-    {#if rawRows.length > 0 && showDetailToggle}
+    {#if rawRows.length > 0 && showDetailToggle && granularity === undefined}
       <div class="gran-toggle">
         <button class:active={tooltipGranularity === 'detail'} onclick={() => tooltipGranularity = 'detail'}>Detail</button>
         <button class:active={tooltipGranularity === 'broad'} onclick={() => tooltipGranularity = 'broad'}>Broad</button>

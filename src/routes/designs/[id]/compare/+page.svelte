@@ -10,7 +10,6 @@
   let { data }: { data: PageData } = $props();
 
   const designId = $derived(Number($page.params.id));
-  const MAX_RUNS = 4;
 
   interface SeriesInfo { id: number; name: string; }
   const allRuns = $derived((data.runs ?? []) as (CompareRunInfo & { series_id: number | null })[]);
@@ -31,7 +30,7 @@
       .map(Number)
       .filter((id, index, values) => index === values.indexOf(id))
       .filter((id) => id > 0 && allRuns.some((run) => run.id === id));
-    selectedRunIds = ids.slice(0, MAX_RUNS);
+    selectedRunIds = ids;
   }
 
   function syncUrl() {
@@ -47,7 +46,7 @@
   function toggleRun(runId: number) {
     if (selectedRunIds.includes(runId)) {
       selectedRunIds = selectedRunIds.filter((id) => id !== runId);
-    } else if (selectedRunIds.length < MAX_RUNS) {
+    } else {
       selectedRunIds = [...selectedRunIds, runId];
     }
     syncUrl();
@@ -71,7 +70,7 @@
 <div class="card">
   <div class="row section-header">
     <h3 style="margin:0">Select Runs to Compare</h3>
-    <span class="section-note">Select 2–{MAX_RUNS} completed runs</span>
+    <span class="section-note">Select completed runs to compare</span>
     {#if seriesList.length > 0}
       <select class="series-filter-select" bind:value={seriesFilter}
         onchange={() => { selectedRunIds = []; syncUrl(); }}>
@@ -94,15 +93,15 @@
       {#each visibleRuns as run}
         {@const colorIdx = selectedRunIds.indexOf(run.id)}
         {@const selected = colorIdx >= 0}
-        {@const disabled = !selected && selectedRunIds.length >= MAX_RUNS}
+        {@const disabled = false}
         <label
           class="run-chip"
           class:selected
           class:disabled
-          style={selected ? `border-color:${['#0066cc', '#e6531d', '#00996b', '#9b36b7', '#cc8800'][colorIdx]};background:${['#0066cc', '#e6531d', '#00996b', '#9b36b7', '#cc8800'][colorIdx]}18` : ''}
+          style={selected ? `border-color:${['#0066cc', '#e6531d', '#00996b', '#9b36b7', '#cc8800'][colorIdx % 5]};background:${['#0066cc', '#e6531d', '#00996b', '#9b36b7', '#cc8800'][colorIdx % 5]}18` : ''}
         >
           <input type="checkbox" checked={selected} {disabled} onchange={() => toggleRun(run.id)} />
-          <span class="run-chip-id" style={selected ? `color:${['#0066cc', '#e6531d', '#00996b', '#9b36b7', '#cc8800'][colorIdx]};font-weight:700` : ''}>
+          <span class="run-chip-id" style={selected ? `color:${['#0066cc', '#e6531d', '#00996b', '#9b36b7', '#cc8800'][colorIdx % 5]};font-weight:700` : ''}>
             {run.name || '#' + run.id}
           </span>
           {#if run.profile_name}

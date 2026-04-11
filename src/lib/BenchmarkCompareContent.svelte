@@ -415,10 +415,9 @@
   }
 
   .compare-top-grid {
-    display: grid;
-    grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.95fr);
+    display: flex;
+    flex-direction: column;
     gap: 12px;
-    align-items: start;
     margin-top: 12px;
     margin-bottom: 12px;
   }
@@ -566,12 +565,6 @@
     font-size: 13px;
     text-align: center;
     padding: 32px;
-  }
-
-  @media (max-width: 980px) {
-    .compare-top-grid {
-      grid-template-columns: 1fr;
-    }
   }
 
   @media (max-width: 720px) {
