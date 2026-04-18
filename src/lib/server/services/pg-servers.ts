@@ -1,6 +1,7 @@
 import getDb from '$lib/server/db';
 import { SNAP_TABLE_MAP } from '$lib/server/pg-stats';
 import { discoverPgStatTables, testConnection } from '$lib/server/pg-client';
+import { connectSsh, exec } from '$lib/server/ec2-runner';
 import type { PgServer } from '$lib/types';
 
 // Parses RDS endpoint: <instance-id>.<hash>.<region>.rds.amazonaws.com
@@ -21,6 +22,11 @@ export interface SavePgServerInput {
 	rds_instance_id?: string;
 	aws_region?: string;
 	enhanced_monitoring?: boolean | number;
+	ssh_enabled?: boolean | number;
+	ssh_host?: string | null;
+	ssh_port?: number;
+	ssh_user?: string | null;
+	ssh_private_key?: string | null;
 }
 
 export interface TestPgServerInput {
@@ -65,20 +71,25 @@ export function savePgServer(input: SavePgServerInput): { action: 'created' | 'u
 		ssl: input.ssl !== undefined ? (input.ssl ? 1 : 0) : (existing?.ssl ?? 0),
 		rds_instance_id: input.rds_instance_id ?? (input.host ? parsed.rdsInstanceId : (existing?.rds_instance_id ?? '')),
 		aws_region: input.aws_region ?? (input.host ? parsed.awsRegion : (existing?.aws_region ?? '')),
-		enhanced_monitoring: input.enhanced_monitoring !== undefined ? (input.enhanced_monitoring ? 1 : 0) : (existing?.enhanced_monitoring ?? 0)
+		enhanced_monitoring: input.enhanced_monitoring !== undefined ? (input.enhanced_monitoring ? 1 : 0) : (existing?.enhanced_monitoring ?? 0),
+		ssh_enabled: input.ssh_enabled !== undefined ? (input.ssh_enabled ? 1 : 0) : (existing?.ssh_enabled ?? 0),
+		ssh_host: input.ssh_host !== undefined ? (input.ssh_host || null) : (existing?.ssh_host ?? null),
+		ssh_port: input.ssh_port ?? existing?.ssh_port ?? 22,
+		ssh_user: input.ssh_user !== undefined ? (input.ssh_user || null) : (existing?.ssh_user ?? null),
+		ssh_private_key: input.ssh_private_key !== undefined ? (input.ssh_private_key || null) : (existing?.ssh_private_key ?? null)
 	};
 	if (!next.name.trim()) throw new Error('name is required');
 
 	if (existing) {
 		db.prepare(
-			'UPDATE pg_servers SET name=?, host=?, port=?, username=?, password=?, ssl=?, rds_instance_id=?, aws_region=?, enhanced_monitoring=? WHERE id=?'
-		).run(next.name, next.host, next.port, next.username, next.password, next.ssl, next.rds_instance_id, next.aws_region, next.enhanced_monitoring, input.server_id);
+			'UPDATE pg_servers SET name=?, host=?, port=?, username=?, password=?, ssl=?, rds_instance_id=?, aws_region=?, enhanced_monitoring=?, ssh_enabled=?, ssh_host=?, ssh_port=?, ssh_user=?, ssh_private_key=? WHERE id=?'
+		).run(next.name, next.host, next.port, next.username, next.password, next.ssl, next.rds_instance_id, next.aws_region, next.enhanced_monitoring, next.ssh_enabled, next.ssh_host, next.ssh_port, next.ssh_user, next.ssh_private_key, input.server_id);
 		return { action: 'updated', server: getPgServer(input.server_id!)! };
 	}
 
 	const result = db.prepare(
-		'INSERT INTO pg_servers (name, host, port, username, password, ssl, rds_instance_id, aws_region, enhanced_monitoring) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-	).run(next.name, next.host, next.port, next.username, next.password, next.ssl, next.rds_instance_id, next.aws_region, next.enhanced_monitoring);
+		'INSERT INTO pg_servers (name, host, port, username, password, ssl, rds_instance_id, aws_region, enhanced_monitoring, ssh_enabled, ssh_host, ssh_port, ssh_user, ssh_private_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+	).run(next.name, next.host, next.port, next.username, next.password, next.ssl, next.rds_instance_id, next.aws_region, next.enhanced_monitoring, next.ssh_enabled, next.ssh_host, next.ssh_port, next.ssh_user, next.ssh_private_key);
 	return { action: 'created', server: getPgServer(result.lastInsertRowid as number)! };
 }
 
@@ -105,10 +116,11 @@ export async function testPgServer(input: TestPgServerInput): Promise<{
 }> {
 	const targetDatabase = input.database ?? 'postgres';
 
-	let target: PgServer | undefined;
+	let target: PgServer;
 	if (input.server_id) {
-		target = getPgServer(input.server_id);
-		if (!target) throw new Error(`PostgreSQL connection ${input.server_id} not found`);
+		const found = getPgServer(input.server_id);
+		if (!found) throw new Error(`PostgreSQL connection ${input.server_id} not found`);
+		target = found;
 	} else {
 		if (!input.host) throw new Error('host is required when server_id is omitted');
 		target = {
@@ -121,7 +133,12 @@ export async function testPgServer(input: TestPgServerInput): Promise<{
 			ssl: input.ssl ? 1 : 0,
 			rds_instance_id: '',
 			aws_region: '',
-			enhanced_monitoring: 0
+			enhanced_monitoring: 0,
+			ssh_enabled: 0,
+			ssh_host: null,
+			ssh_port: 22,
+			ssh_user: null,
+			ssh_private_key: null
 		};
 	}
 
@@ -247,4 +264,47 @@ export function setPgServerTableSelections(serverId: number, selections: TableSe
 			enabled: !!row.enabled
 		}))
 	};
+}
+
+export async function testPgServerSsh(serverId: number): Promise<{ ok: boolean; tools?: string[]; error?: string }> {
+	const server = getPgServer(serverId);
+	if (!server) throw new Error(`PostgreSQL connection ${serverId} not found`);
+	if (!server.ssh_enabled) throw new Error('SSH is not enabled for this server');
+	if (!server.ssh_user) throw new Error('SSH user is required');
+	if (!server.ssh_private_key) throw new Error('SSH private key is required');
+
+	const sshHost = server.ssh_host || server.host;
+
+	// Build a minimal Ec2Server-compatible object
+	const sshTarget = {
+		id: server.id,
+		name: server.name,
+		host: sshHost,
+		user: server.ssh_user,
+		port: server.ssh_port,
+		private_key: server.ssh_private_key,
+		remote_dir: '',
+		log_dir: ''
+	};
+
+	let conn;
+	try {
+		conn = await connectSsh(sshTarget);
+	} catch (err: unknown) {
+		return { ok: false, error: `SSH connection failed: ${err instanceof Error ? err.message : String(err)}` };
+	}
+
+	try {
+		const { stdout, code } = await exec(conn, 'which vmstat; which iostat; echo ok');
+		if (code !== 0) {
+			return { ok: false, error: 'Connected but could not verify vmstat/iostat availability' };
+		}
+		const lines = stdout.trim().split('\n').filter(Boolean);
+		const tools = lines.filter((l) => l !== 'ok');
+		return { ok: true, tools };
+	} catch (err: unknown) {
+		return { ok: false, error: `Command execution failed: ${err instanceof Error ? err.message : String(err)}` };
+	} finally {
+		conn.end();
+	}
 }

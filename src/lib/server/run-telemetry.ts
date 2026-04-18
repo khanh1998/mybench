@@ -1982,6 +1982,147 @@ function buildCheckpointerSection(rows: SnapshotRow[], runStartMs: number): Tele
 	};
 }
 
+function buildOsMetricsSection(db: Database.Database, runId: number, runStartMs: number, selectedPhases: TelemetryPhase[]): TelemetrySection {
+	const noData: TelemetrySection = {
+		key: 'os_metrics',
+		label: 'SSH Metrics',
+		status: 'no_data',
+		reason: 'No SSH OS metrics were collected for this run. Requires SSH enabled on the database server configuration.',
+		summary: [],
+		chartTitle: 'OS metrics (via SSH)',
+		chartSeries: [],
+		tableTitle: 'OS metrics',
+		tableColumns: [],
+		tableRows: [],
+		tableSnapshots: []
+	};
+
+	if (!tableExists(db, 'cloudwatch_datapoints')) return noData;
+
+	const phaseClause = selectedPhases.length === ALL_PHASES.length
+		? ''
+		: `AND (phase = '' OR phase IN (${selectedPhases.map(() => '?').join(',')}))`;
+	const phaseArgs = selectedPhases.length === ALL_PHASES.length ? [] : selectedPhases;
+
+	const rows = db.prepare(
+		`SELECT metric_name, timestamp, value, unit FROM cloudwatch_datapoints WHERE run_id = ? AND metric_name LIKE 'os_%' ${phaseClause} ORDER BY metric_name, timestamp`
+	).all(runId, ...phaseArgs) as Array<{ metric_name: string; timestamp: string; value: number; unit: string }>;
+
+	if (rows.length === 0) return noData;
+
+	const byMetric = new Map<string, Array<{ timestamp: string; value: number; unit: string }>>();
+	for (const row of rows) {
+		const bucket = byMetric.get(row.metric_name) ?? [];
+		bucket.push({ timestamp: row.timestamp, value: row.value, unit: row.unit });
+		byMetric.set(row.metric_name, bucket);
+	}
+
+	const buildGroup = (
+		key: string,
+		label: string,
+		title: string,
+		metrics: string[],
+		kind: TelemetryValueKind = 'count'
+	): TelemetryChartMetric | null => {
+		const series: TelemetrySeries[] = [];
+		let colorIdx = 0;
+		for (const metricName of metrics) {
+			const pts = byMetric.get(metricName);
+			if (!pts || pts.length === 0) continue;
+			const points = pts
+				.map((p) => {
+					const tsMs = toMs(p.timestamp);
+					if (tsMs === null) return null;
+					return { t: tsMs - runStartMs, v: p.value } as TelemetrySeriesPoint;
+				})
+				.filter((p): p is TelemetrySeriesPoint => p !== null);
+			if (points.length > 0) {
+				series.push({ label: metricName, color: COLORS[colorIdx % COLORS.length], points });
+				colorIdx++;
+			}
+		}
+		if (series.length === 0) return null;
+		return { key, label, kind, title, series };
+	};
+
+	// Discover dynamic device names from metric names like os_disk_read_kbs_sda
+	const allMetricNames = [...byMetric.keys()];
+	const diskDevices = [...new Set(
+		allMetricNames
+			.filter((n) => n.startsWith('os_disk_read_kbs_'))
+			.map((n) => n.replace('os_disk_read_kbs_', ''))
+	)];
+
+	const cpuGroup = buildGroup('os_cpu', 'CPU', 'CPU (%)',
+		['os_cpu_usr', 'os_cpu_sys', 'os_cpu_iowait', 'os_cpu_steal', 'os_cpu_idle'], 'percent');
+	const memGroup = buildGroup('os_mem', 'Memory', 'Memory (KB)',
+		['os_mem_free_kb', 'os_mem_swapped_kb'], 'bytes');
+	const diskGroups = diskDevices.map((dev) =>
+		buildGroup(`os_disk_${dev}`, `Disk ${dev}`, `Disk ${dev}`,
+			[`os_disk_read_kbs_${dev}`, `os_disk_write_kbs_${dev}`, `os_disk_util_pct_${dev}`])
+	);
+	const netGroup = buildGroup('os_net', 'Network', 'Network (KB/s)',
+		allMetricNames.filter((n) => n.startsWith('os_net_')));
+
+	const chartMetrics = [cpuGroup, memGroup, ...diskGroups, netGroup].filter((g): g is TelemetryChartMetric => g !== null);
+
+	// Summary cards
+	const cpuIoWaitPts = byMetric.get('os_cpu_iowait');
+	const memFreePts = byMetric.get('os_mem_free_kb');
+	const summary: TelemetryCard[] = [
+		...(cpuIoWaitPts && cpuIoWaitPts.length > 0
+			? [metricCard('os_cpu_iowait_peak', 'Peak IO Wait', 'percent', Math.max(...cpuIoWaitPts.map((p) => p.value)) / 100)]
+			: []),
+		...(memFreePts && memFreePts.length > 0
+			? [metricCard('os_mem_free_min', 'Min Free Mem', 'bytes', Math.min(...memFreePts.map((p) => p.value)) * 1024)]
+			: [])
+	];
+
+	const tableRows = [...byMetric.entries()].map(([name, pts]) => ({
+		metric: name,
+		value: pts[pts.length - 1]?.value ?? null,
+		unit: pts[pts.length - 1]?.unit ?? '',
+		samples: pts.length,
+		value_kind: 'count' as const
+	}));
+	const tableSnapshots: TelemetryTableSnapshot[] = [...new Set(rows.map((row) => row.timestamp))]
+		.sort((a, b) => a.localeCompare(b))
+		.map((timestamp) => {
+			const tMs = toMs(timestamp);
+			if (tMs === null) return null;
+			const rowsAtTime = [...byMetric.entries()]
+				.map(([name, pts]) => {
+					const point = pts.find((entry) => entry.timestamp === timestamp);
+					if (!point) return null;
+					return { metric: name, value: point.value, unit: point.unit ?? '', samples: pts.length, value_kind: 'count' as const };
+				})
+				.filter((row): row is NonNullable<typeof row> => row !== null);
+			if (rowsAtTime.length === 0) return null;
+			return { t: tMs - runStartMs, rows: rowsAtTime };
+		})
+		.filter((snapshot): snapshot is NonNullable<typeof snapshot> => snapshot !== null);
+
+	return {
+		key: 'os_metrics',
+		label: 'SSH Metrics',
+		status: 'ok',
+		summary,
+		chartTitle: 'OS metrics (via SSH)',
+		chartSeries: chartMetrics[0]?.series ?? [],
+		chartMetrics,
+		defaultChartMetricKey: chartMetrics[0]?.key,
+		tableTitle: 'OS metrics (last value per metric)',
+		tableColumns: [
+			{ key: 'metric', label: 'Metric', kind: 'text' },
+			{ key: 'value', label: 'Last Value', kind: 'count' },
+			{ key: 'unit', label: 'Unit', kind: 'text' },
+			{ key: 'samples', label: 'Data Points', kind: 'count' }
+		],
+		tableRows,
+		tableSnapshots
+	};
+}
+
 function buildCloudWatchSection(db: Database.Database, runId: number, runStartMs: number, selectedPhases: TelemetryPhase[]): TelemetrySection {
 	const noData: TelemetrySection = {
 		key: 'cloudwatch',
@@ -2236,6 +2377,7 @@ export function buildRunTelemetry(db: Database.Database, runId: number, phases?:
 		buildStatioUserTablesSection(statioUserTableRows, runStartMs),
 		buildStatioUserIndexesSection(statioUserIndexRows, runStartMs),
 		buildStatioUserSequencesSection(statioUserSequenceRows, runStartMs),
+		buildOsMetricsSection(db, runId, runStartMs, selectedPhases),
 		buildCloudWatchSection(db, runId, runStartMs, selectedPhases)
 	];
 

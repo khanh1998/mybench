@@ -610,7 +610,7 @@
   <button class="tab-btn" class:active={activeTab === 'cloudwatch'}
     disabled={!done}
     title={!done ? 'Available after run completes' : ''}
-    onclick={() => activeTab = 'cloudwatch'}>CloudWatch</button>
+    onclick={() => activeTab = 'cloudwatch'}>Host Metrics</button>
 </div>
 
 {#if activeTab === 'overview'}
@@ -961,14 +961,14 @@
   <DatabaseTelemetry
     {runId}
     active={activeTab === 'telemetry' && done}
-    excludeSectionKeys={['cloudwatch']}
+    excludeSectionKeys={['cloudwatch', 'os_metrics']}
   />
 {:else if activeTab === 'cloudwatch'}
   <DatabaseTelemetry
     {runId}
     active={activeTab === 'cloudwatch' && done}
-    title="CloudWatch"
-    includeSectionKeys={['cloudwatch']}
+    title="Host Metrics"
+    includeSectionKeys={['cloudwatch', 'os_metrics']}
     showHeroCards={false}
   />
 {/if}

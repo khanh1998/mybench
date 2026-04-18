@@ -95,7 +95,12 @@ export function generatePlan(designId: number, overrides: PlanRunSettingsOverrid
 		ssl: false,
 		aws_region: '',
 		rds_instance_id: '',
-		enhanced_monitoring: false
+		enhanced_monitoring: false,
+		ssh_enabled: false,
+		ssh_host: '',
+		ssh_port: 22,
+		ssh_user: '',
+		ssh_private_key: ''
 	};
 	if (resolvedServerId) {
 		const server = db.prepare('SELECT * FROM pg_servers WHERE id = ?').get(resolvedServerId) as PgServer | undefined;
@@ -109,7 +114,12 @@ export function generatePlan(designId: number, overrides: PlanRunSettingsOverrid
 				ssl: !!server.ssl,
 				aws_region: server.aws_region ?? '',
 				rds_instance_id: server.rds_instance_id ?? '',
-				enhanced_monitoring: !!server.enhanced_monitoring
+				enhanced_monitoring: !!server.enhanced_monitoring,
+				ssh_enabled: !!server.ssh_enabled,
+				ssh_host: server.ssh_host ?? '',
+				ssh_port: server.ssh_port ?? 22,
+				ssh_user: server.ssh_user ?? '',
+				ssh_private_key: server.ssh_private_key ?? ''
 			};
 		}
 	}

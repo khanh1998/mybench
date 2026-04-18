@@ -50,6 +50,9 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 		Snapshots: make(map[string][]result.SnapshotRow),
 	}
 
+	// Start OS metrics collection via SSH if configured.
+	osCollector := NewOSMetricsCollector(opts.Plan.Server)
+
 	// Sort enabled steps by position.
 	steps := make([]plan.Step, 0, len(opts.Plan.Steps))
 	for _, s := range opts.Plan.Steps {
@@ -191,6 +194,14 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 		// Track post phase start time.
 		if seenPgbench && step.Type != "pgbench" && res.Run.PostStartedAt == "" {
 			res.Run.PostStartedAt = time.Now().UTC().Format(time.RFC3339)
+		}
+	}
+
+	// Stop OS metrics collection and store results.
+	if osCollector != nil {
+		pts := osCollector.Stop()
+		if len(pts) > 0 {
+			res.OSMetrics = &result.OSMetricsResult{DataPoints: pts}
 		}
 	}
 

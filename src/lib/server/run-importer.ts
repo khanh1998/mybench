@@ -65,6 +65,9 @@ export interface RunnerResult {
 	cloudwatch_metrics?: {
 		data_points?: Array<{ metric_name: string; timestamp: string; value: number; unit: string }>;
 	};
+	os_metrics?: {
+		data_points?: Array<{ metric_name: string; timestamp: string; value: number; unit: string }>;
+	};
 }
 
 function normalizeSqliteValue(value: unknown): unknown {
@@ -229,22 +232,31 @@ export function importResultIntoRun(runId: number, result: RunnerResult): void {
 
 	// Insert CloudWatch data points, tagging each with its phase by comparing
 	// the data point timestamp against bench_started_at / post_started_at.
+	const benchStartedAt = result.run.bench_started_at ?? null;
+	const postStartedAt = result.run.post_started_at ?? null;
+	const cwPhase = (ts: string): string => {
+		if (!benchStartedAt || ts < benchStartedAt) return 'pre';
+		if (!postStartedAt || ts < postStartedAt) return 'bench';
+		return 'post';
+	};
+	const ins = db.prepare(
+		`INSERT INTO cloudwatch_datapoints (run_id, metric_name, timestamp, value, unit, phase) VALUES (?, ?, ?, ?, ?, ?)`
+	);
+
 	const cwDataPoints = result.cloudwatch_metrics?.data_points;
 	if (cwDataPoints && cwDataPoints.length > 0) {
-		const benchStartedAt = result.run.bench_started_at ?? null;
-		const postStartedAt = result.run.post_started_at ?? null;
-
-		const cwPhase = (ts: string): string => {
-			if (!benchStartedAt || ts < benchStartedAt) return 'pre';
-			if (!postStartedAt || ts < postStartedAt) return 'bench';
-			return 'post';
-		};
-
-		const ins = db.prepare(
-			`INSERT INTO cloudwatch_datapoints (run_id, metric_name, timestamp, value, unit, phase) VALUES (?, ?, ?, ?, ?, ?)`
-		);
 		db.transaction(() => {
 			for (const dp of cwDataPoints) {
+				ins.run(runId, dp.metric_name, dp.timestamp, dp.value, dp.unit ?? '', cwPhase(dp.timestamp));
+			}
+		})();
+	}
+
+	// Insert OS metrics (SSH-collected) — same table, metric_name has os_ prefix.
+	const osDataPoints = result.os_metrics?.data_points;
+	if (osDataPoints && osDataPoints.length > 0) {
+		db.transaction(() => {
+			for (const dp of osDataPoints) {
 				ins.run(runId, dp.metric_name, dp.timestamp, dp.value, dp.unit ?? '', cwPhase(dp.timestamp));
 			}
 		})();

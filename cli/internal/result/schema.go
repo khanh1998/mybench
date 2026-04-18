@@ -2,13 +2,19 @@ package result
 
 // Result is the top-level structure written to result.json.
 type Result struct {
-	Version          int                      `json:"version"`
-	DesignID         int                      `json:"design_id"`
-	RunnerVersion    string                   `json:"runner_version"`
-	Run              RunSummary               `json:"run"`
-	Steps            []StepResult             `json:"steps"`
-	Snapshots        map[string][]SnapshotRow `json:"snapshots"`
-	CloudWatchMetrics *CloudWatchResult       `json:"cloudwatch_metrics,omitempty"`
+	Version           int                      `json:"version"`
+	DesignID          int                      `json:"design_id"`
+	RunnerVersion     string                   `json:"runner_version"`
+	Run               RunSummary               `json:"run"`
+	Steps             []StepResult             `json:"steps"`
+	Snapshots         map[string][]SnapshotRow `json:"snapshots"`
+	CloudWatchMetrics *CloudWatchResult        `json:"cloudwatch_metrics,omitempty"`
+	OSMetrics         *OSMetricsResult         `json:"os_metrics,omitempty"`
+}
+
+// OSMetricsResult holds OS-level metrics collected via SSH during the run.
+type OSMetricsResult struct {
+	DataPoints []CloudWatchDataPoint `json:"data_points"`
 }
 
 // CloudWatchResult holds all CloudWatch data points collected for a run.

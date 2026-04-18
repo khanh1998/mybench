@@ -1058,6 +1058,28 @@ FROM snap_pg_stat_bgwriter WHERE _run_id = ? ORDER BY _collected_at DESC LIMIT 1
 		db.prepare(`INSERT INTO schema_migrations (id) VALUES (?)`).run('cloudwatch_phase_v1');
 	}
 
+	// SSH columns on pg_servers for OS metrics collection
+	const pgServerSshMigrated = db.prepare(`SELECT id FROM schema_migrations WHERE id = 'pg_server_ssh_v1'`).get();
+	if (!pgServerSshMigrated) {
+		const pgServerCols = (db.pragma(`table_info(pg_servers)`) as { name: string }[]).map((c) => c.name);
+		if (!pgServerCols.includes('ssh_enabled')) {
+			db.exec(`ALTER TABLE pg_servers ADD COLUMN ssh_enabled INTEGER NOT NULL DEFAULT 0`);
+		}
+		if (!pgServerCols.includes('ssh_host')) {
+			db.exec(`ALTER TABLE pg_servers ADD COLUMN ssh_host TEXT`);
+		}
+		if (!pgServerCols.includes('ssh_port')) {
+			db.exec(`ALTER TABLE pg_servers ADD COLUMN ssh_port INTEGER NOT NULL DEFAULT 22`);
+		}
+		if (!pgServerCols.includes('ssh_user')) {
+			db.exec(`ALTER TABLE pg_servers ADD COLUMN ssh_user TEXT`);
+		}
+		if (!pgServerCols.includes('ssh_private_key')) {
+			db.exec(`ALTER TABLE pg_servers ADD COLUMN ssh_private_key TEXT`);
+		}
+		db.prepare(`INSERT INTO schema_migrations (id) VALUES (?)`).run('pg_server_ssh_v1');
+	}
+
 	// weight_expr on pgbench_scripts (allows {{PARAM}} expressions for weights)
 	const scriptCols = (db.prepare(`PRAGMA table_info(pgbench_scripts)`).all() as { name: string }[]).map(c => c.name);
 	if (!scriptCols.includes('weight_expr')) {

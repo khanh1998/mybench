@@ -16,6 +16,11 @@ export interface PgServer {
 	rds_instance_id: string;
 	aws_region: string;
 	enhanced_monitoring: number; // 0 or 1
+	ssh_enabled: number; // 0 or 1
+	ssh_host: string | null; // null = fall back to host
+	ssh_port: number;
+	ssh_user: string | null;
+	ssh_private_key: string | null;
 }
 
 export interface PgStatTableSelection {

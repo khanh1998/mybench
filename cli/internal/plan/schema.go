@@ -38,6 +38,12 @@ type ServerConfig struct {
 	AWSRegion          string `json:"aws_region"`
 	RDSInstanceID      string `json:"rds_instance_id"`
 	EnhancedMonitoring bool   `json:"enhanced_monitoring"`
+	// SSH config for OS metrics collection on EC2/VPS database hosts.
+	SSHEnabled    bool   `json:"ssh_enabled"`
+	SSHHost       string `json:"ssh_host"`        // empty = use Host
+	SSHPort       int    `json:"ssh_port"`
+	SSHUser       string `json:"ssh_user"`
+	SSHPrivateKey string `json:"ssh_private_key"` // PEM content
 }
 
 // RunSettings holds timing configuration for snapshot collection.
