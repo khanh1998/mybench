@@ -69,11 +69,12 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 
 	for _, step := range steps {
 		// Determine phase.
+		isBenchStep := step.Type == "pgbench" || step.Type == "sysbench"
 		var phase string
 		switch {
 		case !seenPgbench:
 			phase = "pre"
-		case seenPgbench && step.Type != "pgbench":
+		case seenPgbench && !isBenchStep:
 			phase = "post"
 		default:
 			phase = "bench"
@@ -178,6 +179,37 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 				return res, fmt.Errorf("pgbench step %q: %w", step.Name, err)
 			}
 
+		case "sysbench":
+			if opts.Progress {
+				fmt.Printf("[sysbench] %s\n", step.Name)
+			}
+			benchStartTime = time.Now().UTC()
+			res.Run.BenchStartedAt = benchStartTime.Format(time.RFC3339)
+			sbRes, err := runSysbenchStep(ctx, opts, step, pool, res.Snapshots, opts.Plan.RunSettings.SnapshotIntervalSeconds)
+			benchEndTime = time.Now().UTC()
+			seenPgbench = true
+			stepRes.Command = sbRes.Command
+			stepRes.Log = tailFile(sbRes.LogPath, opts.LogTailLines)
+			stepRes.ProcessedScript = sbRes.ProcessedScript
+			if sbRes.SysbenchSummary != nil {
+				stepRes.SysbenchSummary = sbRes.SysbenchSummary
+			}
+
+			// Capture top-level metrics even on error (partial results).
+			res.Run.TPS = sbRes.TPS
+			res.Run.LatencyAvgMs = sbRes.LatencyAvgMs
+			res.Run.Transactions = sbRes.Transactions
+
+			if err != nil {
+				stepErr = err
+				stepRes.Status = "failed"
+				stepRes.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+				res.Steps = append(res.Steps, stepRes)
+				res.Run.Status = "failed"
+				res.Run.FinishedAt = stepRes.FinishedAt
+				return res, fmt.Errorf("sysbench step %q: %w", step.Name, err)
+			}
+
 		default:
 			fmt.Fprintf(os.Stderr, "warning: unknown step type %q for step %q, skipping\n", step.Type, step.Name)
 		}
@@ -186,13 +218,13 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 		stepRes.FinishedAt = time.Now().UTC().Format(time.RFC3339)
 		res.Steps = append(res.Steps, stepRes)
 
-		// Update phase for next step if we just ran pgbench.
-		if step.Type == "pgbench" {
+		// Update phase for next step if we just ran a bench step.
+		if isBenchStep {
 			seenPgbench = true
 		}
 
 		// Track post phase start time.
-		if seenPgbench && step.Type != "pgbench" && res.Run.PostStartedAt == "" {
+		if seenPgbench && !isBenchStep && res.Run.PostStartedAt == "" {
 			res.Run.PostStartedAt = time.Now().UTC().Format(time.RFC3339)
 		}
 	}

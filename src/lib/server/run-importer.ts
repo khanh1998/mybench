@@ -54,6 +54,25 @@ export interface RunnerResultStep {
 		transactions?: number;
 		failed_transactions?: number;
 	}>;
+	sysbench_summary?: {
+		tps?: number;
+		qps?: number;
+		latency_avg_ms?: number;
+		latency_min_ms?: number;
+		latency_max_ms?: number;
+		latency_p95_ms?: number | null;
+		total_time_secs?: number;
+		total_events?: number;
+		transactions?: number;
+		errors?: number;
+		threads?: number;
+		queries_read?: number;
+		queries_write?: number;
+		queries_other?: number;
+		queries_total?: number;
+		reconnects?: number;
+		rows_per_sec?: number | null;
+	};
 	started_at: string;
 	finished_at: string;
 }
@@ -142,9 +161,10 @@ export function importResultIntoRun(runId: number, result: RunnerResult): void {
 		const insStep = db.prepare(`
 			INSERT INTO run_step_results (
 				run_id, step_id, position, name, type, status, command, stdout,
-				processed_script, pgbench_summary_json, pgbench_scripts_json, started_at, finished_at
+				processed_script, pgbench_summary_json, pgbench_scripts_json,
+				sysbench_summary_json, started_at, finished_at
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`);
 		db.transaction(() => {
 			for (const s of steps) {
@@ -160,6 +180,7 @@ export function importResultIntoRun(runId: number, result: RunnerResult): void {
 					s.processed_script ?? '',
 					s.pgbench_summary ? JSON.stringify(s.pgbench_summary) : '',
 					s.pgbench_scripts ? JSON.stringify(s.pgbench_scripts) : '',
+					s.sysbench_summary ? JSON.stringify(s.sysbench_summary) : '',
 					s.started_at,
 					s.finished_at
 				);
