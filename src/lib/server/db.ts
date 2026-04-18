@@ -649,6 +649,7 @@ function migrate(db: Database.Database) {
   if (!stepResultCols.includes('processed_script')) db.exec(`ALTER TABLE run_step_results ADD COLUMN processed_script TEXT NOT NULL DEFAULT ''`);
   if (!stepResultCols.includes('pgbench_summary_json')) db.exec(`ALTER TABLE run_step_results ADD COLUMN pgbench_summary_json TEXT NOT NULL DEFAULT ''`);
   if (!stepResultCols.includes('pgbench_scripts_json')) db.exec(`ALTER TABLE run_step_results ADD COLUMN pgbench_scripts_json TEXT NOT NULL DEFAULT ''`);
+  if (!stepResultCols.includes('sysbench_summary_json')) db.exec(`ALTER TABLE run_step_results ADD COLUMN sysbench_summary_json TEXT NOT NULL DEFAULT ''`);
 
 
   // One-time backfill: migrate existing pgbench step scripts (idempotent)

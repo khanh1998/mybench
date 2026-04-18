@@ -72,6 +72,7 @@
   const STEP_TYPE_OPTIONS: { value: DesignStepType; label: string }[] = [
     { value: 'sql', label: 'SQL' },
     { value: 'pgbench', label: 'pgbench' },
+    { value: 'sysbench', label: 'sysbench' },
     { value: 'collect', label: 'wait' },
     { value: 'pg_stat_statements_reset', label: 'reset pg_stat_statements' },
     { value: 'pg_stat_statements_collect', label: 'collect pg_stat_statements' }
@@ -650,13 +651,14 @@
         <input id="run-snap" type="number" bind:value={runSnapshotInterval} min="5" max="300" />
       </div>
 
-      <!-- pgbench steps summary -->
-      {#if design.steps.filter(s => s.enabled && s.type === 'pgbench').length > 0}
+      <!-- bench steps summary -->
+      {#if design.steps.filter(s => s.enabled && (s.type === 'pgbench' || s.type === 'sysbench')).length > 0}
         <div class="run-steps-summary">
-          <div class="run-steps-label">pgbench steps</div>
-          {#each design.steps.filter(s => s.enabled && s.type === 'pgbench') as s}
+          <div class="run-steps-label">bench steps</div>
+          {#each design.steps.filter(s => s.enabled && (s.type === 'pgbench' || s.type === 'sysbench')) as s}
             <div class="run-step-row">
               <span class="run-step-name">{s.name}</span>
+              <span class="badge badge-{s.type}" style="font-size:10px;padding:1px 5px">{s.type}</span>
               {#if s.pgbench_options}
                 <code class="run-step-opts">{s.pgbench_options}</code>
               {/if}
@@ -966,6 +968,13 @@
             class="options-input"
             title="pgbench options"
           />
+        {:else if selectedStep.type === 'sysbench'}
+          <input
+            bind:value={selectedStep.pgbench_options}
+            placeholder="--threads=10 --time=60"
+            class="options-input"
+            title="sysbench options"
+          />
         {:else if selectedStep.type === 'collect'}
           <label class="collect-duration-label">
             Wait
@@ -1008,6 +1017,10 @@
             <br>This is a one-time collection step, not a time-series snapshot.
             <br>Place it after pgbench to capture the workload you just ran.
           </div>
+        </div>
+      {:else if selectedStep.type === 'sysbench'}
+        <div class="editor-wrap">
+          <CodeEditor bind:value={selectedStep.script} params={paramNames} language="lua" />
         </div>
       {:else if selectedStep.type === 'pgbench'}
         {@const scripts = selectedStep.pgbench_scripts ?? []}

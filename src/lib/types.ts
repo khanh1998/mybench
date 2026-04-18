@@ -1,6 +1,7 @@
 export type DesignStepType =
 	| 'sql'
 	| 'pgbench'
+	| 'sysbench'
 	| 'collect'
 	| 'pg_stat_statements_reset'
 	| 'pg_stat_statements_collect';

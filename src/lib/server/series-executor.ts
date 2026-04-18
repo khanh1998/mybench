@@ -6,6 +6,7 @@ import { createPool } from '$lib/server/pg-client';
 import { getEnabledTablesForRun } from '$lib/server/pg-stats';
 import { createRun } from '$lib/server/run-manager';
 import { executeLocalRunAsync } from '$lib/server/run-executor';
+import { BENCH_STEP_TYPES } from '$lib/server/step-executors';
 import {
 	connectSsh,
 	execStreaming,
@@ -233,8 +234,8 @@ async function executeLocalSeriesAsync(
 		let preCollectSecs: number;
 		let postCollectSecs: number;
 		if (hasCollectSteps) {
-			const firstPgbenchPos = steps.find(s => s.type === 'pgbench')?.position ?? Infinity;
-			const lastPgbenchPos = [...steps].reverse().find(s => s.type === 'pgbench')?.position ?? -Infinity;
+			const firstPgbenchPos = steps.find(s => BENCH_STEP_TYPES.includes(s.type))?.position ?? Infinity;
+			const lastPgbenchPos = [...steps].reverse().find(s => BENCH_STEP_TYPES.includes(s.type))?.position ?? -Infinity;
 			preCollectSecs = steps.filter(s => s.type === 'collect' && s.position < firstPgbenchPos).reduce((sum, s) => sum + (s.duration_secs ?? 0), 0);
 			postCollectSecs = steps.filter(s => s.type === 'collect' && s.position > lastPgbenchPos).reduce((sum, s) => sum + (s.duration_secs ?? 0), 0);
 		} else {

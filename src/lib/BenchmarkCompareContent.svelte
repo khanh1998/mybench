@@ -34,10 +34,17 @@
   } = $props();
 
   const COLORS = ['#0066cc', '#e6531d', '#00996b', '#9b36b7', '#cc8800'];
-  const SUMMARY_METRICS = [
+  const PGBENCH_SUMMARY_METRICS = [
     { key: 'tps' as const, label: 'TPS', decimals: 2, higherBetter: true },
     { key: 'latency_avg_ms' as const, label: 'Avg Latency (ms)', decimals: 3, higherBetter: false },
     { key: 'latency_stddev_ms' as const, label: 'Latency StdDev (ms)', decimals: 3, higherBetter: false },
+    { key: 'transactions' as const, label: 'Transactions', decimals: 0, higherBetter: true }
+  ];
+  const SYSBENCH_SUMMARY_METRICS = [
+    { key: 'tps' as const, label: 'TPS', decimals: 2, higherBetter: true },
+    { key: 'qps' as const, label: 'QPS', decimals: 2, higherBetter: true },
+    { key: 'latency_avg_ms' as const, label: 'Avg Latency (ms)', decimals: 2, higherBetter: false },
+    { key: 'latency_p95_ms' as const, label: 'p95 Latency (ms)', decimals: 2, higherBetter: false },
     { key: 'transactions' as const, label: 'Transactions', decimals: 0, higherBetter: true }
   ];
 
@@ -151,6 +158,7 @@
 
   const summaryContextRows = $derived((): SummaryContextRow[] => {
     const runs = selectedRunIds.map((id) => getRunForId(id));
+    const isSysbench = benchType() === 'sysbench';
     const rows: SummaryContextRow[] = [
       {
         label: 'Benchmark window',
@@ -160,46 +168,86 @@
         label: 'Total runtime',
         values: runs.map((run) => formatDuration(durationSecondsBetween(run?.started_at ?? null, run?.finished_at ?? null)))
       },
-      {
-        label: 'Transaction type',
-        values: runs.map((run) => run?.transaction_type ?? null)
-      },
-      {
-        label: 'Scaling factor',
-        values: runs.map((run) => formatOptionalNumber(run?.scaling_factor))
-      },
-      {
-        label: 'Query mode',
-        values: runs.map((run) => run?.query_mode ?? null)
-      },
-      {
-        label: 'Duration',
-        values: runs.map((run) => {
-          if (run?.duration_secs != null) return `${run.duration_secs.toLocaleString()}s`;
-          const value = getRunParamValue(run, ['TIME', 'DURATION', 'DURATION_SECS']);
-          return value ? `${value}s` : null;
-        })
-      },
-      {
-        label: 'Connections',
-        values: runs.map((run) => formatOptionalNumber(run?.number_of_clients) ?? getRunParamValue(run, ['CONNECTION', 'CONNECTIONS', 'CLIENTS', 'NUM_CLIENTS']))
-      },
-      {
-        label: 'Threads',
-        values: runs.map((run) => formatOptionalNumber(run?.number_of_threads) ?? getRunParamValue(run, ['THREAD', 'THREADS', 'JOBS']))
-      },
-      {
-        label: 'Maximum tries',
-        values: runs.map((run) => formatOptionalNumber(run?.maximum_tries))
-      },
-      {
-        label: 'Initial connection time',
-        values: runs.map((run) => formatOptionalMilliseconds(run?.initial_connection_time_ms))
-      }
+      ...(isSysbench ? [
+        {
+          label: 'Threads',
+          values: runs.map((run) => formatOptionalNumber(run?.sysbench_threads) ?? getRunParamValue(run, ['THREADS', 'THREAD', 'NUM_THREADS']))
+        },
+        {
+          label: 'Duration',
+          values: runs.map((run) => {
+            if (run?.sysbench_total_time_secs != null) return `${run.sysbench_total_time_secs.toFixed(1)}s`;
+            const value = getRunParamValue(run, ['TIME', 'DURATION', 'DURATION_SECS']);
+            return value ? `${value}s` : null;
+          })
+        },
+        {
+          label: 'Total events',
+          values: runs.map((run) => formatOptionalNumber(run?.sysbench_total_events))
+        },
+        {
+          label: 'Errors',
+          values: runs.map((run) => (run?.sysbench_errors != null && run.sysbench_errors > 0) ? run.sysbench_errors.toLocaleString() : null)
+        }
+      ] : [
+        {
+          label: 'Transaction type',
+          values: runs.map((run) => run?.transaction_type ?? null)
+        },
+        {
+          label: 'Scaling factor',
+          values: runs.map((run) => formatOptionalNumber(run?.scaling_factor))
+        },
+        {
+          label: 'Query mode',
+          values: runs.map((run) => run?.query_mode ?? null)
+        },
+        {
+          label: 'Duration',
+          values: runs.map((run) => {
+            if (run?.duration_secs != null) return `${run.duration_secs.toLocaleString()}s`;
+            const value = getRunParamValue(run, ['TIME', 'DURATION', 'DURATION_SECS']);
+            return value ? `${value}s` : null;
+          })
+        },
+        {
+          label: 'Connections',
+          values: runs.map((run) => formatOptionalNumber(run?.number_of_clients) ?? getRunParamValue(run, ['CONNECTION', 'CONNECTIONS', 'CLIENTS', 'NUM_CLIENTS']))
+        },
+        {
+          label: 'Threads',
+          values: runs.map((run) => formatOptionalNumber(run?.number_of_threads) ?? getRunParamValue(run, ['THREAD', 'THREADS', 'JOBS']))
+        },
+        {
+          label: 'Maximum tries',
+          values: runs.map((run) => formatOptionalNumber(run?.maximum_tries))
+        },
+        {
+          label: 'Initial connection time',
+          values: runs.map((run) => formatOptionalMilliseconds(run?.initial_connection_time_ms))
+        }
+      ])
     ];
 
     return rows.filter((row) => row.values.some((value) => value !== null && value !== ''));
   });
+
+  const benchType = $derived((): 'pgbench' | 'sysbench' | 'mixed' | null => {
+    const types = new Set(
+      selectedRunIds.map((id) => getRunForId(id)?.bench_type).filter((t): t is 'pgbench' | 'sysbench' => t === 'pgbench' || t === 'sysbench')
+    );
+    if (types.size === 0) return null;
+    if (types.size === 1) return [...types][0];
+    return 'mixed';
+  });
+
+  const activeSummaryMetrics = $derived(
+    benchType() === 'sysbench' ? SYSBENCH_SUMMARY_METRICS : PGBENCH_SUMMARY_METRICS
+  );
+
+  const summaryTitle = $derived(
+    benchType() === 'sysbench' ? 'sysbench Summary' : 'pgbench Summary'
+  );
 
   $effect(() => {
     if (selectedRunIds.length < 2) activeCompareTab = 'load';
@@ -209,7 +257,7 @@
 {#if selectedRunIds.length >= 2}
   <div class="compare-top-grid">
     <div class="card">
-      <h3>pgbench Summary</h3>
+      <h3>{summaryTitle}</h3>
       <div class="table-wrap">
         <table class="summary-table">
           <thead>
@@ -222,7 +270,7 @@
             </tr>
           </thead>
           <tbody>
-            {#each SUMMARY_METRICS as metric}
+            {#each activeSummaryMetrics as metric}
               {@const numVals = selectedRunIds.map((runId) => {
                 const run = getRunForId(runId);
                 const value = run?.[metric.key] ?? null;

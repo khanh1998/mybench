@@ -1,5 +1,6 @@
 import getDb from '$lib/server/db';
 import { resolvePgbenchSummary } from '$lib/pgbench-summary';
+import { resolveSysbenchSummary } from '$lib/sysbench-summary';
 import type { PageServerLoad } from './$types';
 
 export const load: PageServerLoad = ({ params }) => {
@@ -20,9 +21,11 @@ export const load: PageServerLoad = ({ params }) => {
 		bench_started_at: string | null;
 		post_started_at: string | null;
 		finished_at: string | null;
+		bench_step_type: string | null;
 		pgbench_summary_json: string | null;
-		pgbench_stdout: string | null;
-		pgbench_stderr: string | null;
+		sysbench_summary_json: string | null;
+		bench_stdout: string | null;
+		bench_stderr: string | null;
 	}
 
 	const design = db.prepare('SELECT * FROM designs WHERE id = ?').get(id) as {
@@ -41,14 +44,16 @@ export const load: PageServerLoad = ({ params }) => {
 			`SELECT br.id, br.name, br.status, br.tps, br.latency_avg_ms, br.latency_stddev_ms, br.transactions,
 			        br.profile_name, br.run_params, br.started_at, br.bench_started_at, br.post_started_at, br.finished_at,
 			        br.series_id,
+			        rs.type AS bench_step_type,
 			        rs.pgbench_summary_json,
-			        substr(rs.stdout, 1, 5000) AS pgbench_stdout,
-			        substr(rs.stderr, 1, 2000) AS pgbench_stderr
+			        rs.sysbench_summary_json,
+			        substr(rs.stdout, 1, 5000) AS bench_stdout,
+			        substr(rs.stderr, 1, 2000) AS bench_stderr
 			 FROM benchmark_runs br
 			 LEFT JOIN run_step_results rs ON rs.id = (
 			   SELECT id
 			   FROM run_step_results
-			   WHERE run_id = br.id AND type = 'pgbench'
+			   WHERE run_id = br.id AND type IN ('pgbench', 'sysbench')
 			   ORDER BY position
 			   LIMIT 1
 			 )
@@ -57,14 +62,47 @@ export const load: PageServerLoad = ({ params }) => {
 		.all(id) as (CompareRunRow & { series_id: number | null })[];
 
 	const runs = rawRuns.map((run) => {
+		const isSysbench = run.bench_step_type === 'sysbench';
+
+		if (isSysbench) {
+			const summary = resolveSysbenchSummary({
+				sysbench_summary_json: run.sysbench_summary_json,
+				stdout: run.bench_stdout,
+				stderr: run.bench_stderr
+			});
+			return {
+				...run,
+				bench_type: 'sysbench' as const,
+				tps: summary?.tps ?? run.tps,
+				latency_avg_ms: summary?.latency_avg_ms ?? run.latency_avg_ms,
+				latency_stddev_ms: null,
+				transactions: summary?.transactions ?? run.transactions,
+				qps: summary?.qps ?? null,
+				latency_p95_ms: summary?.latency_p95_ms ?? null,
+				sysbench_threads: summary?.threads ?? null,
+				sysbench_total_time_secs: summary?.total_time_secs ?? null,
+				sysbench_total_events: summary?.total_events ?? null,
+				sysbench_errors: summary?.errors ?? null,
+				failed_transactions: null,
+				transaction_type: null,
+				scaling_factor: null,
+				query_mode: null,
+				number_of_clients: null,
+				number_of_threads: null,
+				maximum_tries: null,
+				duration_secs: null,
+				initial_connection_time_ms: null
+			};
+		}
+
 		const summary = resolvePgbenchSummary({
 			pgbench_summary_json: run.pgbench_summary_json,
-			stdout: run.pgbench_stdout,
-			stderr: run.pgbench_stderr
+			stdout: run.bench_stdout,
+			stderr: run.bench_stderr
 		});
-
 		return {
 			...run,
+			bench_type: 'pgbench' as const,
 			tps: summary?.tps ?? run.tps,
 			latency_avg_ms: summary?.latency_avg_ms ?? run.latency_avg_ms,
 			latency_stddev_ms: summary?.latency_stddev_ms ?? run.latency_stddev_ms,

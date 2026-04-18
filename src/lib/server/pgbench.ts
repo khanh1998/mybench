@@ -92,6 +92,16 @@ export function runPgbench(
 			}
 		});
 
+		proc.on('error', (err) => {
+			const msg = (err as NodeJS.ErrnoException).code === 'ENOENT'
+				? `pgbench not found. Ensure PostgreSQL client tools are installed and on PATH.`
+				: `Failed to spawn pgbench: ${err.message}`;
+			emitter.emit('line', `[ERROR] ${msg}`);
+			onLine(msg, 'stderr');
+			for (const p of tempFiles) { try { if (existsSync(p)) unlinkSync(p); } catch {} }
+			resolve({ tps: null, latencyAvgMs: null, latencyStddevMs: null, transactions: null, failedTransactions: null, exitCode: 1, command, pgbenchSummary: null, pgbenchScripts: [] });
+		});
+
 		proc.on('close', (code) => {
 			if (stdoutBuf) { emitter.emit('line', stdoutBuf); onLine(stdoutBuf, 'stdout'); }
 			if (stderrBuf) { emitter.emit('line', '[stderr] ' + stderrBuf); onLine(stderrBuf, 'stderr'); }

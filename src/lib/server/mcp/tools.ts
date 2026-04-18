@@ -85,7 +85,7 @@ and the recommended workflow for creating and running a benchmark plan.`
 				data_model: {
 					decisions: 'Top-level question you are answering (e.g. "Which table design is faster?"). Contains one or more designs.',
 					designs: 'One candidate design to benchmark (e.g. "plain table" vs "partitioned table"). Each design is linked to a database server and has steps + params.',
-					steps: 'Ordered list of actions: sql setup → wait for pre-stats → optional pg_stat_statements reset → pgbench load test → optional pg_stat_statements collect → wait for post-stats → sql teardown.',
+					steps: 'Ordered list of actions: sql setup → wait for pre-stats → optional pg_stat_statements reset → pgbench or sysbench load test → optional pg_stat_statements collect → wait for post-stats → sql teardown.',
 					params: 'Named values (e.g. NUM_USERS=1000) substituted as {{NAME}} in all step scripts.',
 					profiles: 'Named sets of param overrides (e.g. "small"=NUM_USERS:100, "large"=NUM_USERS:10000) for running the same design at different scales. Managed with upsert_profile/list_profiles/delete_profile.'
 				},
@@ -113,8 +113,20 @@ and the recommended workflow for creating and running a benchmark plan.`
 						},
 						note: 'Supports {{PARAM}} substitution in pgbench_options and in each pgbench script.'
 					},
+					sysbench: {
+						description: 'Runs a sysbench load test using a Lua script. Better than pgbench for custom workloads like variable batch inserts, because Lua allows dynamic payload generation (--batch-size, per-thread state, etc.). Measures TPS, p95 latency, and errors. NOTE: executor is currently a stub — implementation pending.',
+						fields: {
+							type: '"sysbench"',
+							name: 'string',
+							position: 'integer',
+							script: 'Lua script content (written to a temp file and passed to sysbench run)',
+							pgbench_options: 'sysbench CLI flags, e.g. "--threads={{NUM_CLIENTS}} --time=60 --batch-size={{BATCH_SIZE}}" (reuses this column until a dedicated column is added)',
+							enabled: 'boolean'
+						},
+						note: 'Supports {{PARAM}} substitution in script and pgbench_options. pg_stat_* snapshots wrap the run identically to pgbench.'
+					},
 					collect: {
-						description: 'Waits for duration_secs seconds while taking periodic pg_stat_* snapshots. Place before pgbench for a baseline window or after pgbench for a post-run window.',
+						description: 'Waits for duration_secs seconds while taking periodic pg_stat_* snapshots. Place before pgbench/sysbench for a baseline window or after for a post-run window.',
 						fields: {
 							type: '"collect"',
 							name: 'string',
@@ -144,7 +156,7 @@ and the recommended workflow for creating and running a benchmark plan.`
 						note: 'This is a one-time snapshot, not a duration-based time series collect step.'
 					}
 				},
-				param_syntax: 'Write {{PARAM_NAME}} in any step script or pgbench_options. Set the value with set_params. Example: "INSERT INTO users SELECT generate_series(1, {{NUM_USERS}})"',
+				param_syntax: 'Write {{PARAM_NAME}} in any step script or pgbench_options (also used for sysbench flags). Set the value with set_params. Example: "INSERT INTO users SELECT generate_series(1, {{NUM_USERS}})"',
 				design_server_assignment: 'When creating a design, you can set server_id, database, and snapshot settings with configure_design. You can also override server_id, database, snapshot_interval_seconds, and ec2_server_id at run time with run_design.',
 				recommended_workflow: [
 					'1. get_context (this tool) — understand conventions and see available servers',
@@ -153,11 +165,11 @@ and the recommended workflow for creating and running a benchmark plan.`
 					'4. configure_design(design_id, {server_id, database}) — assign a server from the database_servers list',
 					'5. get_db_schema(design_id) — see real table/column names from the live DB',
 					'6. set_params(design_id, [{name, value}]) — define {{PARAM}} values',
-					'7. upsert_step (repeat) — add sql setup, wait, optional pg_stat_statements reset, pgbench, optional pg_stat_statements collect, wait, sql teardown steps',
+					'7. upsert_step (repeat) — add sql setup, wait, optional pg_stat_statements reset, pgbench or sysbench load test, optional pg_stat_statements collect, wait, sql teardown steps',
 					'8. upsert_profile(design_id, name, values) — optional: create "small"/"large" profiles for different scales',
-					'9. validate_design(design_id) — check for issues (undefined params, missing server, no pgbench step) before running',
+					'9. validate_design(design_id) — check for issues (undefined params, missing server, no bench step) before running',
 					'10. run_design(design_id, {profile_id?, name?, server_id?, database?, snapshot_interval_seconds?, ec2_server_id?}) — start a local or EC2 test run and get run_id',
-					'11. get_run(run_id) — wait ~(pgbench -T seconds + collect durations) before first poll, then every ~30s',
+					'11. get_run(run_id) — wait ~(bench duration + collect durations) before first poll, then every ~30s',
 					'12. export_plan(design_id) — get plan.json for production mybench-runner CLI'
 				],
 				recommended_step_structure: {
@@ -595,27 +607,28 @@ Call this after create_design to assign a server before running the design.`,
 		{
 			description: `Adds a new step or updates an existing step in a design. If step_id is provided, updates that step; otherwise inserts a new one.
 Step types:
-  "sql"     — provide script (SQL text, supports {{PARAM}})
-  "pgbench" — provide pgbench_options and pgbench_scripts [{name, weight, script}]
-  "collect" — provide duration_secs (seconds to wait while collecting pg_stat_* snapshots)
+  "sql"      — provide script (SQL text, supports {{PARAM}})
+  "pgbench"  — provide pgbench_options and pgbench_scripts [{name, weight, script}]
+  "sysbench" — provide script (Lua script content) and pgbench_options (sysbench CLI flags). Executor is a stub — implementation pending.
+  "collect"  — provide duration_secs (seconds to wait while collecting pg_stat_* snapshots)
   "pg_stat_statements_reset"   — no extra fields; resets pg_stat_statements and logs a warning if unavailable
   "pg_stat_statements_collect" — no extra fields; captures one pg_stat_statements snapshot for the current database
 Use {{PARAM_NAME}} in scripts and pgbench_options — values come from set_params.`,
 			inputSchema: {
 				design_id: z.number().int(),
 				step_id: z.number().int().optional().describe('Omit to insert a new step'),
-				type: z.enum(['sql', 'pgbench', 'collect', 'pg_stat_statements_reset', 'pg_stat_statements_collect']),
+				type: z.enum(['sql', 'pgbench', 'sysbench', 'collect', 'pg_stat_statements_reset', 'pg_stat_statements_collect']),
 				name: z.string(),
 				position: z.number().int().describe('Execution order, 0-based. Lower = runs earlier.'),
 				enabled: z.boolean().default(true),
-				script: z.string().optional().describe('SQL text for type=sql'),
+				script: z.string().optional().describe('SQL text for type=sql; Lua script content for type=sysbench'),
 				no_transaction: z.boolean().optional().describe('If true, SQL runs without wrapping in a transaction'),
-				pgbench_options: z.string().optional().describe('pgbench CLI flags, e.g. "-c {{NUM_CLIENTS}} -j 2 -T 60 --no-vacuum"'),
+				pgbench_options: z.string().optional().describe('pgbench CLI flags for type=pgbench (e.g. "-c {{NUM_CLIENTS}} -j 2 -T 60 --no-vacuum"); sysbench CLI flags for type=sysbench (e.g. "--threads={{NUM_CLIENTS}} --time=60 --batch-size={{BATCH_SIZE}}")'),
 				pgbench_scripts: z.array(z.object({
 					name: z.string(),
 					weight: z.number().int().default(1),
 					script: z.string().describe('pgbench custom script: use \\set, BEGIN, SQL, END. Supports {{PARAM}}.')
-				})).optional().describe('Required for type=pgbench'),
+				})).optional().describe('Custom scripts for type=pgbench only'),
 				duration_secs: z.number().int().optional().describe('Snapshot collection duration for type=collect')
 			}
 		},
@@ -777,7 +790,7 @@ Checks performed:
   - No server configured
   - No database set
   - No enabled steps
-  - No enabled pgbench step (nothing to benchmark)
+  - No enabled bench step (pgbench or sysbench) — nothing to benchmark
   - pgbench step with no scripts defined
   - wait step with duration_secs = 0
   - {{PARAM}} placeholders used in scripts/options but not defined in design params
@@ -824,9 +837,9 @@ Call this before run_design or export_plan to catch problems early.`,
 			if (enabledSteps.length === 0) {
 				issues.push({ severity: 'error', code: 'NO_ENABLED_STEPS', message: 'No enabled steps. Enable at least one step before running.' });
 			} else {
-				const hasPgbench = enabledSteps.some(s => s.type === 'pgbench');
-				if (!hasPgbench) {
-					issues.push({ severity: 'warning', code: 'NO_PGBENCH_STEP', message: 'No enabled pgbench step. The run will execute but produce no benchmark metrics (TPS, latency).' });
+				const hasBenchStep = enabledSteps.some(s => s.type === 'pgbench' || s.type === 'sysbench');
+				if (!hasBenchStep) {
+					issues.push({ severity: 'warning', code: 'NO_BENCH_STEP', message: 'No enabled pgbench or sysbench step. The run will execute but produce no benchmark metrics (TPS, latency).' });
 				}
 
 				for (const step of enabledSteps) {

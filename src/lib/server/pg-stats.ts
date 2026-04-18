@@ -235,3 +235,22 @@ export function getEnabledTablesForRun(serverId: number): string[] {
 		.all(serverId) as { table_name: string }[];
 	return rows.map((r) => r.table_name).filter((t) => t in SNAP_TABLE_MAP);
 }
+
+export async function collectForDuration(
+	pool: pg.Pool,
+	runId: number,
+	tables: string[],
+	phase: 'pre' | 'bench' | 'post',
+	durationSecs: number,
+	intervalSecs: number
+): Promise<void> {
+	if (!tables.length) return;
+	const end = Date.now() + durationSecs * 1000;
+	do {
+		await collectSnapshot(pool, runId, tables, phase);
+		await collectPgLocksSnapshot(pool, runId, phase);
+		const wait = Math.min(intervalSecs * 1000, end - Date.now());
+		if (wait > 0) await new Promise(r => setTimeout(r, wait));
+	} while (Date.now() < end);
+}
+

@@ -1,6 +1,8 @@
 <script lang="ts">
   import CodeMirror from 'svelte-codemirror-editor';
   import { sql } from '@codemirror/lang-sql';
+  import { StreamLanguage, LanguageSupport } from '@codemirror/language';
+  import { lua } from '@codemirror/legacy-modes/mode/lua';
   import { oneDark } from '@codemirror/theme-one-dark';
   import { vim } from '@replit/codemirror-vim';
   import { paramAutocomplete, paramLinter } from '$lib/codemirror-params';
@@ -12,9 +14,14 @@
     onchange?: (value: string) => void;
     params?: string[];
     schema?: Record<string, string[]>;
+    language?: 'sql' | 'lua';
   }
 
-  let { value = $bindable(''), onchange, params, schema }: Props = $props();
+  let { value = $bindable(''), onchange, params, schema, language = 'sql' }: Props = $props();
+
+  const lang: LanguageSupport = $derived(
+    language === 'lua' ? new LanguageSupport(StreamLanguage.define(lua)) : sql({ schema })
+  );
 
   let vimMode = $state(browser ? localStorage.getItem('editor-vim') === '1' : false);
 
@@ -36,7 +43,7 @@
   <div class="editor-body">
     <CodeMirror
       bind:value
-      lang={sql({ schema })}
+      lang={lang}
       theme={oneDark}
       lineNumbers
       {onchange}
