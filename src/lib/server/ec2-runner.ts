@@ -108,13 +108,15 @@ export interface Ec2TestResult {
 	ok: boolean;
 	ssh: { ok: boolean; error?: string };
 	binary?: { ok: boolean; version?: string; path?: string; error?: string };
+	pgbench?: { ok: boolean; version?: string; error?: string };
+	sysbench?: { ok: boolean; version?: string; error?: string };
 	iam?: { ok: boolean; role?: string; error?: string };
 }
 
 /**
- * Tests an EC2 SSH connection and verifies mybench-runner binary is present.
+ * Tests an EC2 SSH connection and verifies mybench-runner, pgbench, and sysbench are present.
  * Returns granular results for each check so the UI can report them separately.
- * Stops after the first failure (no point checking binary if SSH fails).
+ * Stops after the first failure (no point checking tools if SSH fails).
  */
 export async function testEc2Connection(server: Ec2Server): Promise<Ec2TestResult> {
 	let conn: Client | undefined;
@@ -128,24 +130,37 @@ export async function testEc2Connection(server: Ec2Server): Promise<Ec2TestResul
 	}
 
 	try {
-		// SSH succeeded — now check the binary
 		const homeResult = await exec(conn, 'echo $HOME');
 		const homeDir = homeResult.stdout.trim();
 		const remoteDir = server.remote_dir.replace(/^~/, homeDir);
 		const binaryPath = `${remoteDir}/mybench-runner`;
 
+		// Check mybench-runner binary
 		const check = await exec(conn, `test -x ${shellQuote(binaryPath)} && echo ok`);
-		if (check.code !== 0 || !check.stdout.trim().startsWith('ok')) {
-			return {
-				ok: false,
-				ssh: { ok: true },
-				binary: { ok: false, path: binaryPath, error: `not found or not executable at ${binaryPath}` }
-			};
+		const binaryOk = check.code === 0 && check.stdout.trim().startsWith('ok');
+		let binary: Ec2TestResult['binary'];
+		if (binaryOk) {
+			const ver = await exec(conn, `${shellQuote(binaryPath)} --version 2>&1 || echo unknown`);
+			binary = { ok: true, path: binaryPath, version: (ver.stdout || ver.stderr).trim() };
+		} else {
+			binary = { ok: false, path: binaryPath, error: `not found or not executable at ${binaryPath}` };
 		}
 
-		const ver = await exec(conn, `${shellQuote(binaryPath)} --version 2>&1 || echo unknown`);
+		// Check pgbench
+		const pgbenchRes = await exec(conn, 'which pgbench >/dev/null 2>&1 && pgbench --version 2>&1 || echo NOT_FOUND');
+		const pgbenchOut = pgbenchRes.stdout.trim();
+		const pgbench: Ec2TestResult['pgbench'] = pgbenchOut === 'NOT_FOUND' || pgbenchRes.code !== 0
+			? { ok: false, error: 'not found on PATH' }
+			: { ok: true, version: pgbenchOut };
 
-		// Stage 3: Check IAM instance profile (required for CloudWatch metrics)
+		// Check sysbench
+		const sysbenchRes = await exec(conn, 'which sysbench >/dev/null 2>&1 && sysbench --version 2>&1 || echo NOT_FOUND');
+		const sysbenchOut = sysbenchRes.stdout.trim();
+		const sysbench: Ec2TestResult['sysbench'] = sysbenchOut === 'NOT_FOUND' || sysbenchRes.code !== 0
+			? { ok: false, error: 'not found on PATH' }
+			: { ok: true, version: sysbenchOut };
+
+		// Check IAM instance profile (required for CloudWatch metrics)
 		const iamCmd = `TOKEN=$(curl -s -X PUT 'http://169.254.169.254/latest/api/token' -H 'X-aws-ec2-metadata-token-ttl-seconds: 21600' 2>/dev/null) && curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/iam/security-credentials/ 2>/dev/null`;
 		const iamResult = await exec(conn, iamCmd);
 		const role = iamResult.stdout.trim();
@@ -160,12 +175,8 @@ export async function testEc2Connection(server: Ec2Server): Promise<Ec2TestResul
 						'then attach a role with the CloudWatchReadOnlyAccess policy.'
 				};
 
-		return {
-			ok: true,
-			ssh: { ok: true },
-			binary: { ok: true, path: binaryPath, version: (ver.stdout || ver.stderr).trim() },
-			iam
-		};
+		const overallOk = binaryOk && pgbench.ok && sysbench.ok;
+		return { ok: overallOk, ssh: { ok: true }, binary, pgbench, sysbench, iam };
 	} catch (err) {
 		return {
 			ok: false,
@@ -175,4 +186,75 @@ export async function testEc2Connection(server: Ec2Server): Promise<Ec2TestResul
 	} finally {
 		conn.end();
 	}
+}
+
+/** Builds the shell command to install a given tool on the remote server. */
+export function buildInstallCommand(tool: 'mybench-runner' | 'pgbench' | 'sysbench', remoteDir: string): string {
+	if (tool === 'mybench-runner') {
+		return `
+set -e
+export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin
+echo "==> Checking Go..."
+if ! command -v go >/dev/null 2>&1; then
+  echo "==> Go not found. Installing Go..."
+  ARCH=$(uname -m)
+  case "$ARCH" in aarch64|arm64) GOARCH="arm64" ;; *) GOARCH="amd64" ;; esac
+  GOVERSION="1.24.3"
+  curl -fsSL "https://go.dev/dl/go\${GOVERSION}.linux-\${GOARCH}.tar.gz" | sudo tar -C /usr/local -xzf -
+  export PATH=$PATH:/usr/local/go/bin
+fi
+echo "==> Go: $(go version)"
+mkdir -p ${shellQuote(remoteDir)}
+if [ -d ${shellQuote(remoteDir + '/src/.git')} ]; then
+  echo "==> Updating mybench source..."
+  cd ${shellQuote(remoteDir + '/src')} && git pull
+else
+  echo "==> Cloning mybench source..."
+  git clone https://github.com/khanh1998/mybench ${shellQuote(remoteDir + '/src')}
+fi
+echo "==> Building mybench-runner..."
+cd ${shellQuote(remoteDir + '/src')} && go build -o ${shellQuote(remoteDir + '/mybench-runner')} ./cli/cmd/
+echo "==> Done: $(${shellQuote(remoteDir + '/mybench-runner')} --version)"
+`.trim();
+	}
+
+	if (tool === 'pgbench') {
+		return `
+set -e
+if command -v apt-get >/dev/null 2>&1; then
+  echo "==> Detected apt. Installing pgbench..."
+  sudo apt-get update -y && sudo apt-get install -y pgbench postgresql-client
+elif command -v dnf >/dev/null 2>&1; then
+  echo "==> Detected dnf. Installing postgresql..."
+  sudo dnf install -y postgresql
+elif command -v yum >/dev/null 2>&1; then
+  echo "==> Detected yum. Installing postgresql..."
+  sudo yum install -y postgresql
+else
+  echo "ERROR: No supported package manager found (apt/dnf/yum)." && exit 1
+fi
+echo "==> pgbench: $(pgbench --version)"
+`.trim();
+	}
+
+	// sysbench
+	return `
+set -e
+if command -v apt-get >/dev/null 2>&1; then
+  echo "==> Detected apt. Installing sysbench..."
+  curl -fsSL https://packagecloud.io/install/repositories/akopytov/sysbench/script.deb.sh | sudo bash
+  sudo apt-get install -y sysbench
+elif command -v dnf >/dev/null 2>&1; then
+  echo "==> Detected dnf. Installing sysbench..."
+  curl -fsSL https://packagecloud.io/install/repositories/akopytov/sysbench/script.rpm.sh | sudo bash
+  sudo dnf install -y sysbench
+elif command -v yum >/dev/null 2>&1; then
+  echo "==> Detected yum. Installing sysbench..."
+  curl -fsSL https://packagecloud.io/install/repositories/akopytov/sysbench/script.rpm.sh | sudo bash
+  sudo yum install -y sysbench
+else
+  echo "ERROR: No supported package manager found (apt/dnf/yum)." && exit 1
+fi
+echo "==> sysbench: $(sysbench --version)"
+`.trim();
 }

@@ -35,11 +35,67 @@
     ok: boolean;
     ssh: { ok: boolean; error?: string };
     binary?: { ok: boolean; version?: string; path?: string; error?: string };
+    pgbench?: { ok: boolean; version?: string; error?: string };
+    sysbench?: { ok: boolean; version?: string; error?: string };
     iam?: { ok: boolean; role?: string; error?: string };
   }
   let ec2TestResult = $state<Ec2TestResult | null>(null);
   let ec2Testing = $state(false);
   let ec2Saving = $state(false);
+  let ec2Installing = $state<string | null>(null);
+  let ec2InstallOutput = $state<string>('');
+  let ec2InstallOutputEl = $state<HTMLPreElement | null>(null);
+
+  async function installTool(tool: string) {
+    if (!ec2Editing) return;
+    ec2Installing = tool;
+    ec2InstallOutput = '';
+
+    const res = await fetch('/api/ec2/install', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        host: ec2Editing.host,
+        user: ec2Editing.user,
+        port: ec2Editing.port,
+        private_key: ec2Editing.private_key,
+        remote_dir: ec2Editing.remote_dir,
+        log_dir: ec2Editing.log_dir,
+        tool
+      })
+    });
+
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const parts = buf.split('\n\n');
+      buf = parts.pop() ?? '';
+      for (const part of parts) {
+        const dataLine = part.split('\n').find(l => l.startsWith('data: '));
+        if (!dataLine) continue;
+        try {
+          const data = JSON.parse(dataLine.slice(6));
+          if (data.line !== undefined) {
+            ec2InstallOutput += data.line + '\n';
+            if (ec2InstallOutputEl) ec2InstallOutputEl.scrollTop = ec2InstallOutputEl.scrollHeight;
+          }
+          if (data.done) {
+            ec2Installing = null;
+            if (data.ok) {
+              ec2InstallOutput += '\n✓ Installation complete. Running test...\n';
+              await testEc2();
+            } else {
+              ec2InstallOutput += `\n✗ Installation failed${data.error ? ': ' + data.error : ''}\n`;
+            }
+          }
+        } catch { /* ignore parse errors */ }
+      }
+    }
+  }
 
   async function loadEc2() {
     const res = await fetch('/api/ec2');
@@ -56,12 +112,14 @@
     ec2Editing = { name: '', host: '', user: 'ec2-user', port: 22, private_key: '', remote_dir: '~/mybench-bench', log_dir: '/tmp/mybench-logs' };
     ec2IsNew = true;
     ec2TestResult = null;
+    ec2InstallOutput = '';
   }
 
   function startEditEc2(s: Ec2Server) {
     ec2Editing = { ...s };
     ec2IsNew = false;
     ec2TestResult = null;
+    ec2InstallOutput = '';
   }
 
   async function saveEc2() {
@@ -95,6 +153,7 @@
     if (!ec2Editing) return;
     ec2Testing = true;
     ec2TestResult = null;
+    ec2InstallOutput = '';
     const res = await fetch('/api/ec2/test', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -482,7 +541,7 @@
     </div>
     <div class="row">
       <button class="primary" onclick={saveEc2} disabled={ec2Saving}>{ec2Saving ? 'Saving…' : 'Save'}</button>
-      <button onclick={() => { ec2Editing = null; ec2TestResult = null; }}>Cancel</button>
+      <button onclick={() => { ec2Editing = null; ec2TestResult = null; ec2InstallOutput = ''; }}>Cancel</button>
       <button onclick={testEc2} disabled={ec2Testing || !ec2Editing?.host || !ec2Editing?.private_key} style="margin-left:8px">
         {ec2Testing ? 'Testing…' : 'Test Connection'}
       </button>
@@ -500,6 +559,35 @@
               <span class="check-detail">{ec2TestResult.binary.version} at {ec2TestResult.binary.path}</span>
             {:else}
               <span class="check-detail">{ec2TestResult.binary.error}</span>
+              <button class="install-btn" disabled={ec2Installing !== null} onclick={() => installTool('mybench-runner')}>
+                {ec2Installing === 'mybench-runner' ? 'Installing…' : 'Install from source'}
+              </button>
+            {/if}
+          </div>
+        {/if}
+        {#if ec2TestResult.pgbench}
+          <div class="ec2-check" class:ok={ec2TestResult.pgbench.ok} class:fail={!ec2TestResult.pgbench.ok}>
+            {ec2TestResult.pgbench.ok ? '✓' : '✗'} pgbench
+            {#if ec2TestResult.pgbench.ok}
+              <span class="check-detail">{ec2TestResult.pgbench.version}</span>
+            {:else}
+              <span class="check-detail">{ec2TestResult.pgbench.error}</span>
+              <button class="install-btn" disabled={ec2Installing !== null} onclick={() => installTool('pgbench')}>
+                {ec2Installing === 'pgbench' ? 'Installing…' : 'Install'}
+              </button>
+            {/if}
+          </div>
+        {/if}
+        {#if ec2TestResult.sysbench}
+          <div class="ec2-check" class:ok={ec2TestResult.sysbench.ok} class:fail={!ec2TestResult.sysbench.ok}>
+            {ec2TestResult.sysbench.ok ? '✓' : '✗'} sysbench
+            {#if ec2TestResult.sysbench.ok}
+              <span class="check-detail">{ec2TestResult.sysbench.version}</span>
+            {:else}
+              <span class="check-detail">{ec2TestResult.sysbench.error}</span>
+              <button class="install-btn" disabled={ec2Installing !== null} onclick={() => installTool('sysbench')}>
+                {ec2Installing === 'sysbench' ? 'Installing…' : 'Install'}
+              </button>
             {/if}
           </div>
         {/if}
@@ -514,6 +602,9 @@
           </div>
         {/if}
       </div>
+    {/if}
+    {#if ec2InstallOutput}
+      <pre class="install-log" bind:this={ec2InstallOutputEl}>{ec2InstallOutput}</pre>
     {/if}
   </div>
 {/if}
@@ -569,11 +660,15 @@
   }
   .upload-btn:hover { background: #e4e4e4; }
   .ec2-test-results { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; }
-  .ec2-check { font-size: 13px; display: flex; align-items: baseline; gap: 6px; }
+  .ec2-check { font-size: 13px; display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
   .ec2-check.ok { color: #1a7a3a; }
   .ec2-check.fail { color: #c0392b; }
   .ec2-check.warn { color: #b8860b; }
   .check-detail { color: #666; font-size: 12px; }
+  .install-btn { font-size: 11px; padding: 1px 8px; background: #0066cc; color: #fff; border: none; border-radius: 3px; cursor: pointer; }
+  .install-btn:hover:not(:disabled) { background: #0055aa; }
+  .install-btn:disabled { background: #aaa; cursor: not-allowed; }
+  .install-log { margin-top: 10px; font-size: 11px; background: #1e1e1e; color: #d4d4d4; padding: 10px; border-radius: 4px; max-height: 300px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
 
   .ssh-section {
     border-top: 1px solid #e8e8e8;
