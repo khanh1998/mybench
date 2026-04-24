@@ -49,6 +49,7 @@
   ];
 
   let activeCompareTab = $state<'load' | 'telemetry' | 'cloudwatch'>('load');
+  let showPercent = $state(true);
 
   function getRunForId(runId: number): CompareRunInfo | undefined {
     return allRuns.find((run) => run.id === runId);
@@ -257,7 +258,13 @@
 {#if selectedRunIds.length >= 2}
   <div class="compare-top-grid">
     <div class="card">
-      <h3>{summaryTitle}</h3>
+      <div class="row section-header compact">
+        <h3 style="margin:0">{summaryTitle}</h3>
+        <label class="percent-toggle">
+          <input type="checkbox" bind:checked={showPercent} />
+          Show % vs baseline
+        </label>
+      </div>
       <div class="table-wrap">
         <table class="summary-table">
           <thead>
@@ -288,7 +295,7 @@
                       <span class:winner-value={isBest}>
                         {metric.decimals === 0 ? value.toFixed(0) : value.toFixed(metric.decimals)}
                       </span>
-                      {#if index > 0 && baselineVal !== null && baselineVal !== 0}
+                      {#if showPercent && index > 0 && baselineVal !== null && baselineVal !== 0}
                         {@const delta = ((value - baselineVal) / Math.abs(baselineVal)) * 100}
                         {@const isGood = metric.higherBetter ? delta > 0 : delta < 0}
                         <span class="inline-delta" class:positive={isGood} class:negative={!isGood && delta !== 0}>
@@ -569,6 +576,20 @@
 
   .missing-value {
     color: #bbb;
+  }
+
+  .percent-toggle {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    color: #666;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .percent-toggle input {
+    cursor: pointer;
   }
 
   .run-tabs {

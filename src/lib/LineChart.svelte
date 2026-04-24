@@ -164,6 +164,23 @@
     if (!hoveredSeries) return visibleSeries;
     return [...visibleSeries.filter(s => s.label !== hoveredSeries), ...visibleSeries.filter(s => s.label === hoveredSeries)];
   });
+
+  let copyFlash = $state(false);
+  let copyFlashX = $state(0);
+  let copyFlashY = $state(0);
+  let copyFlashTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function onChartClick(e: MouseEvent) {
+    if (hoveredTime === null || tooltipRows.length === 0) return;
+    const lines = [fmtTimestamp(hoveredTime), ...tooltipRows.map(r => `${r.label}: ${fmtVal(r.v)}`)];
+    navigator.clipboard.writeText(lines.join('\n'));
+    const wRect = wrapperEl!.getBoundingClientRect();
+    copyFlashX = e.clientX - wRect.left;
+    copyFlashY = e.clientY - wRect.top - 28;
+    copyFlash = true;
+    if (copyFlashTimer) clearTimeout(copyFlashTimer);
+    copyFlashTimer = setTimeout(() => { copyFlash = false; }, 1200);
+  }
 </script>
 
 <div class="chart-wrap" bind:this={wrapperEl}>
@@ -193,8 +210,9 @@
     <div class="no-data">No data</div>
   {:else}
     <svg bind:this={svgEl} role="img" aria-label={title} width="100%" viewBox="0 0 {W} {H}" preserveAspectRatio="none"
-         style="display:block;cursor:crosshair"
-         onmousemove={onMouseMove} onmouseleave={() => { setHoveredTime(null); hoveredSeries = null; }}>
+         style="display:block;cursor:{hoveredTime !== null ? 'copy' : 'crosshair'}"
+         onmousemove={onMouseMove} onmouseleave={() => { setHoveredTime(null); hoveredSeries = null; }}
+         onclick={onChartClick}>
       <g transform="translate({ML},{MT})">
         <!-- Grid + Y axis -->
         {#each [0, 0.25, 0.5, 0.75, 1] as f}
@@ -258,6 +276,11 @@
       </g>
     </svg>
 
+    <!-- Copy flash -->
+    {#if copyFlash}
+      <div class="copy-flash" style="left:{copyFlashX}px;top:{copyFlashY}px">Copied!</div>
+    {/if}
+
     <!-- Tooltip -->
     {#if hoveredTime !== null && tooltipRows.length > 0}
       <div class="tooltip" style="left:{tooltipX}px;top:{tooltipY}px">
@@ -312,4 +335,17 @@
   .tt-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .tt-label { flex: 1; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .tt-val { font-size: 11px; font-variant-numeric: tabular-nums; flex-shrink: 0; }
+
+  .copy-flash {
+    position: absolute; z-index: 30; pointer-events: none;
+    background: #1e1f2e; color: #6ee7b7;
+    border: 1px solid #3a3b50; border-radius: 5px;
+    padding: 4px 9px; font-size: 11px; font-weight: 600;
+    animation: fade-out 1.2s ease forwards;
+  }
+  @keyframes fade-out {
+    0%   { opacity: 1; transform: translateY(0); }
+    60%  { opacity: 1; transform: translateY(-4px); }
+    100% { opacity: 0; transform: translateY(-8px); }
+  }
 </style>
