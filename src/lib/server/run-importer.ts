@@ -84,9 +84,8 @@ export interface RunnerResult {
 	cloudwatch_metrics?: {
 		data_points?: Array<{ metric_name: string; timestamp: string; value: number; unit: string }>;
 	};
-	os_metrics?: {
-		data_points?: Array<{ metric_name: string; timestamp: string; value: number; unit: string }>;
-	};
+	host_snapshots?: Record<string, Record<string, unknown>[]>;
+	host_config?: Record<string, unknown>;
 }
 
 function normalizeSqliteValue(value: unknown): unknown {
@@ -273,15 +272,72 @@ export function importResultIntoRun(runId: number, result: RunnerResult): void {
 		})();
 	}
 
-	// Insert OS metrics (SSH-collected) — same table, metric_name has os_ prefix.
-	const osDataPoints = result.os_metrics?.data_points;
-	if (osDataPoints && osDataPoints.length > 0) {
-		db.transaction(() => {
-			for (const dp of osDataPoints) {
-				ins.run(runId, dp.metric_name, dp.timestamp, dp.value, dp.unit ?? '', cwPhase(dp.timestamp));
+	// Import host_snapshots into host_snap_* tables (same dynamic-column pattern as snapshots).
+	const hostSnapshots = result.host_snapshots;
+	if (hostSnapshots) {
+		for (const [tableName, rows] of Object.entries(hostSnapshots)) {
+			if (!Array.isArray(rows) || rows.length === 0) continue;
+			if (!tableName.startsWith('host_snap_')) continue;
+
+			db.exec(`CREATE TABLE IF NOT EXISTS ${tableName} (
+				_id INTEGER PRIMARY KEY AUTOINCREMENT,
+				_run_id INTEGER
+			)`);
+
+			const existingCols = new Set(
+				(db.prepare(`PRAGMA table_info(${tableName})`).all() as { name: string }[]).map(r => r.name)
+			);
+
+			const metaCols = new Set(['_collected_at']);
+			const firstRow = rows[0];
+			const dataCols = Object.keys(firstRow).filter(k => k !== '_collected_at' && !metaCols.has(k));
+
+			if (!existingCols.has('_collected_at')) {
+				db.exec(`ALTER TABLE ${tableName} ADD COLUMN _collected_at TEXT`);
 			}
-		})();
+
+			for (const col of dataCols) {
+				if (existingCols.has(col)) continue;
+				const colType = hostSnapColumnType(tableName, col);
+				db.exec(`ALTER TABLE ${tableName} ADD COLUMN "${col}" ${colType}`);
+			}
+
+			const insertCols = ['_run_id', '_collected_at', ...dataCols];
+			const placeholders = insertCols.map((_, i) => `@p${i}`).join(', ');
+			const stmt = db.prepare(
+				`INSERT INTO ${tableName} (${insertCols.map(c => `"${c}"`).join(', ')}) VALUES (${placeholders})`
+			);
+
+			db.transaction((rowsToInsert: Record<string, unknown>[]) => {
+				for (const row of rowsToInsert) {
+					const params: Record<string, unknown> = {
+						p0: runId,
+						p1: normalizeSqliteValue(row['_collected_at'] ?? new Date().toISOString())
+					};
+					dataCols.forEach((col, i) => {
+						params[`p${i + 2}`] = normalizeSqliteValue(row[col]);
+					});
+					stmt.run(params);
+				}
+			})(rows);
+		}
 	}
+
+	// Import host_config as JSON into benchmark_runs.host_config.
+	if (result.host_config && Object.keys(result.host_config).length > 0) {
+		db.prepare(`UPDATE benchmark_runs SET host_config = ? WHERE id = ?`)
+			.run(JSON.stringify(result.host_config), runId);
+	}
+}
+
+function hostSnapColumnType(tableName: string, colName: string): string {
+	// Known text discriminator columns
+	const textCols = new Set(['device', 'iface', 'comm', 'state', 'name', 'cpu_id']);
+	if (textCols.has(colName)) return 'TEXT';
+	// PSI values and load averages are REAL
+	if (tableName === 'host_snap_proc_psi') return 'REAL';
+	if (tableName === 'host_snap_proc_loadavg' && (colName === 'load1' || colName === 'load5' || colName === 'load15')) return 'REAL';
+	return 'INTEGER';
 }
 
 /**

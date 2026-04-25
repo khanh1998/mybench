@@ -651,6 +651,11 @@ function migrate(db: Database.Database) {
   if (!stepResultCols.includes('pgbench_scripts_json')) db.exec(`ALTER TABLE run_step_results ADD COLUMN pgbench_scripts_json TEXT NOT NULL DEFAULT ''`);
   if (!stepResultCols.includes('sysbench_summary_json')) db.exec(`ALTER TABLE run_step_results ADD COLUMN sysbench_summary_json TEXT NOT NULL DEFAULT ''`);
 
+  // Add cmdline column to host_snap_proc_pid_stat (idempotent)
+  const pidStatCols = (db.prepare(`PRAGMA table_info(host_snap_proc_pid_stat)`).all() as { name: string }[]).map(c => c.name);
+  if (pidStatCols.length > 0 && !pidStatCols.includes('cmdline')) {
+    db.exec(`ALTER TABLE host_snap_proc_pid_stat ADD COLUMN cmdline TEXT NOT NULL DEFAULT ''`);
+  }
 
   // One-time backfill: migrate existing pgbench step scripts (idempotent)
   db.exec(`
@@ -1086,6 +1091,110 @@ FROM snap_pg_stat_bgwriter WHERE _run_id = ? ORDER BY _collected_at DESC LIMIT 1
 	if (!scriptCols.includes('weight_expr')) {
 		db.exec(`ALTER TABLE pgbench_scripts ADD COLUMN weight_expr TEXT DEFAULT NULL`);
 	}
+
+	// host_config column on benchmark_runs (one-time OS/PG config snapshot as JSON)
+	const runColsHost = (db.prepare(`PRAGMA table_info(benchmark_runs)`).all() as { name: string }[]).map(c => c.name);
+	if (!runColsHost.includes('host_config')) {
+		db.exec(`ALTER TABLE benchmark_runs ADD COLUMN host_config TEXT`);
+	}
+
+	// host_snap_* timeseries tables — base schemas; data columns added dynamically by importer
+	db.exec(`
+    CREATE TABLE IF NOT EXISTS host_snap_vmstat (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS host_snap_proc_loadavg (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS host_snap_proc_meminfo (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS host_snap_proc_stat (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS host_snap_proc_vmstat (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS host_snap_proc_psi (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS host_snap_proc_schedstat (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL,
+      cpu_id TEXT
+    );
+    CREATE TABLE IF NOT EXISTS host_snap_proc_diskstats (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL,
+      device TEXT
+    );
+    CREATE TABLE IF NOT EXISTS host_snap_proc_netdev (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL,
+      iface TEXT
+    );
+    CREATE TABLE IF NOT EXISTS host_snap_proc_sys_fs_file_nr (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS host_snap_proc_pid_stat (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL,
+      pid INTEGER,
+      comm TEXT,
+      state TEXT,
+      cmdline TEXT
+    );
+    CREATE TABLE IF NOT EXISTS host_snap_proc_pid_statm (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL,
+      pid INTEGER
+    );
+    CREATE TABLE IF NOT EXISTS host_snap_proc_pid_io (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL,
+      pid INTEGER
+    );
+    CREATE TABLE IF NOT EXISTS host_snap_proc_pid_status (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL,
+      pid INTEGER,
+      name TEXT,
+      state TEXT
+    );
+    CREATE TABLE IF NOT EXISTS host_snap_proc_pid_schedstat (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL,
+      pid INTEGER
+    );
+    CREATE TABLE IF NOT EXISTS host_snap_proc_pid_fd_count (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL,
+      pid INTEGER
+    );
+  `);
 
 	// benchmark_series table + series_id on benchmark_runs
 	db.exec(`

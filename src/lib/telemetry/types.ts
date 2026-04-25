@@ -22,6 +22,7 @@ export interface TelemetrySeriesPoint {
 
 export interface TelemetrySeries {
   label: string;
+  description?: string;
   color: string;
   points: TelemetrySeriesPoint[];
 }

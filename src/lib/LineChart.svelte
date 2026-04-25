@@ -1,6 +1,6 @@
 <script lang="ts">
   interface ChartPoint { t: number; v: number; }
-  interface ChartSeries { label: string; color: string; points: ChartPoint[]; }
+  interface ChartSeries { label: string; description?: string; color: string; points: ChartPoint[]; }
   interface Marker { t: number; label: string; color?: string; }
 
   let {
@@ -154,9 +154,9 @@
   const tooltipRows = $derived.by(() => {
     if (hoveredTime === null) return [];
     return visibleSeries
-      .map(sr => ({ color: sr.color, label: sr.label, v: sr.points.find(p => p.t === hoveredTime)?.v ?? null }))
+      .map(sr => ({ color: sr.color, label: sr.label, description: sr.description, v: sr.points.find(p => p.t === hoveredTime)?.v ?? null }))
       .filter(r => r.v !== null)
-      .sort((a, b) => (b.v ?? 0) - (a.v ?? 0)) as { color: string; label: string; v: number }[];
+      .sort((a, b) => (b.v ?? 0) - (a.v ?? 0)) as { color: string; label: string; description?: string; v: number }[];
   });
 
   // Series ordered so highlighted series renders last (on top)
@@ -194,7 +194,7 @@
           class="leg-item"
           class:hidden={hidden}
           aria-pressed={!hidden}
-          title={hidden ? `Show ${s.label}` : `Hide ${s.label}`}
+          title={s.description ? `${s.description}\n(click to ${hidden ? 'show' : 'hide'})` : (hidden ? `Show ${s.label}` : `Hide ${s.label}`)}
           onclick={() => toggleSeries(s.label)}
         >
           <span class="leg-dot" style="background:{s.color}"></span>
@@ -289,7 +289,12 @@
         {#each tooltipRows as row}
           <div class="tt-row" class:tt-highlight={hoveredSeries === row.label}>
             <span class="tt-dot" style="background:{row.color}"></span>
-            <span class="tt-label">{row.label}</span>
+            <span class="tt-label-group">
+              <span class="tt-label">{row.label}</span>
+              {#if row.description && hoveredSeries === row.label}
+                <span class="tt-desc">{row.description}</span>
+              {/if}
+            </span>
             <span class="tt-val">{fmtVal(row.v)}</span>
           </div>
         {/each}
@@ -332,9 +337,11 @@
   .tt-divider { height: 1px; background: #3a3b50; margin-bottom: 5px; }
   .tt-row { display: flex; align-items: center; gap: 5px; padding: 2px 0; }
   .tt-row.tt-highlight { font-weight: 600; color: #fff; }
-  .tt-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-  .tt-label { flex: 1; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .tt-val { font-size: 11px; font-variant-numeric: tabular-nums; flex-shrink: 0; }
+  .tt-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; align-self: flex-start; margin-top: 2px; }
+  .tt-label-group { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+  .tt-label { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tt-desc { font-size: 10px; opacity: 0.8; white-space: normal; line-height: 1.3; margin-top: 1px; }
+  .tt-val { font-size: 11px; font-variant-numeric: tabular-nums; flex-shrink: 0; align-self: flex-start; }
 
   .copy-flash {
     position: absolute; z-index: 30; pointer-events: none;

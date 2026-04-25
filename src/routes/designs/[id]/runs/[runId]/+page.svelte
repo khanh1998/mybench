@@ -64,7 +64,8 @@
   let expandedStep = $state<number | null>(null);
   let scrollPending = false;
   let phases: PhaseState[] = $state([]);
-  let activeTab = $state<'overview' | 'load' | 'telemetry' | 'cloudwatch'>('overview');
+  let activeTab = $state<'overview' | 'load' | 'telemetry' | 'cloudwatch' | 'host_metrics'>('overview');
+  let hostSubTab = $state<'system' | 'processes'>('system');
   let nameInput = $state<HTMLInputElement | null>(null);
   let ec2StatusLoading = $state(false);
   let ec2Status = $state<Ec2Status | null>(null);
@@ -417,7 +418,11 @@
   <button class="tab-btn" class:active={activeTab === 'cloudwatch'}
     disabled={!done}
     title={!done ? 'Available after run completes' : ''}
-    onclick={() => activeTab = 'cloudwatch'}>Host Metrics</button>
+    onclick={() => activeTab = 'cloudwatch'}>CloudWatch</button>
+  <button class="tab-btn" class:active={activeTab === 'host_metrics'}
+    disabled={!done}
+    title={!done ? 'Available after run completes' : ''}
+    onclick={() => activeTab = 'host_metrics'}>Host Metrics</button>
 </div>
 
 {#if activeTab === 'overview'}
@@ -656,14 +661,34 @@
   <DatabaseTelemetry
     {runId}
     active={activeTab === 'telemetry' && done}
-    excludeSectionKeys={['cloudwatch', 'os_metrics']}
+    excludeSectionKeys={['cloudwatch', 'host_system', 'host_processes']}
   />
 {:else if activeTab === 'cloudwatch'}
   <DatabaseTelemetry
     {runId}
     active={activeTab === 'cloudwatch' && done}
-    title="Host Metrics"
-    includeSectionKeys={['cloudwatch', 'os_metrics']}
+    title="CloudWatch Metrics"
+    includeSectionKeys={['cloudwatch']}
+    showHeroCards={false}
+  />
+{:else if activeTab === 'host_metrics'}
+  <div class="host-sub-tabs">
+    <button
+      class="host-sub-btn"
+      class:active={hostSubTab === 'system'}
+      onclick={() => hostSubTab = 'system'}
+    >System</button>
+    <button
+      class="host-sub-btn"
+      class:active={hostSubTab === 'processes'}
+      onclick={() => hostSubTab = 'processes'}
+    >Processes</button>
+  </div>
+  <DatabaseTelemetry
+    {runId}
+    active={activeTab === 'host_metrics' && done}
+    title={hostSubTab === 'system' ? 'System Metrics' : 'Process Metrics'}
+    includeSectionKeys={hostSubTab === 'system' ? ['host_system'] : ['host_processes']}
     showHeroCards={false}
   />
 {/if}
@@ -798,6 +823,11 @@
   .notes-content :global(pre) { background: #f5f5f5; padding: 8px; border-radius: 4px; overflow-x: auto; }
   .notes-content :global(code) { background: #f5f5f5; padding: 1px 4px; border-radius: 3px; font-size: 12px; font-family: monospace; }
   .notes-content :global(blockquote) { border-left: 3px solid #ddd; margin: 0 0 8px; padding-left: 10px; color: #666; }
+
+  .host-sub-tabs { display: flex; gap: 4px; margin-bottom: 12px; }
+  .host-sub-btn { background: #f0f4ff; border: 1px solid #c8d8f5; border-radius: 6px; padding: 5px 14px; font-size: 12px; font-weight: 600; color: #3355aa; cursor: pointer; }
+  .host-sub-btn:hover { background: #dce8ff; border-color: #aabfe8; }
+  .host-sub-btn.active { background: #0066cc; border-color: #0055bb; color: #fff; }
 
   .ec2-status-card { background: #fff; border: 1px solid #d0d0d0; border-radius: 6px; padding: 12px 14px; margin-bottom: 16px; }
   .ec2-status-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }

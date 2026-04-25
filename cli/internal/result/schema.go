@@ -9,12 +9,8 @@ type Result struct {
 	Steps             []StepResult             `json:"steps"`
 	Snapshots         map[string][]SnapshotRow `json:"snapshots"`
 	CloudWatchMetrics *CloudWatchResult        `json:"cloudwatch_metrics,omitempty"`
-	OSMetrics         *OSMetricsResult         `json:"os_metrics,omitempty"`
-}
-
-// OSMetricsResult holds OS-level metrics collected via SSH during the run.
-type OSMetricsResult struct {
-	DataPoints []CloudWatchDataPoint `json:"data_points"`
+	HostSnapshots     map[string][]SnapshotRow `json:"host_snapshots,omitempty"`
+	HostConfig        map[string]any           `json:"host_config,omitempty"`
 }
 
 // CloudWatchResult holds all CloudWatch data points collected for a run.

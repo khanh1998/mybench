@@ -1,6 +1,7 @@
 <script lang="ts">
   import { fetchRunTelemetry } from '$lib/telemetry/api';
   import TelemetrySectionPanel from '$lib/telemetry/TelemetrySectionPanel.svelte';
+  import HostProcessPanel from '$lib/telemetry/HostProcessPanel.svelte';
   import TelemetryValueCard from '$lib/telemetry/TelemetryValueCard.svelte';
   import type { RunTelemetry, TelemetryPhase } from '$lib/telemetry/types';
 
@@ -111,11 +112,19 @@
 
     <div class="section-list">
       {#each visibleSections as section}
-        <TelemetrySectionPanel
-          {section}
-          markers={telemetry.markers}
-          {originMs}
-        />
+        {#if section.key === 'host_processes'}
+          <HostProcessPanel
+            {section}
+            markers={telemetry.markers}
+            {originMs}
+          />
+        {:else}
+          <TelemetrySectionPanel
+            {section}
+            markers={telemetry.markers}
+            {originMs}
+          />
+        {/if}
       {/each}
     </div>
   {/if}
