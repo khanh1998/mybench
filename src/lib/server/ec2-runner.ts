@@ -204,6 +204,12 @@ if ! command -v go >/dev/null 2>&1; then
   export PATH=$PATH:/usr/local/go/bin
 fi
 echo "==> Go: $(go version)"
+MEM_MB=$(free -m | awk '/^Mem:/{print $2}')
+if [ "$MEM_MB" -lt 1024 ] && ! swapon --show | grep -q .; then
+  echo "==> Low memory (\${MEM_MB}MB RAM). Creating 2GB swap file to prevent OOM during build..."
+  sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+  echo "==> Swap enabled."
+fi
 mkdir -p ${shellQuote(remoteDir)}
 if [ -d ${shellQuote(remoteDir + '/src/.git')} ]; then
   echo "==> Updating mybench source..."
@@ -213,7 +219,7 @@ else
   git clone https://github.com/khanh1998/mybench ${shellQuote(remoteDir + '/src')}
 fi
 echo "==> Building mybench-runner..."
-cd ${shellQuote(remoteDir + '/src')} && go build -o ${shellQuote(remoteDir + '/mybench-runner')} ./cli/cmd/
+cd ${shellQuote(remoteDir + '/src/cli')} && go build -o ${shellQuote(remoteDir + '/mybench-runner')} ./cmd/
 echo "==> Done: $(${shellQuote(remoteDir + '/mybench-runner')} --version)"
 `.trim();
 	}
@@ -222,8 +228,18 @@ echo "==> Done: $(${shellQuote(remoteDir + '/mybench-runner')} --version)"
 		return `
 set -e
 if command -v apt-get >/dev/null 2>&1; then
-  echo "==> Detected apt. Installing pgbench..."
-  sudo apt-get update -y && sudo apt-get install -y pgbench postgresql-client
+  echo "==> Detected apt. Setting up pgdg repository..."
+  sudo apt-get install -y curl ca-certificates
+  sudo install -d /usr/share/postgresql-common/pgdg
+  sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc --fail \\
+    https://www.postgresql.org/media/keys/ACCC4CF8.asc
+  . /etc/os-release
+  sudo sh -c "echo 'deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt \${VERSION_CODENAME}-pgdg main' > /etc/apt/sources.list.d/pgdg.list"
+  sudo apt-get update -y 2>&1 | grep -v "^E:" || true
+  echo "==> Installing postgresql-18 (includes pgbench; server will be disabled on this client)..."
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-18
+  sudo systemctl stop postgresql 2>/dev/null || true
+  sudo systemctl disable postgresql 2>/dev/null || true
 elif command -v dnf >/dev/null 2>&1; then
   echo "==> Detected dnf. Installing postgresql..."
   sudo dnf install -y postgresql
