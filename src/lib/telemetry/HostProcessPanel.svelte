@@ -1,6 +1,7 @@
 <script lang="ts">
   import LineChart from '$lib/LineChart.svelte';
-  import type { TelemetrySection, TelemetryMarker, TelemetryChartMetric } from '$lib/telemetry/types';
+  import { formatValue } from '$lib/telemetry/format';
+  import type { TelemetrySection, TelemetryMarker, TelemetryChartMetric, TelemetryTableColumn } from '$lib/telemetry/types';
 
   let {
     section,
@@ -18,6 +19,12 @@
     processName: string;
     cmdline: string;
     row: Record<string, unknown>;
+  }
+
+  interface WaitChannelSample {
+    value: string;
+    count: number;
+    percent: number;
   }
 
   const processes = $derived.by((): ProcessInfo[] => {
@@ -42,6 +49,7 @@
     { key: 'faults',      label: 'Faults' },
     { key: 'mem',         label: 'Mem' },
     { key: 'io_bytes',    label: 'I/O Bytes' },
+    { key: 'io_chars',    label: 'I/O Chars' },
     { key: 'io_syscalls', label: 'I/O Calls' },
     { key: 'sched',       label: 'Sched Time' },
     { key: 'timeslices',  label: 'Timeslices' },
@@ -53,6 +61,7 @@
 
   let selectedPid  = $state<number | null>(null);
   let selectedType = $state<MetricTypeKey>('cpu');
+  let tableExpanded = $state(false);
 
   // Auto-select first process on load
   $effect(() => {
@@ -81,6 +90,52 @@
 
   const activeMetric = $derived(getMetric(selectedPid, selectedType));
   const selectedProcess = $derived(processes.find(p => p.pid === selectedPid) ?? null);
+  const detailColumns = $derived(section.tableColumns.filter((column) => column.key !== 'cmdline'));
+  const selectedSummaryItems = $derived.by(() => {
+    if (!selectedProcess) return [];
+    return [
+      { label: 'State', value: selectedProcess.row.state, kind: 'text' },
+      { label: 'Current Wait', value: selectedProcess.row.wchan, kind: 'text' },
+      { label: 'Top Wait', value: selectedProcess.row.top_wchan, kind: 'text' },
+      { label: 'RSS', value: kbToBytes(selectedProcess.row.vm_rss_kb), kind: 'bytes' },
+      { label: 'Peak RSS', value: kbToBytes(selectedProcess.row.peak_vm_rss_kb), kind: 'bytes' },
+      { label: 'Swap', value: kbToBytes(selectedProcess.row.vm_swap_kb), kind: 'bytes' },
+      { label: 'Threads', value: selectedProcess.row.threads, kind: 'count' },
+      { label: 'FDs', value: selectedProcess.row.fd_count, kind: 'count' },
+      { label: 'CPU Jiffies', value: selectedProcess.row.cpu_jiffies_delta, kind: 'count' },
+      { label: 'Major Faults', value: selectedProcess.row.major_faults_delta, kind: 'count' },
+      { label: 'Sched Wait', value: selectedProcess.row.sched_wait_ms_delta, kind: 'duration_ms' },
+    ] as const;
+  });
+  const selectedWaitChannels = $derived(getWaitChannelSamples(selectedProcess?.row.wchan_distribution));
+
+  function kbToBytes(value: unknown): number | null {
+    const numeric = typeof value === 'number' ? value : Number(value);
+    if (!Number.isFinite(numeric)) return null;
+    return numeric * 1024;
+  }
+
+  function cellValue(row: Record<string, unknown>, column: TelemetryTableColumn): unknown {
+    if (column.kind === 'bytes' && String(column.key).endsWith('_kb')) {
+      return kbToBytes(row[column.key]);
+    }
+    return row[column.key];
+  }
+
+  function getWaitChannelSamples(value: unknown): WaitChannelSample[] {
+    if (!Array.isArray(value)) return [];
+    return value
+      .map((item) => {
+        if (!item || typeof item !== 'object') return null;
+        const row = item as Record<string, unknown>;
+        const label = String(row.value ?? '').trim();
+        const count = Number(row.count);
+        const percent = Number(row.percent);
+        if (!label || !Number.isFinite(count) || count <= 0 || !Number.isFinite(percent)) return null;
+        return { value: label, count, percent };
+      })
+      .filter((item): item is WaitChannelSample => item !== null);
+  }
 </script>
 
 <div class="host-process-panel">
@@ -119,6 +174,35 @@
       <div class="cmdline-hint" title={selectedProcess.cmdline}>{selectedProcess.cmdline}</div>
     {/if}
 
+    {#if selectedSummaryItems.length > 0}
+      <div class="process-summary" aria-label="Selected process summary">
+        {#each selectedSummaryItems as item}
+          <div class="summary-item">
+            <span class="summary-label">{item.label}</span>
+            <span class="summary-value">{formatValue(item.value, item.kind)}</span>
+          </div>
+        {/each}
+      </div>
+    {/if}
+
+    {#if selectedWaitChannels.length > 0}
+      <div class="wchan-block">
+        <div class="wchan-title">Wait channel samples</div>
+        <div class="wchan-list">
+          {#each selectedWaitChannels as sample}
+            <div class="wchan-row">
+              <div class="wchan-label" title={sample.value}>{sample.value}</div>
+              <div class="wchan-track" aria-hidden="true">
+                <span style={`width:${Math.max(2, sample.percent * 100)}%`}></span>
+              </div>
+              <div class="wchan-count">{sample.count}</div>
+              <div class="wchan-percent">{formatValue(sample.percent, 'percent')}</div>
+            </div>
+          {/each}
+        </div>
+      </div>
+    {/if}
+
     <!-- Chart -->
     {#if activeMetric}
       <LineChart
@@ -130,6 +214,50 @@
       />
     {:else}
       <div class="no-data">No {selectedType.toUpperCase()} data for this process.</div>
+    {/if}
+
+    {#if section.tableRows.length > 0}
+      <div class="table-block">
+        <div class="table-header">
+          <div>
+            <div class="table-title">{section.tableTitle}</div>
+            <div class="table-subtitle">Top {section.tableRows.length} PostgreSQL processes by observed activity</div>
+          </div>
+          <button
+            type="button"
+            class="table-toggle"
+            aria-expanded={tableExpanded}
+            onclick={() => tableExpanded = !tableExpanded}
+          >
+            {tableExpanded ? 'Hide table' : 'Show table'}
+          </button>
+        </div>
+
+        {#if tableExpanded}
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  {#each detailColumns as column}
+                    <th>{column.label}</th>
+                  {/each}
+                </tr>
+              </thead>
+              <tbody>
+                {#each section.tableRows as row}
+                  <tr class:selected={Number(row.pid) === selectedPid}>
+                    {#each detailColumns as column}
+                      <td class:mono={column.kind !== 'text' && column.kind !== 'flag'} title={String(row[column.key] ?? '')}>
+                        {formatValue(cellValue(row, column), column.kind ?? 'text')}
+                      </td>
+                    {/each}
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {/if}
+      </div>
     {/if}
   {/if}
 </div>
@@ -197,6 +325,173 @@
     overflow: hidden;
     text-overflow: ellipsis;
     padding: 0 2px;
+  }
+
+  .process-summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(108px, 1fr));
+    gap: 8px;
+  }
+
+  .summary-item {
+    min-width: 0;
+    border: 1px solid #edf0f5;
+    border-radius: 6px;
+    background: #fff;
+    padding: 7px 8px;
+  }
+
+  .summary-label {
+    display: block;
+    font-size: 10px;
+    font-weight: 700;
+    color: #6b7280;
+    text-transform: uppercase;
+  }
+
+  .summary-value {
+    display: block;
+    margin-top: 3px;
+    font-size: 13px;
+    font-weight: 700;
+    color: #172033;
+    font-variant-numeric: tabular-nums;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .wchan-block {
+    border: 1px solid #edf0f5;
+    border-radius: 6px;
+    background: #fff;
+    padding: 9px 10px;
+  }
+
+  .wchan-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: #1f2937;
+    margin-bottom: 8px;
+  }
+
+  .wchan-list {
+    display: grid;
+    gap: 6px;
+  }
+
+  .wchan-row {
+    display: grid;
+    grid-template-columns: minmax(100px, 190px) minmax(90px, 1fr) 44px 48px;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+  }
+
+  .wchan-label {
+    min-width: 0;
+    color: #334155;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .wchan-track {
+    height: 8px;
+    border-radius: 999px;
+    background: #edf2f7;
+    overflow: hidden;
+  }
+
+  .wchan-track span {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: #0066cc;
+  }
+
+  .wchan-count,
+  .wchan-percent {
+    color: #475569;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+  }
+
+  .table-block {
+    border-top: 1px solid #edf0f5;
+    padding-top: 10px;
+  }
+
+  .table-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .table-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: #1f2937;
+  }
+
+  .table-subtitle {
+    margin-top: 2px;
+    color: #6b7280;
+    font-size: 12px;
+  }
+
+  .table-toggle {
+    border: 1px solid #d8e0eb;
+    background: #fff;
+    border-radius: 6px;
+    padding: 5px 10px;
+    color: #24405f;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 700;
+  }
+
+  .table-toggle:hover { background: #f5f8fc; }
+
+  .table-wrap {
+    margin-top: 8px;
+    overflow: auto;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    max-height: 340px;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+
+  th, td {
+    padding: 7px 8px;
+    border-bottom: 1px solid #edf0f5;
+    text-align: left;
+    white-space: nowrap;
+  }
+
+  th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: #f8fafc;
+    color: #475569;
+    font-size: 11px;
+    font-weight: 700;
+  }
+
+  tr.selected td { background: #f0f6ff; }
+
+  td.mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-variant-numeric: tabular-nums;
   }
 
   .no-data {

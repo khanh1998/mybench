@@ -580,6 +580,7 @@ describe('buildRunTelemetry', () => {
 		`).run(t2, 3000000, 7000000, 9);
 		db.prepare(`INSERT INTO host_snap_proc_pid_fd_count (_run_id, _collected_at, pid, fd_count) VALUES (1, ?, 123, ?)`).run(t1, 12);
 		db.prepare(`INSERT INTO host_snap_proc_pid_fd_count (_run_id, _collected_at, pid, fd_count) VALUES (1, ?, 123, ?)`).run(t2, 18);
+		db.prepare(`INSERT INTO host_snap_proc_pid_wchan (_run_id, _collected_at, pid, wchan) VALUES (1, ?, 123, ?)`).run(t1, 'io_schedule');
 		db.prepare(`INSERT INTO host_snap_proc_pid_wchan (_run_id, _collected_at, pid, wchan) VALUES (1, ?, 123, ?)`).run(t2, 'ep_poll');
 
 		const telemetry = buildRunTelemetry(db, 1);
@@ -591,6 +592,7 @@ describe('buildRunTelemetry', () => {
 			'pid_123_faults',
 			'pid_123_mem',
 			'pid_123_io_bytes',
+			'pid_123_io_chars',
 			'pid_123_io_syscalls',
 			'pid_123_sched',
 			'pid_123_timeslices',
@@ -608,7 +610,12 @@ describe('buildRunTelemetry', () => {
 			fd_count: 18,
 			fd_size: 128,
 			peak_vm_rss_kb: 64000,
-			peak_fd_count: 18
+			peak_fd_count: 18,
+			wchan_sample_count: 2,
+			wchan_distribution: [
+				{ value: 'ep_poll', count: 1, percent: 0.5 },
+				{ value: 'io_schedule', count: 1, percent: 0.5 }
+			]
 		}));
 		expect(processes?.chartMetrics?.find((metric) => metric.key === 'pid_123_io_bytes')?.series.map((series) => series.label)).toEqual([
 			'Read KB/s',

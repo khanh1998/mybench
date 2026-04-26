@@ -2751,6 +2751,21 @@ function maxNumber(rows: Record<string, unknown>[], col: string): number | null 
 	return max;
 }
 
+function countTextValues(rows: Record<string, unknown>[], col: string): { value: string; count: number; percent: number }[] {
+	const counts = new Map<string, number>();
+	let total = 0;
+	for (const row of rows) {
+		const value = String(row[col] ?? '').trim();
+		if (!value) continue;
+		counts.set(value, (counts.get(value) ?? 0) + 1);
+		total++;
+	}
+	if (total === 0) return [];
+	return [...counts.entries()]
+		.map(([value, count]) => ({ value, count, percent: count / total }))
+		.sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
+}
+
 function mergeRowsByCollectedAt(...rowSets: Record<string, unknown>[][]): Record<string, unknown>[] {
 	const byTime = new Map<string, Record<string, unknown>>();
 	for (const rows of rowSets) {
@@ -2794,9 +2809,44 @@ function buildHostProcessesSection(db: Database.Database, runId: number, runStar
 		...pidSchedstatRows.map(r => r.pid as number),
 		...pidFdRows.map(r => r.pid as number),
 		...pidWchanRows.map(r => r.pid as number),
-	].filter(p => p != null))].slice(0, 12);
+	].filter(p => p != null))];
 
 	if (allPids.length === 0) return noData;
+
+	function scoreDelta(rows: Record<string, unknown>[], col: string): number {
+		if (rows.length < 2) return 0;
+		const first = toNumber(rows[0][col]);
+		const last = toNumber(rows[rows.length - 1][col]);
+		if (first === null || last === null || last < first) return 0;
+		return last - first;
+	}
+
+	function pidScore(pid: number): number {
+		const pStatRows = pidStatRows.filter(r => r.pid === pid);
+		const pIoRows = pidIoRows.filter(r => r.pid === pid);
+		const pSchedRows = pidSchedstatRows.filter(r => r.pid === pid);
+		const pStatusRows = pidStatusRows.filter(r => r.pid === pid);
+		const pFdRows = pidFdRows.filter(r => r.pid === pid);
+
+		return (
+			scoreDelta(pStatRows, 'utime') +
+			scoreDelta(pStatRows, 'stime') +
+			scoreDelta(pStatRows, 'majflt') * 1000 +
+			scoreDelta(pIoRows, 'read_bytes') / 1024 +
+			scoreDelta(pIoRows, 'write_bytes') / 1024 +
+			scoreDelta(pSchedRows, 'wait_time_ns') / 1_000_000 +
+			(maxNumber(pStatusRows, 'vm_rss_kb') ?? 0) / 1024 +
+			(maxNumber(pStatusRows, 'vm_swap_kb') ?? 0) / 1024 +
+			(maxNumber(pFdRows, 'fd_count') ?? 0)
+		);
+	}
+
+	const displayedPids = [...allPids]
+		.sort((a, b) => {
+			const byScore = pidScore(b) - pidScore(a);
+			return byScore !== 0 ? byScore : a - b;
+		})
+		.slice(0, 12);
 
 	const L = HOST_COL_LABELS;
 	const D = HOST_COL_DESCS;
@@ -2806,7 +2856,7 @@ function buildHostProcessesSection(db: Database.Database, runId: number, runStar
 	// tableRows doubles as the process list consumed by HostProcessPanel.
 	const tableRows: Record<string, unknown>[] = [];
 
-	for (const pid of allPids) {
+	for (const pid of displayedPids) {
 		const pStatRows  = pidStatRows.filter(r => r.pid === pid);
 		const pStatmRows = pidStatmRows.filter(r => r.pid === pid);
 		const pIoRows    = pidIoRows.filter(r => r.pid === pid);
@@ -2846,8 +2896,12 @@ function buildHostProcessesSection(db: Database.Database, runId: number, runStar
 				pIoRows, ['read_bytes', 'write_bytes', 'cancelled_write_bytes'], 'bytes', runStartMs, 1 / 1024, L, D);
 			if (g) chartMetrics.push(g);
 
+			const chars = buildRateGroup(`pid_${pid}_io_chars`, `${tag} — I/O Chars`, `${tag} — I/O Chars /s`,
+				pIoRows, ['rchar', 'wchar'], 'bytes', runStartMs, 1, L, D);
+			if (chars) chartMetrics.push(chars);
+
 			const syscalls = buildRateGroup(`pid_${pid}_io_syscalls`, `${tag} — I/O Syscalls`, `${tag} — I/O Syscalls /s`,
-				pIoRows, ['rchar', 'wchar', 'syscr', 'syscw'], 'count', runStartMs, 1, L, D);
+				pIoRows, ['syscr', 'syscw'], 'count', runStartMs, 1, L, D);
 			if (syscalls) chartMetrics.push(syscalls);
 		}
 		if (pSchedRows.length > 1) {
@@ -2894,6 +2948,7 @@ function buildHostProcessesSection(db: Database.Database, runId: number, runStar
 		const lastStatus = latestRow(pStatusRows);
 		const lastFd = latestRow(pFdRows);
 		const lastWchan = latestRow(pWchanRows);
+		const wchanDistribution = countTextValues(pWchanRows, 'wchan');
 		tableRows.push({
 			pid,
 			processName,
@@ -2901,25 +2956,33 @@ function buildHostProcessesSection(db: Database.Database, runId: number, runStar
 			cmdline,
 			state: latestValue(pStatusRows, 'state') ?? latestValue(pStatRows, 'state'),
 			wchan: lastWchan?.wchan ?? null,
+			top_wchan: wchanDistribution[0]?.value ?? null,
+			wchan_sample_count: wchanDistribution.reduce((total, item) => total + item.count, 0),
+			wchan_distribution: wchanDistribution,
+			cpu_jiffies_delta: scoreDelta(pStatRows, 'utime') + scoreDelta(pStatRows, 'stime'),
+			major_faults_delta: scoreDelta(pStatRows, 'majflt'),
 			resident: lastStatm?.resident ?? null,
 			data:     lastStatm?.data     ?? null,
 			shared:   lastStatm?.shared   ?? null,
 			vm_rss_kb: lastStatus?.vm_rss_kb ?? null,
+			peak_vm_rss_kb: peakRssKb,
 			vm_size_kb: lastStatus?.vm_size_kb ?? null,
 			vm_swap_kb: lastStatus?.vm_swap_kb ?? null,
+			peak_vm_swap_kb: maxNumber(pStatusRows, 'vm_swap_kb'),
 			rss_anon_kb: lastStatus?.rss_anon_kb ?? null,
 			rss_file_kb: lastStatus?.rss_file_kb ?? null,
 			rss_shmem_kb: lastStatus?.rss_shmem_kb ?? null,
 			threads: lastStatus?.threads ?? latestValue(pStatRows, 'num_threads'),
+			peak_threads: maxNumber(pStatusRows, 'threads') ?? maxNumber(pStatRows, 'num_threads'),
 			fd_count: lastFd?.fd_count ?? null,
 			fd_size: lastStatus?.fd_size ?? null,
-			peak_vm_rss_kb: peakRssKb,
 			peak_resident_pages: peakResidentPages,
-			peak_vm_swap_kb: maxNumber(pStatusRows, 'vm_swap_kb'),
 			peak_fd_count: maxNumber(pFdRows, 'fd_count'),
-			peak_threads: maxNumber(pStatusRows, 'threads') ?? maxNumber(pStatRows, 'num_threads'),
 			latest_read_bytes: latestValue(pIoRows, 'read_bytes'),
 			latest_write_bytes: latestValue(pIoRows, 'write_bytes'),
+			read_bytes_delta: scoreDelta(pIoRows, 'read_bytes'),
+			write_bytes_delta: scoreDelta(pIoRows, 'write_bytes'),
+			sched_wait_ms_delta: scoreDelta(pSchedRows, 'wait_time_ns') / 1_000_000,
 		});
 	}
 
@@ -2940,14 +3003,22 @@ function buildHostProcessesSection(db: Database.Database, runId: number, runStar
 			{ key: 'processName', label: 'Process',        kind: 'text'  },
 			{ key: 'state',       label: 'State',          kind: 'text'  },
 			{ key: 'wchan',       label: 'Wait channel',   kind: 'text'  },
-			{ key: 'cmdline',     label: 'Full cmdline',   kind: 'text'  },
+			{ key: 'top_wchan',   label: 'Top wait',       kind: 'text'  },
+			{ key: 'wchan_sample_count', label: 'Wait samples', kind: 'count' },
 			{ key: 'vm_rss_kb',   label: 'RSS kB',         kind: 'count' },
+			{ key: 'peak_vm_rss_kb', label: 'Peak RSS kB', kind: 'count' },
 			{ key: 'vm_swap_kb',  label: 'Swap kB',        kind: 'count' },
 			{ key: 'threads',     label: 'Threads',        kind: 'count' },
 			{ key: 'fd_count',    label: 'Open FDs',       kind: 'count' },
+			{ key: 'cpu_jiffies_delta', label: 'CPU jiffies', kind: 'count' },
+			{ key: 'major_faults_delta', label: 'Major faults', kind: 'count' },
+			{ key: 'read_bytes_delta', label: 'Read bytes', kind: 'bytes' },
+			{ key: 'write_bytes_delta', label: 'Write bytes', kind: 'bytes' },
+			{ key: 'sched_wait_ms_delta', label: 'Sched wait', kind: 'duration_ms' },
 			{ key: 'resident',    label: 'Resident pages', kind: 'count' },
 			{ key: 'data',        label: 'Data pages',     kind: 'count' },
 			{ key: 'shared',      label: 'Shared pages',   kind: 'count' },
+			{ key: 'cmdline',     label: 'Full cmdline',   kind: 'text'  },
 		],
 		tableRows,
 		tableSnapshots: []
