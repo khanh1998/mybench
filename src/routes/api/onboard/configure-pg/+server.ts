@@ -98,7 +98,7 @@ export const POST: RequestHandler = async ({ request }) => {
 	if (!client_private_ip) throw error(400, 'client_private_ip is required');
 	if (!db_pass) throw error(400, 'db_pass is required');
 
-	const server = { id: 0, name: '', host, user: user ?? 'root', port: 22, private_key, remote_dir: '~', log_dir: '/tmp' };
+	const server = { id: 0, name: '', host, user: user ?? 'root', port: 22, private_key, remote_dir: '~', log_dir: '/tmp', vpc: '' };
 	const cmd = buildConfigureCmd(db_private_ip, client_private_ip, db_user ?? 'mybench', db_pass, db_name ?? 'mybench');
 
 	const stream = new ReadableStream({

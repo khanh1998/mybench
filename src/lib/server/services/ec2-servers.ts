@@ -11,6 +11,7 @@ export interface SaveEc2ServerInput {
 	private_key?: string;
 	remote_dir?: string;
 	log_dir?: string;
+	vpc?: string;
 }
 
 export interface TestEc2ServerInput {
@@ -45,20 +46,21 @@ export function saveEc2Server(input: SaveEc2ServerInput): { action: 'created' | 
 		port: input.port ?? existing?.port ?? 22,
 		private_key: input.private_key ?? existing?.private_key ?? '',
 		remote_dir: input.remote_dir ?? existing?.remote_dir ?? '~/mybench-bench',
-		log_dir: input.log_dir ?? existing?.log_dir ?? '/tmp/mybench-logs'
+		log_dir: input.log_dir ?? existing?.log_dir ?? '/tmp/mybench-logs',
+		vpc: input.vpc ?? existing?.vpc ?? ''
 	};
 	if (!next.name.trim()) throw new Error('name is required');
 
 	if (existing) {
 		db.prepare(
-			'UPDATE ec2_servers SET name=?, host=?, user=?, port=?, private_key=?, remote_dir=?, log_dir=? WHERE id=?'
-		).run(next.name, next.host, next.user, next.port, next.private_key, next.remote_dir, next.log_dir, input.ec2_server_id);
+			'UPDATE ec2_servers SET name=?, host=?, user=?, port=?, private_key=?, remote_dir=?, log_dir=?, vpc=? WHERE id=?'
+		).run(next.name, next.host, next.user, next.port, next.private_key, next.remote_dir, next.log_dir, next.vpc, input.ec2_server_id);
 		return { action: 'updated', server: getEc2Server(input.ec2_server_id!)! };
 	}
 
 	const result = db.prepare(
-		'INSERT INTO ec2_servers (name, host, user, port, private_key, remote_dir, log_dir) VALUES (?, ?, ?, ?, ?, ?, ?)'
-	).run(next.name, next.host, next.user, next.port, next.private_key, next.remote_dir, next.log_dir);
+		'INSERT INTO ec2_servers (name, host, user, port, private_key, remote_dir, log_dir, vpc) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+	).run(next.name, next.host, next.user, next.port, next.private_key, next.remote_dir, next.log_dir, next.vpc);
 	return { action: 'created', server: getEc2Server(result.lastInsertRowid as number)! };
 }
 
@@ -91,7 +93,8 @@ export async function testEc2Server(input: TestEc2ServerInput): Promise<{
 			port: input.port ?? 22,
 			private_key: input.private_key,
 			remote_dir: input.remote_dir ?? '~/mybench-bench',
-			log_dir: input.log_dir ?? '/tmp/mybench-logs'
+			log_dir: input.log_dir ?? '/tmp/mybench-logs',
+			vpc: ''
 		};
 	}
 

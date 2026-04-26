@@ -5,6 +5,7 @@
     id: number; name: string; host: string; port: number; username: string; password: string; ssl: number;
     rds_instance_id: string; aws_region: string; enhanced_monitoring: number;
     ssh_enabled: number; ssh_host: string | null; ssh_port: number; ssh_user: string | null; ssh_private_key: string | null;
+    private_host: string; vpc: string;
   }
   interface TableSel { table_name: string; enabled: number; }
 
@@ -25,10 +26,13 @@
   // ── EC2 Servers ──────────────────────────────────────────────────────────────
   interface Ec2Server {
     id: number; name: string; host: string; user: string; port: number;
-    private_key: string; remote_dir: string; log_dir: string;
+    private_key: string; remote_dir: string; log_dir: string; vpc: string;
   }
 
   let ec2Servers: Ec2Server[] = $state([]);
+  const knownVpcs = $derived(
+    [...servers.map(s => s.vpc), ...ec2Servers.map(s => s.vpc)].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i)
+  );
   let ec2Editing: Partial<Ec2Server> | null = $state(null);
   let ec2IsNew = $state(false);
   interface Ec2TestResult {
@@ -109,7 +113,7 @@
   }
 
   function startNewEc2() {
-    ec2Editing = { name: '', host: '', user: 'ec2-user', port: 22, private_key: '', remote_dir: '~/mybench-bench', log_dir: '/tmp/mybench-logs' };
+    ec2Editing = { name: '', host: '', user: 'ec2-user', port: 22, private_key: '', remote_dir: '~/mybench-bench', log_dir: '/tmp/mybench-logs', vpc: '' };
     ec2IsNew = true;
     ec2TestResult = null;
     ec2InstallOutput = '';
@@ -176,7 +180,7 @@
   }
 
   function startNew() {
-    editing = { name: '', host: 'localhost', port: 5432, username: 'postgres', password: '', ssl: 0, rds_instance_id: '', aws_region: '', enhanced_monitoring: 0, ssh_enabled: 0, ssh_host: null, ssh_port: 22, ssh_user: null, ssh_private_key: null };
+    editing = { name: '', host: 'localhost', port: 5432, username: 'postgres', password: '', ssl: 0, rds_instance_id: '', aws_region: '', enhanced_monitoring: 0, ssh_enabled: 0, ssh_host: null, ssh_port: 22, ssh_user: null, ssh_private_key: null, private_host: '', vpc: '' };
     isNew = true;
     testMsg = '';
     testOk = null;
@@ -281,6 +285,12 @@
   onMount(() => { load(); loadEc2(); });
 </script>
 
+<datalist id="vpc-list">
+  {#each knownVpcs as v}
+    <option value={v}>{v}</option>
+  {/each}
+</datalist>
+
 <h1>Settings</h1>
 
 <div class="run-tabs" style="margin-bottom: 20px">
@@ -335,6 +345,17 @@
         </label>
       </div>
     </div>
+    <div class="row" style="margin-top:4px">
+      <div class="form-group" style="flex:3">
+        <label for="conn-private-host">Private / VPC Host <span style="font-weight:normal;color:#888">(optional — internal IP for runner→PG traffic)</span></label>
+        <input id="conn-private-host" bind:value={editing.private_host} placeholder="10.0.0.5 or pg.internal" />
+      </div>
+      <div class="form-group" style="flex:2">
+        <label for="conn-vpc">VPC <span style="font-weight:normal;color:#888">(optional)</span></label>
+        <input id="conn-vpc" list="vpc-list" bind:value={editing.vpc} placeholder="default-sgp1" />
+      </div>
+    </div>
+
     {#if editing.host?.includes('.rds.amazonaws.com')}
     <div class="row" style="margin-top:4px">
       <div class="form-group" style="flex:1">
@@ -508,6 +529,10 @@
       <div class="form-group" style="flex:1">
         <label for="ec2-user">SSH User</label>
         <input id="ec2-user" bind:value={ec2Editing.user} placeholder="ec2-user" />
+      </div>
+      <div class="form-group" style="flex:1">
+        <label for="ec2-vpc">VPC <span style="font-weight:normal;color:#888">(optional)</span></label>
+        <input id="ec2-vpc" list="vpc-list" bind:value={ec2Editing.vpc} placeholder="default-sgp1" />
       </div>
     </div>
     <div class="form-group">

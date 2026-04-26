@@ -654,8 +654,16 @@ function migrate(db: Database.Database) {
   // Add cmdline column to host_snap_proc_pid_stat (idempotent)
   const pidStatCols = (db.prepare(`PRAGMA table_info(host_snap_proc_pid_stat)`).all() as { name: string }[]).map(c => c.name);
   if (pidStatCols.length > 0 && !pidStatCols.includes('cmdline')) {
-    db.exec(`ALTER TABLE host_snap_proc_pid_stat ADD COLUMN cmdline TEXT NOT NULL DEFAULT ''`);
+    db.exec(`ALTER TABLE host_snap_proc_pid_stat ADD COLUMN cmdline TEXT DEFAULT ''`);
   }
+
+  // Add VPC / private-host columns (idempotent)
+  const pgServerCols2 = (db.prepare(`PRAGMA table_info(pg_servers)`).all() as { name: string }[]).map(c => c.name);
+  if (!pgServerCols2.includes('private_host')) db.exec(`ALTER TABLE pg_servers ADD COLUMN private_host TEXT NOT NULL DEFAULT ''`);
+  if (!pgServerCols2.includes('vpc')) db.exec(`ALTER TABLE pg_servers ADD COLUMN vpc TEXT NOT NULL DEFAULT ''`);
+
+  const ec2ServerCols = (db.prepare(`PRAGMA table_info(ec2_servers)`).all() as { name: string }[]).map(c => c.name);
+  if (!ec2ServerCols.includes('vpc')) db.exec(`ALTER TABLE ec2_servers ADD COLUMN vpc TEXT NOT NULL DEFAULT ''`);
 
   // One-time backfill: migrate existing pgbench step scripts (idempotent)
   db.exec(`

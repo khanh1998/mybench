@@ -8,6 +8,7 @@ export interface PlanRunSettingsOverride {
 	server_id?: number;
 	database?: string;
 	snapshot_interval_seconds?: number;
+	use_private_ip?: boolean;
 }
 
 /**
@@ -105,8 +106,9 @@ export function generatePlan(designId: number, overrides: PlanRunSettingsOverrid
 	if (resolvedServerId) {
 		const server = db.prepare('SELECT * FROM pg_servers WHERE id = ?').get(resolvedServerId) as PgServer | undefined;
 		if (server) {
+			const resolvedHost = (overrides.use_private_ip && server.private_host) ? server.private_host : server.host;
 			serverInfo = {
-				host: server.host,
+				host: resolvedHost,
 				port: server.port,
 				username: server.username,
 				password: server.password,

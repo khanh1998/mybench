@@ -21,6 +21,7 @@ export interface StartEc2RunOptions {
 	profile_id?: number;
 	name?: string;
 	snapshot_interval_seconds?: number;
+	use_private_ip?: boolean;
 }
 
 /**
@@ -156,7 +157,8 @@ async function recoverSingleEc2Run(run: StaleEc2Run): Promise<void> {
 		port: run.port,
 		private_key: run.private_key,
 		remote_dir: run.remote_dir,
-		log_dir: run.log_dir
+		log_dir: run.log_dir,
+		vpc: ''
 	};
 
 	const localResultPath = `/tmp/mybench-ec2-result-${run.ec2_run_token}.json`;
@@ -296,7 +298,8 @@ async function executeEc2RunAsync(
 		const plan = generatePlan(designId, {
 			server_id: opts.server_id,
 			database: opts.database,
-			snapshot_interval_seconds: opts.snapshot_interval_seconds
+			snapshot_interval_seconds: opts.snapshot_interval_seconds,
+			use_private_ip: opts.use_private_ip
 		});
 		writeFileSync(localPlanPath, JSON.stringify(plan));
 

@@ -15,6 +15,7 @@ export interface StartRunOptions {
 	snapshot_interval_seconds?: number;
 	profile_id?: number;
 	name?: string;
+	use_private_ip?: boolean;
 }
 
 /**
@@ -35,8 +36,11 @@ export function startRun(designId: number, opts: StartRunOptions = {}): number {
 	const resolvedServerId = opts.server_id ?? design.server_id;
 	const resolvedDatabase: string = opts.database ?? design.database;
 
-	const server = db.prepare('SELECT * FROM pg_servers WHERE id = ?').get(resolvedServerId) as PgServer | undefined;
-	if (!server) throw new Error('Server not configured for this design');
+	const serverRow = db.prepare('SELECT * FROM pg_servers WHERE id = ?').get(resolvedServerId) as PgServer | undefined;
+	if (!serverRow) throw new Error('Server not configured for this design');
+	const server: PgServer = (opts.use_private_ip && serverRow.private_host)
+		? { ...serverRow, host: serverRow.private_host }
+		: serverRow;
 
 	const steps = db.prepare(
 		'SELECT * FROM design_steps WHERE design_id = ? AND enabled = 1 ORDER BY position'

@@ -27,6 +27,8 @@ export interface SavePgServerInput {
 	ssh_port?: number;
 	ssh_user?: string | null;
 	ssh_private_key?: string | null;
+	private_host?: string;
+	vpc?: string;
 }
 
 export interface TestPgServerInput {
@@ -76,20 +78,22 @@ export function savePgServer(input: SavePgServerInput): { action: 'created' | 'u
 		ssh_host: input.ssh_host !== undefined ? (input.ssh_host || null) : (existing?.ssh_host ?? null),
 		ssh_port: input.ssh_port ?? existing?.ssh_port ?? 22,
 		ssh_user: input.ssh_user !== undefined ? (input.ssh_user || null) : (existing?.ssh_user ?? null),
-		ssh_private_key: input.ssh_private_key !== undefined ? (input.ssh_private_key || null) : (existing?.ssh_private_key ?? null)
+		ssh_private_key: input.ssh_private_key !== undefined ? (input.ssh_private_key || null) : (existing?.ssh_private_key ?? null),
+		private_host: input.private_host ?? existing?.private_host ?? '',
+		vpc: input.vpc ?? existing?.vpc ?? ''
 	};
 	if (!next.name.trim()) throw new Error('name is required');
 
 	if (existing) {
 		db.prepare(
-			'UPDATE pg_servers SET name=?, host=?, port=?, username=?, password=?, ssl=?, rds_instance_id=?, aws_region=?, enhanced_monitoring=?, ssh_enabled=?, ssh_host=?, ssh_port=?, ssh_user=?, ssh_private_key=? WHERE id=?'
-		).run(next.name, next.host, next.port, next.username, next.password, next.ssl, next.rds_instance_id, next.aws_region, next.enhanced_monitoring, next.ssh_enabled, next.ssh_host, next.ssh_port, next.ssh_user, next.ssh_private_key, input.server_id);
+			'UPDATE pg_servers SET name=?, host=?, port=?, username=?, password=?, ssl=?, rds_instance_id=?, aws_region=?, enhanced_monitoring=?, ssh_enabled=?, ssh_host=?, ssh_port=?, ssh_user=?, ssh_private_key=?, private_host=?, vpc=? WHERE id=?'
+		).run(next.name, next.host, next.port, next.username, next.password, next.ssl, next.rds_instance_id, next.aws_region, next.enhanced_monitoring, next.ssh_enabled, next.ssh_host, next.ssh_port, next.ssh_user, next.ssh_private_key, next.private_host, next.vpc, input.server_id);
 		return { action: 'updated', server: getPgServer(input.server_id!)! };
 	}
 
 	const result = db.prepare(
-		'INSERT INTO pg_servers (name, host, port, username, password, ssl, rds_instance_id, aws_region, enhanced_monitoring, ssh_enabled, ssh_host, ssh_port, ssh_user, ssh_private_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-	).run(next.name, next.host, next.port, next.username, next.password, next.ssl, next.rds_instance_id, next.aws_region, next.enhanced_monitoring, next.ssh_enabled, next.ssh_host, next.ssh_port, next.ssh_user, next.ssh_private_key);
+		'INSERT INTO pg_servers (name, host, port, username, password, ssl, rds_instance_id, aws_region, enhanced_monitoring, ssh_enabled, ssh_host, ssh_port, ssh_user, ssh_private_key, private_host, vpc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+	).run(next.name, next.host, next.port, next.username, next.password, next.ssl, next.rds_instance_id, next.aws_region, next.enhanced_monitoring, next.ssh_enabled, next.ssh_host, next.ssh_port, next.ssh_user, next.ssh_private_key, next.private_host, next.vpc);
 	return { action: 'created', server: getPgServer(result.lastInsertRowid as number)! };
 }
 
@@ -138,7 +142,9 @@ export async function testPgServer(input: TestPgServerInput): Promise<{
 			ssh_host: null,
 			ssh_port: 22,
 			ssh_user: null,
-			ssh_private_key: null
+			ssh_private_key: null,
+			private_host: '',
+			vpc: ''
 		};
 	}
 
@@ -284,7 +290,8 @@ export async function testPgServerSsh(serverId: number): Promise<{ ok: boolean; 
 		port: server.ssh_port,
 		private_key: server.ssh_private_key,
 		remote_dir: '',
-		log_dir: ''
+		log_dir: '',
+		vpc: ''
 	};
 
 	let conn;

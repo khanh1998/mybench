@@ -15,7 +15,7 @@ export const GET: RequestHandler = ({ url }) => {
 
 export const POST: RequestHandler = async ({ request }) => {
 	const body = await request.json();
-	const { design_id, server_id, database, snapshot_interval_seconds, profile_id, name, ec2_server_id } = body;
+	const { design_id, server_id, database, snapshot_interval_seconds, profile_id, name, ec2_server_id, use_private_ip } = body;
 	if (!design_id) throw error(400, 'Missing design_id');
 	try {
 		if (ec2_server_id) {
@@ -24,11 +24,12 @@ export const POST: RequestHandler = async ({ request }) => {
 				database,
 				profile_id,
 				name,
-				snapshot_interval_seconds
+				snapshot_interval_seconds,
+				use_private_ip: !!use_private_ip
 			});
 			return json({ run_id: runId }, { status: 201 });
 		} else {
-			const runId = startRun(Number(design_id), { server_id, database, snapshot_interval_seconds, profile_id, name });
+			const runId = startRun(Number(design_id), { server_id, database, snapshot_interval_seconds, profile_id, name, use_private_ip: !!use_private_ip });
 			return json({ run_id: runId }, { status: 201 });
 		}
 	} catch (e: unknown) {

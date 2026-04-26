@@ -27,6 +27,7 @@ export interface StartSeriesOptions {
 	server_id?: number;
 	database?: string;
 	snapshot_interval_seconds?: number;
+	use_private_ip?: boolean;
 }
 
 export interface SeriesEmitter extends EventEmitter {
@@ -113,15 +114,19 @@ export function startSeries(opts: StartSeriesOptions): number {
 
 		executeEc2SeriesAsync(
 			seriesId, seriesToken, entries, design.id, ec2Server,
-			opts.server_id, resolvedDatabase, snapshot_interval_seconds, delaySeconds, emitter
+			opts.server_id, resolvedDatabase, snapshot_interval_seconds, delaySeconds, emitter,
+			!!opts.use_private_ip
 		).catch(() => {});
 	} else {
 		// Local path: pre-create run rows with status='pending'
 		const resolvedServerId = opts.server_id ?? design.server_id;
 		if (!resolvedServerId) throw new Error('Server not configured for this design');
 
-		const server = db.prepare('SELECT * FROM pg_servers WHERE id = ?').get(resolvedServerId) as PgServer | undefined;
-		if (!server) throw new Error(`Server ${resolvedServerId} not found`);
+		const serverRow = db.prepare('SELECT * FROM pg_servers WHERE id = ?').get(resolvedServerId) as PgServer | undefined;
+		if (!serverRow) throw new Error(`Server ${resolvedServerId} not found`);
+		const server: PgServer = (opts.use_private_ip && serverRow.private_host)
+			? { ...serverRow, host: serverRow.private_host }
+			: serverRow;
 
 		const entries: { runId: number; profileId: number; profileName: string }[] = [];
 
@@ -279,7 +284,8 @@ async function executeEc2SeriesAsync(
 	resolvedDatabase: string,
 	snapshot_interval_seconds: number,
 	delaySeconds: number,
-	emitter: SeriesEmitter
+	emitter: SeriesEmitter,
+	usePrivateIp = false
 ): Promise<void> {
 	const db = getDb();
 	const remoteDir = ec2Server.remote_dir;
@@ -303,7 +309,7 @@ async function executeEc2SeriesAsync(
 		await exec(conn, `mkdir -p ${shellQuote(resolvedRemoteDir)}`);
 
 		// Generate and upload a single plan file (reused for all runs)
-		const plan = generatePlan(designId, { server_id: overrideServerId, database: resolvedDatabase, snapshot_interval_seconds });
+		const plan = generatePlan(designId, { server_id: overrideServerId, database: resolvedDatabase, snapshot_interval_seconds, use_private_ip: usePrivateIp });
 		const localPlanPath = `/tmp/mybench-series-${seriesToken}.json`;
 		writeFileSync(localPlanPath, JSON.stringify(plan));
 		const remotePlanPath = `${resolvedRemoteDir}/plan-${seriesToken}.json`;

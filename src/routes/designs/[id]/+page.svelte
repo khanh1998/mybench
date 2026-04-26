@@ -45,8 +45,8 @@
     server_id: number|null; database: string; steps: Step[]; params: Param[];
     snapshot_interval_seconds: number;
   }
-  interface Server { id: number; name: string; rds_instance_id?: string; ssh_enabled?: number; }
-  interface Ec2Server { id: number; name: string; host: string; user: string; port: number; }
+  interface Server { id: number; name: string; rds_instance_id?: string; ssh_enabled?: number; private_host?: string; vpc?: string; }
+  interface Ec2Server { id: number; name: string; host: string; user: string; port: number; vpc?: string; }
   interface Run { id: number; status: string; tps: number|null; latency_avg_ms: number|null; started_at: string; profile_name: string; name: string; }
   interface Profile { id: number; design_id: number; name: string; values: { param_name: string; value: string }[]; }
 
@@ -93,6 +93,18 @@
   let runName = $state('');
   let runMode = $state<'local' | 'ec2'>('local');
   let runEc2ServerId = $state<number|null>(null);
+  let runUsePrivateIp = $state(false);
+
+  const privateIpApplicable = $derived((() => {
+    if (runMode !== 'ec2') return false;
+    const srv = servers.find(s => s.id === runServer);
+    const runner = ec2Servers.find(s => s.id === runEc2ServerId);
+    return !!(srv?.private_host && srv.vpc && runner?.vpc && srv.vpc === runner.vpc);
+  })());
+
+  $effect(() => {
+    if (showRunModal) runUsePrivateIp = privateIpApplicable;
+  });
 
   // Series modal state
   let showSeriesModal = $state(false);
@@ -105,6 +117,18 @@
   let seriesServer = $state<number|null>(null);
   let seriesDatabase = $state('');
   let seriesSnapshotInterval = $state(30);
+  let seriesUsePrivateIp = $state(false);
+
+  const seriesPrivateIpApplicable = $derived((() => {
+    if (seriesMode !== 'ec2') return false;
+    const srv = servers.find(s => s.id === seriesServer);
+    const runner = ec2Servers.find(s => s.id === seriesEc2ServerId);
+    return !!(srv?.private_host && srv.vpc && runner?.vpc && srv.vpc === runner.vpc);
+  })());
+
+  $effect(() => {
+    if (showSeriesModal) seriesUsePrivateIp = seriesPrivateIpApplicable;
+  });
 
   // Profile management state
   let showProfileForm = $state(false);
@@ -145,6 +169,7 @@
     seriesServer = design.server_id;
     seriesDatabase = design.database;
     seriesSnapshotInterval = design.snapshot_interval_seconds;
+    seriesUsePrivateIp = false;
     showSeriesModal = true;
   }
 
@@ -181,6 +206,7 @@
     };
     if (seriesMode === 'ec2') {
       body.ec2_server_id = seriesEc2ServerId;
+      if (seriesUsePrivateIp) body.use_private_ip = true;
     }
     const res = await fetch('/api/series', {
       method: 'POST',
@@ -208,6 +234,7 @@
     runName = '';
     runMode = 'local';
     runEc2ServerId = null;
+    runUsePrivateIp = false;
     showRunModal = true;
   }
 
@@ -327,6 +354,7 @@
     };
     if (runMode === 'ec2') {
       body.ec2_server_id = runEc2ServerId;
+      if (runUsePrivateIp) body.use_private_ip = true;
     }
     const res = await fetch('/api/runs', {
       method: 'POST',
@@ -625,6 +653,28 @@
             {/each}
           </select>
         </div>
+        {#if privateIpApplicable || (runEc2ServerId && servers.find(s => s.id === runServer)?.private_host)}
+          <div class="form-group">
+            <label style="display:flex; align-items:center; gap:8px; font-weight:normal; cursor:pointer">
+              <input
+                type="checkbox"
+                style="width:auto"
+                checked={runUsePrivateIp}
+                onchange={(e) => { runUsePrivateIp = (e.currentTarget as HTMLInputElement).checked; }}
+              />
+              <span>
+                Use private network (VPC)
+                {#if runUsePrivateIp}
+                  {@const ph = servers.find(s => s.id === runServer)?.private_host}
+                  {#if ph}<span style="color:#888; font-size:12px; font-weight:normal"> — connecting to {ph}</span>{/if}
+                {/if}
+              </span>
+            </label>
+            {#if !privateIpApplicable}
+              <p style="font-size:12px; color:#888; margin:4px 0 0">Runner and DB server are not on the same VPC — private IP may not be reachable.</p>
+            {/if}
+          </div>
+        {/if}
       {/if}
 
       <div class="form-group">
@@ -766,6 +816,28 @@
             {/each}
           </select>
         </div>
+        {#if seriesPrivateIpApplicable || (seriesEc2ServerId && servers.find(s => s.id === seriesServer)?.private_host)}
+          <div class="form-group">
+            <label style="display:flex; align-items:center; gap:8px; font-weight:normal; cursor:pointer">
+              <input
+                type="checkbox"
+                style="width:auto"
+                checked={seriesUsePrivateIp}
+                onchange={(e) => { seriesUsePrivateIp = (e.currentTarget as HTMLInputElement).checked; }}
+              />
+              <span>
+                Use private network (VPC)
+                {#if seriesUsePrivateIp}
+                  {@const ph = servers.find(s => s.id === seriesServer)?.private_host}
+                  {#if ph}<span style="color:#888; font-size:12px; font-weight:normal"> — connecting to {ph}</span>{/if}
+                {/if}
+              </span>
+            </label>
+            {#if !seriesPrivateIpApplicable}
+              <p style="font-size:12px; color:#888; margin:4px 0 0">Runner and DB server are not on the same VPC — private IP may not be reachable.</p>
+            {/if}
+          </div>
+        {/if}
       {/if}
 
       <div class="form-group">

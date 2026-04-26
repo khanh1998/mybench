@@ -22,6 +22,8 @@ export interface PgServer {
 	ssh_port: number;
 	ssh_user: string | null;
 	ssh_private_key: string | null;
+	private_host: string; // optional private/VPC IP for runner→PG communication
+	vpc: string;          // VPC name tag; matched against Ec2Server.vpc to auto-enable private_host
 }
 
 export interface PgStatTableSelection {
@@ -175,6 +177,7 @@ export interface Ec2Server {
 	private_key: string; // PEM content of SSH private key (stored in DB, not a file path)
 	remote_dir: string;  // working directory on EC2
 	log_dir: string;     // pgbench log directory on EC2
+	vpc: string;         // VPC name tag; matched against PgServer.vpc to auto-enable private_host
 }
 
 export interface SavedQuery {

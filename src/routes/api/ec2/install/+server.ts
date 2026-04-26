@@ -22,7 +22,8 @@ export const POST: RequestHandler = async ({ request }) => {
 		id: 0, name: '', host, user: user ?? 'ec2-user',
 		port: port ?? 22, private_key,
 		remote_dir: remote_dir ?? '~/mybench-bench',
-		log_dir: log_dir ?? '/tmp/mybench-logs'
+		log_dir: log_dir ?? '/tmp/mybench-logs',
+		vpc: ''
 	};
 
 	const stream = new ReadableStream({
