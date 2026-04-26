@@ -20,6 +20,8 @@
   } = $props();
 
   let selectedMetricKey = $state<string | null>(null);
+  let selectedMetricGroup = $state<string | null>(null);
+  let selectedMetricEntity = $state<string | null>(null);
   let selectedSeriesLabel = $state<string | null>(null);
 
   function alignSeriesToFirstPoint(points: { t: number; v: number }[]) {
@@ -36,14 +38,60 @@
     return sections.find((section) => section.status === 'ok') ?? sections[0] ?? null;
   });
 
-  const metricOptions = $derived(firstSection?.chartMetrics ?? []);
-  const isGrouped = $derived(metricOptions.length > 0);
+  const allMetricOptions = $derived(firstSection?.chartMetrics ?? []);
+  const metricGroups = $derived.by(() => {
+    const groups: string[] = [];
+    for (const metric of allMetricOptions) {
+      const group = metric.group ?? 'Metrics';
+      if (!groups.includes(group)) groups.push(group);
+    }
+    return groups;
+  });
+  const activeMetricGroup = $derived(selectedMetricGroup ?? metricGroups[0] ?? null);
+  const groupedMetricOptions = $derived.by((): TelemetryChartMetric[] => {
+    if (metricGroups.length <= 1) return allMetricOptions;
+    return allMetricOptions.filter((metric) => (metric.group ?? 'Metrics') === activeMetricGroup);
+  });
+  const metricEntities = $derived.by(() => {
+    const entities: string[] = [];
+    for (const metric of groupedMetricOptions) {
+      if (!metric.entity) continue;
+      if (!entities.includes(metric.entity)) entities.push(metric.entity);
+    }
+    return entities;
+  });
+  const activeMetricEntity = $derived(selectedMetricEntity ?? metricEntities[0] ?? null);
+  const entitySelectorLabel = $derived(
+    activeMetricGroup === 'Block Devices'
+      ? 'Device'
+      : activeMetricGroup === 'Network'
+        ? 'Interface'
+        : activeMetricGroup === 'CPU Sched'
+          ? 'CPU'
+          : 'Target'
+  );
+  const metricOptions = $derived.by((): TelemetryChartMetric[] => {
+    if (metricEntities.length === 0) return groupedMetricOptions;
+    return groupedMetricOptions.filter((metric) => metric.entity === activeMetricEntity);
+  });
 
   const activeMetric = $derived.by((): TelemetryChartMetric | null => {
     if (!metricOptions.length) return null;
     const key = selectedMetricKey ?? firstSection?.defaultChartMetricKey ?? metricOptions[0].key;
     return metricOptions.find((metric) => metric.key === key) ?? metricOptions[0];
   });
+
+  function findComparableMetric(section: TelemetrySection, reference: TelemetryChartMetric | null): TelemetryChartMetric | null {
+    const metrics = section.chartMetrics ?? [];
+    if (!reference) return metrics[0] ?? null;
+    return metrics.find((metric) => metric.key === reference.key)
+      ?? metrics.find((metric) =>
+        metric.label === reference.label
+        && (metric.group ?? 'Metrics') === (reference.group ?? 'Metrics')
+        && (metric.entity ?? '') === (reference.entity ?? '')
+      )
+      ?? null;
+  }
 
   const seriesOptions = $derived.by(() => {
     const labels = new Set<string>();
@@ -53,9 +101,7 @@
       if (!section || section.status !== 'ok') continue;
 
       if (activeMetric) {
-        const runMetric =
-          section.chartMetrics?.find((metric) => metric.key === activeMetric.key) ??
-          section.chartMetrics?.[0];
+        const runMetric = findComparableMetric(section, activeMetric);
         for (const series of runMetric?.series ?? []) labels.add(series.label);
       } else {
         for (const series of section.chartSeries) labels.add(series.label);
@@ -89,9 +135,7 @@
         if (!section || section.status !== 'ok') return null;
 
         const sourceSeries = activeMetric
-          ? (section.chartMetrics?.find((metric) => metric.key === activeMetric.key) ?? section.chartMetrics?.[0])?.series.find(
-              (series) => series.label === selectedSeriesLabel
-            )
+          ? findComparableMetric(section, activeMetric)?.series.find((series) => series.label === selectedSeriesLabel)
           : section.chartSeries.find((series) => series.label === selectedSeriesLabel);
 
         if (!sourceSeries) return null;
@@ -105,9 +149,28 @@
   });
 
   const chartTitle = $derived.by(() => {
-    if (activeMetric && selectedSeriesLabel) return `${label} — ${activeMetric.label} · ${selectedSeriesLabel}`;
+    const entity = activeMetric?.entity ? ` · ${activeMetric.entity}` : '';
+    if (activeMetric && selectedSeriesLabel) return `${label} — ${activeMetric.label}${entity} · ${selectedSeriesLabel}`;
     if (selectedSeriesLabel) return `${label} — ${selectedSeriesLabel}`;
     return label;
+  });
+
+  $effect(() => {
+    if (!metricGroups.length) {
+      selectedMetricGroup = null;
+      return;
+    }
+    if (selectedMetricGroup && metricGroups.includes(selectedMetricGroup)) return;
+    selectedMetricGroup = metricGroups[0];
+  });
+
+  $effect(() => {
+    if (!metricEntities.length) {
+      selectedMetricEntity = null;
+      return;
+    }
+    if (selectedMetricEntity && metricEntities.includes(selectedMetricEntity)) return;
+    selectedMetricEntity = metricEntities[0];
   });
 
   $effect(() => {
@@ -116,7 +179,9 @@
       return;
     }
     if (selectedMetricKey && metricOptions.some((metric) => metric.key === selectedMetricKey)) return;
-    selectedMetricKey = firstSection?.defaultChartMetricKey ?? metricOptions[0].key;
+    selectedMetricKey = metricOptions.some((metric) => metric.key === firstSection?.defaultChartMetricKey)
+      ? (firstSection?.defaultChartMetricKey ?? metricOptions[0].key)
+      : metricOptions[0].key;
   });
 
   $effect(() => {
@@ -154,7 +219,38 @@
   {/if}
 
   {#if metricOptions.length > 0 || seriesOptions.length > 1}
+    {#if metricGroups.length > 1}
+      <div class="chart-group-tabs" aria-label="Metric categories">
+        {#each metricGroups as group}
+          <button
+            type="button"
+            class="chart-group-tab"
+            class:active={(selectedMetricGroup ?? metricGroups[0]) === group}
+            onclick={() => {
+              selectedMetricGroup = group;
+              selectedMetricEntity = null;
+              selectedMetricKey = null;
+            }}
+          >{group}</button>
+        {/each}
+      </div>
+    {/if}
+
     <div class="chart-controls">
+      {#if metricEntities.length > 0}
+        <label>
+          {entitySelectorLabel}
+          <select
+            bind:value={selectedMetricEntity}
+            onchange={() => selectedMetricKey = null}
+          >
+            {#each metricEntities as entity}
+              <option value={entity}>{entity}</option>
+            {/each}
+          </select>
+        </label>
+      {/if}
+
       {#if metricOptions.length > 0}
         <label>
           Metric
@@ -168,7 +264,7 @@
 
       {#if seriesOptions.length > 1}
         <label>
-          {isGrouped ? 'Group' : 'Series'}
+          Series
           <select bind:value={selectedSeriesLabel}>
             {#each seriesOptions as seriesLabel}
               <option value={seriesLabel}>{seriesLabel}</option>
@@ -253,6 +349,35 @@
 
   .summary-run-label {
     font-weight: 700;
+  }
+
+  .chart-group-tabs {
+    display: flex;
+    gap: 2px;
+    border-bottom: 1px solid #e5e7eb;
+    overflow-x: auto;
+  }
+
+  .chart-group-tab {
+    background: transparent;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    color: #64748b;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 700;
+    padding: 6px 10px;
+    white-space: nowrap;
+  }
+
+  .chart-group-tab:hover {
+    color: #1f2937;
+    background: #f8fafc;
+  }
+
+  .chart-group-tab.active {
+    color: #0066cc;
+    border-bottom-color: #0066cc;
   }
 
   .chart-controls {

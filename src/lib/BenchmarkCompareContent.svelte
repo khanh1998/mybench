@@ -48,7 +48,8 @@
     { key: 'transactions' as const, label: 'Transactions', decimals: 0, higherBetter: true }
   ];
 
-  let activeCompareTab = $state<'load' | 'telemetry' | 'cloudwatch'>('load');
+  let activeCompareTab = $state<'load' | 'telemetry' | 'cloudwatch' | 'host_metrics'>('load');
+  let hostMetricsTab = $state<'system' | 'processes'>('system');
   let showPercent = $state(true);
 
   function getRunForId(runId: number): CompareRunInfo | undefined {
@@ -415,6 +416,13 @@
     >
       CloudWatch
     </button>
+    <button
+      class="tab-btn"
+      class:active={activeCompareTab === 'host_metrics'}
+      onclick={() => activeCompareTab = 'host_metrics'}
+    >
+      Host Metrics
+    </button>
   </div>
 
   {#if activeCompareTab === 'load'}
@@ -425,15 +433,39 @@
     <DatabaseTelemetryCompare
       runs={selectedRuns}
       active={activeCompareTab === 'telemetry'}
-      excludeSectionKeys={['cloudwatch']}
+      excludeSectionKeys={['cloudwatch', 'host_system', 'host_processes']}
     />
   {:else if activeCompareTab === 'cloudwatch'}
     <DatabaseTelemetryCompare
       runs={selectedRuns}
       active={activeCompareTab === 'cloudwatch'}
       title="CloudWatch"
-      subtitle="Compare CloudWatch and Enhanced Monitoring telemetry across the selected runs."
+      subtitle="Compare AWS CloudWatch telemetry across the selected runs."
       includeSectionKeys={['cloudwatch']}
+      showHeroCards={false}
+      showInsightSummary={false}
+    />
+  {:else if activeCompareTab === 'host_metrics'}
+    <div class="host-sub-tabs">
+      <button
+        class="host-sub-btn"
+        class:active={hostMetricsTab === 'system'}
+        onclick={() => hostMetricsTab = 'system'}
+      >System</button>
+      <button
+        class="host-sub-btn"
+        class:active={hostMetricsTab === 'processes'}
+        onclick={() => hostMetricsTab = 'processes'}
+      >Processes</button>
+    </div>
+    <DatabaseTelemetryCompare
+      runs={selectedRuns}
+      active={activeCompareTab === 'host_metrics'}
+      title={hostMetricsTab === 'system' ? 'System Metrics' : 'Process Metrics'}
+      subtitle={hostMetricsTab === 'system'
+        ? 'Compare self-hosted machine CPU, memory, disk, and network telemetry across the selected runs.'
+        : 'Compare self-hosted PostgreSQL process telemetry across the selected runs.'}
+      includeSectionKeys={hostMetricsTab === 'system' ? ['host_system'] : ['host_processes']}
       showHeroCards={false}
       showInsightSummary={false}
     />
@@ -467,6 +499,34 @@
 
   .section-note.warn {
     color: #885500;
+  }
+
+  .host-sub-tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 12px;
+  }
+
+  .host-sub-btn {
+    background: #f0f4ff;
+    border: 1px solid #c8d8f5;
+    border-radius: 6px;
+    padding: 5px 14px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #3355aa;
+    cursor: pointer;
+  }
+
+  .host-sub-btn:hover {
+    background: #dce8ff;
+    border-color: #aabfe8;
+  }
+
+  .host-sub-btn.active {
+    background: #0066cc;
+    border-color: #0055bb;
+    color: #fff;
   }
 
   .compare-top-grid {

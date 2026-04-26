@@ -2560,9 +2560,9 @@ function buildHostSystemSection(db: Database.Database, runId: number, runStartMs
 		for (const cpuId of cpuIds) {
 			const cpuRows = schedstatRows.filter(r => r.cpu_id === cpuId);
 			if (cpuRows.length < 2) continue;
-			const g = buildRateGroup(`sched_${cpuId}`, `${cpuId} Sched`, `Scheduler ${cpuId} (ns/s)`,
+			const g = buildRateGroup(`sched_${cpuId}`, 'Sched', `Scheduler ${cpuId} (ns/s)`,
 				cpuRows, ['run_time_ns', 'wait_time_ns', 'timeslices'], 'count', runStartMs, 1, L, D);
-			pushChartMetric(chartMetrics, withChartGroup(g, 'CPU'));
+			pushChartMetric(chartMetrics, withChartGroup(g, 'CPU Sched', cpuId));
 		}
 	}
 
