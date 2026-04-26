@@ -36,6 +36,8 @@ export interface TelemetryChartMetric {
 	kind: TelemetryValueKind;
 	title: string;
 	series: TelemetrySeries[];
+	group?: string;
+	entity?: string;
 }
 
 export interface TelemetryMarker {
@@ -201,6 +203,12 @@ function parsePhases(phases?: string[]): TelemetryPhase[] {
 
 function tableExists(db: Database.Database, tableName: string): boolean {
 	return !!db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name = ?`).get(tableName);
+}
+
+function tableHasColumn(db: Database.Database, tableName: string, columnName: string): boolean {
+	if (!tableExists(db, tableName)) return false;
+	return (db.prepare(`PRAGMA table_info(${tableName})`).all() as { name: string }[])
+		.some((column) => column.name === columnName);
 }
 
 function toNumber(value: unknown): number | null {
@@ -2067,6 +2075,52 @@ function buildRateGroup(
 	return { key, label, kind, title, series };
 }
 
+function withChartGroup(metric: TelemetryChartMetric | null, group: string, entity?: string): TelemetryChartMetric | null {
+	if (!metric) return null;
+	return { ...metric, group, entity };
+}
+
+function pushChartMetric(metrics: TelemetryChartMetric[], metric: TelemetryChartMetric | null) {
+	if (metric) metrics.push(metric);
+}
+
+function buildHostDerivedInstantGroup(
+	key: string,
+	label: string,
+	title: string,
+	rows: Record<string, unknown>[],
+	seriesDefs: Array<{
+		label: string;
+		description?: string;
+		valueFn: (row: Record<string, unknown>) => number | null;
+	}>,
+	kind: TelemetryValueKind,
+	runStartMs: number
+): TelemetryChartMetric | null {
+	const series = seriesDefs
+		.map((def, index): TelemetrySeries | null => {
+			const points = rows
+				.map((row) => {
+					const t = toMs(row._collected_at as string | null);
+					if (t === null) return null;
+					const value = def.valueFn(row);
+					if (value === null || !Number.isFinite(value)) return null;
+					return { t: t - runStartMs, v: value };
+				})
+				.filter((point): point is TelemetrySeriesPoint => point !== null);
+			if (points.length === 0) return null;
+			return {
+				label: def.label,
+				description: def.description,
+				color: COLORS[index % COLORS.length],
+				points
+			};
+		})
+		.filter((item): item is TelemetrySeries => item !== null);
+	if (series.length === 0) return null;
+	return { key, label, title, kind, series };
+}
+
 // Human-readable labels for raw /proc column names.
 const HOST_COL_LABELS: Record<string, string> = {
 	// vmstat CPU
@@ -2078,12 +2132,21 @@ const HOST_COL_LABELS: Record<string, string> = {
 	// loadavg
 	load1: '1 min', load5: '5 min', load15: '15 min', running_threads: 'Running threads',
 	// meminfo
-	mem_available: 'Available', mem_free: 'Free', cached: 'Page cache',
-	dirty: 'Dirty', writeback: 'Writeback', swap_free: 'Swap free',
+	mem_total: 'Total', mem_available: 'Available', mem_free: 'Free',
+	buffers: 'Buffers', cached: 'Page cache', swap_cached: 'Swap cache',
+	active: 'Active', inactive: 'Inactive', active_anon: 'Active anon',
+	inactive_anon: 'Inactive anon', active_file: 'Active file',
+	inactive_file: 'Inactive file', slab: 'Slab', sreclaimable: 'Slab reclaimable',
+	sunreclaim: 'Slab unreclaimable', kreclaimable: 'Kernel reclaimable',
+	page_tables: 'Page tables', kernel_stack: 'Kernel stack',
+	dirty: 'Dirty', writeback: 'Writeback', swap_total: 'Swap total', swap_free: 'Swap free',
 	committed_as: 'Committed', commit_limit: 'Commit limit',
 	anon_pages: 'Anonymous pages', mapped: 'Mapped', shmem: 'Shared mem',
+	hugepages_total: 'Huge pages total', hugepages_free: 'Huge pages free',
+	anon_huge_pages: 'Anon huge pages', file_huge_pages: 'File huge pages',
+	zswap: 'Zswap', zswapped: 'Zswapped',
 	// /proc/stat
-	cpu_user: 'User', cpu_system: 'System', cpu_iowait: 'IO Wait',
+	cpu_user: 'User', cpu_nice: 'Nice', cpu_system: 'System', cpu_iowait: 'IO Wait',
 	cpu_steal: 'Stolen', cpu_irq: 'IRQ', cpu_softirq: 'Soft IRQ',
 	ctxt: 'Ctx switches/s', processes: 'Forks/s',
 	procs_running: 'Runnable', procs_blocked: 'Blocked',
@@ -2093,20 +2156,42 @@ const HOST_COL_LABELS: Record<string, string> = {
 	pswpin: 'Swap in/s', pswpout: 'Swap out/s',
 	nr_dirty: 'Dirty pages', nr_writeback: 'Writeback pages', nr_shmem: 'Shared pages',
 	pgsteal_kswapd: 'kswapd reclaim/s', pgsteal_direct: 'Direct reclaim/s',
+	pgscan_kswapd: 'kswapd scanned/s', pgscan_direct: 'Direct scanned/s',
+	allocstall_normal: 'Normal alloc stalls/s', allocstall_movable: 'Movable alloc stalls/s',
+	allocstall_dma: 'DMA alloc stalls/s', allocstall_dma32: 'DMA32 alloc stalls/s',
+	workingset_refault_anon: 'Anon refaults/s', workingset_refault_file: 'File refaults/s',
+	workingset_activate_anon: 'Anon activations/s', workingset_activate_file: 'File activations/s',
+	oom_kill: 'OOM kills/s',
+	thp_fault_alloc: 'THP fault alloc/s', thp_fault_fallback: 'THP fault fallback/s',
+	thp_collapse_alloc: 'THP collapse alloc/s', thp_collapse_alloc_failed: 'THP collapse failed/s',
+	thp_split_page: 'THP page splits/s', thp_swpout: 'THP swapout/s',
 	// diskstats
 	rd_ios: 'Reads/s', wr_ios: 'Writes/s',
+	rd_merges: 'Read merges/s', wr_merges: 'Write merges/s',
 	rd_sectors: 'Read sectors/s', wr_sectors: 'Write sectors/s',
 	in_flight: 'In-flight I/Os', rd_ticks: 'Read ms/s', wr_ticks: 'Write ms/s', io_ticks: 'Total ms/s',
+	time_in_queue: 'Weighted queue ms/s',
+	dc_ios: 'Discards/s', dc_sectors: 'Discard sectors/s', dc_ticks: 'Discard ms/s',
+	fl_ios: 'Flushes/s', fl_ticks: 'Flush ms/s',
 	// netdev
 	rx_bytes: 'Recv KB/s', tx_bytes: 'Send KB/s',
 	rx_packets: 'Recv pkts/s', tx_packets: 'Send pkts/s',
 	rx_errs: 'Recv errors/s', tx_errs: 'Send errors/s',
 	rx_drop: 'Recv drops/s', tx_drop: 'Send drops/s',
+	rx_fifo: 'Recv FIFO/s', rx_frame: 'Recv frame/s', rx_multicast: 'Recv multicast/s',
+	tx_fifo: 'Send FIFO/s', tx_colls: 'Collisions/s', tx_carrier: 'Carrier errors/s',
 	// PSI
 	cpu_some_avg10: 'CPU some', memory_some_avg10: 'Mem some', io_some_avg10: 'IO some',
 	memory_full_avg10: 'Mem full', io_full_avg10: 'IO full',
+	cpu_some_avg60: 'CPU some 60s', memory_some_avg60: 'Mem some 60s', io_some_avg60: 'IO some 60s',
+	cpu_some_avg300: 'CPU some 300s', memory_some_avg300: 'Mem some 300s', io_some_avg300: 'IO some 300s',
+	cpu_some_total: 'CPU stall total', memory_some_total: 'Mem stall total', io_some_total: 'IO stall total',
+	cpu_full_total: 'CPU full total', memory_full_total: 'Mem full total', io_full_total: 'IO full total',
 	// schedstat
 	run_time_ns: 'Run time ns/s', wait_time_ns: 'Wait time ns/s',
+	timeslices: 'Timeslices/s',
+	// file table
+	allocated: 'Allocated files', max: 'File max',
 	// per-pid
 	utime: 'User jiffies/s', stime: 'Sys jiffies/s',
 	minflt: 'Minor faults/s', majflt: 'Major faults/s',
@@ -2122,7 +2207,6 @@ const HOST_COL_LABELS: Record<string, string> = {
 	rss_anon_kb: 'Anonymous RSS', rss_file_kb: 'File RSS', rss_shmem_kb: 'Shared RSS',
 	vm_swap_kb: 'Swap',
 	threads: 'Threads', fd_size: 'FD table size', fd_count: 'Open FDs',
-	timeslices: 'Timeslices/s',
 	vol_ctxt_sw: 'Voluntary ctx/s', nvol_ctxt_sw: 'Involuntary ctx/s',
 };
 
@@ -2264,9 +2348,23 @@ function buildHostSystemSection(db: Database.Database, runId: number, runStartMs
 	const netdevRows     = fetchHostRows(db, 'host_snap_proc_netdev', runId);
 	const schedstatRows  = fetchHostRows(db, 'host_snap_proc_schedstat', runId);
 	const psiRows        = fetchHostRows(db, 'host_snap_proc_psi', runId);
+	const fileNrRows     = fetchHostRows(db, 'host_snap_proc_sys_fs_file_nr', runId);
+	const hostConfigJson = tableHasColumn(db, 'benchmark_runs', 'host_config')
+		? (db.prepare(`SELECT host_config FROM benchmark_runs WHERE id = ?`).get(runId) as { host_config?: string | null } | undefined)?.host_config
+		: null;
+	let hostConfig: Record<string, unknown> = {};
+	if (hostConfigJson) {
+		try {
+			const parsed = JSON.parse(hostConfigJson);
+			if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) hostConfig = parsed as Record<string, unknown>;
+		} catch {
+			hostConfig = {};
+		}
+	}
 
 	const hasData = vmstatRows.length > 0 || loadavgRows.length > 0 || meminfoRows.length > 0
-		|| statRows.length > 0 || diskstatsRows.length > 0;
+		|| statRows.length > 0 || diskstatsRows.length > 0 || fileNrRows.length > 0
+		|| Object.keys(hostConfig).length > 0;
 	if (!hasData) return noData;
 
 	const L = HOST_COL_LABELS;
@@ -2277,62 +2375,126 @@ function buildHostSystemSection(db: Database.Database, runId: number, runStartMs
 	if (vmstatRows.length > 0) {
 		const g = buildInstantGroup('cpu', 'CPU %', 'CPU Usage (%)', vmstatRows,
 			['us', 'sy', 'wa', 'st', 'id'], 'percent', runStartMs, 1, L, D);
-		if (g) chartMetrics.push(g);
+		pushChartMetric(chartMetrics, withChartGroup(g, 'CPU'));
 		const g2 = buildInstantGroup('ctx_sw', 'Ctx & Interrupts', 'Context Switches & Interrupts /s', vmstatRows,
 			['intr', 'cs'], 'count', runStartMs, 1, L, D);
-		if (g2) chartMetrics.push(g2);
+		pushChartMetric(chartMetrics, withChartGroup(g2, 'CPU'));
 		const g3 = buildInstantGroup('swap_rate', 'Swap I/O', 'Swap Page Rate /s', vmstatRows,
 			['si', 'so'], 'count', runStartMs, 1, L, D);
-		if (g3) chartMetrics.push(g3);
+		pushChartMetric(chartMetrics, withChartGroup(g3, 'Memory'));
 	}
 
 	// Load average
 	if (loadavgRows.length > 0) {
 		const g = buildInstantGroup('load_avg', 'Load Average', 'Load Average', loadavgRows,
 			['load1', 'load5', 'load15', 'running_threads'], 'count', runStartMs, 1, L, D);
-		if (g) chartMetrics.push(g);
+		pushChartMetric(chartMetrics, withChartGroup(g, 'CPU'));
+		const g2 = buildHostDerivedInstantGroup('threads_total', 'Thread Count', 'Host Threads', loadavgRows, [
+			{ label: 'Total threads', description: 'Total scheduler entities from /proc/loadavg', valueFn: (row) => toNumber(row.total_threads) },
+			{ label: 'Running threads', description: D.running_threads, valueFn: (row) => toNumber(row.running_threads) }
+		], 'count', runStartMs);
+		pushChartMetric(chartMetrics, withChartGroup(g2, 'CPU'));
 	}
 
 	// Memory — instantaneous kB values
 	if (meminfoRows.length > 0) {
-		const g = buildInstantGroup('memory', 'Memory', 'Memory (kB)', meminfoRows,
-			['mem_available', 'cached', 'dirty', 'writeback', 'swap_free', 'mem_free'], 'bytes', runStartMs, 1, L, D);
-		if (g) chartMetrics.push(g);
-		const g2 = buildInstantGroup('mem_commit', 'Mem Commit', 'Committed Memory (kB)', meminfoRows,
-			['committed_as', 'commit_limit', 'anon_pages', 'mapped', 'shmem'], 'bytes', runStartMs, 1, L, D);
-		if (g2) chartMetrics.push(g2);
+		const g = buildInstantGroup('memory', 'Memory', 'Memory', meminfoRows,
+			['mem_available', 'cached', 'dirty', 'writeback', 'swap_free', 'mem_free'], 'bytes', runStartMs, 1024, L, D);
+		pushChartMetric(chartMetrics, withChartGroup(g, 'Memory'));
+		const used = buildHostDerivedInstantGroup('mem_used', 'Memory Used', 'Memory Used / Available', meminfoRows, [
+			{
+				label: 'Used',
+				description: 'mem_total - mem_available from /proc/meminfo',
+				valueFn: (row) => {
+					const total = toNumber(row.mem_total);
+					const available = toNumber(row.mem_available);
+					return total !== null && available !== null ? (total - available) * 1024 : null;
+				}
+			},
+			{ label: 'Available', description: D.mem_available, valueFn: (row) => toNumber(row.mem_available) === null ? null : Number(row.mem_available) * 1024 }
+		], 'bytes', runStartMs);
+		pushChartMetric(chartMetrics, withChartGroup(used, 'Memory'));
+		const composition = buildInstantGroup('mem_composition', 'Memory Areas', 'Memory Composition', meminfoRows,
+			['anon_pages', 'cached', 'buffers', 'shmem', 'slab', 'sreclaimable', 'sunreclaim'],
+			'bytes', runStartMs, 1024, L, D);
+		pushChartMetric(chartMetrics, withChartGroup(composition, 'Memory'));
+		const activity = buildInstantGroup('mem_active_inactive', 'Active/Inactive', 'Active and Inactive Memory', meminfoRows,
+			['active_anon', 'inactive_anon', 'active_file', 'inactive_file'],
+			'bytes', runStartMs, 1024, L, D);
+		pushChartMetric(chartMetrics, withChartGroup(activity, 'Memory'));
+		const kernel = buildInstantGroup('mem_kernel', 'Kernel Memory', 'Kernel Memory', meminfoRows,
+			['kreclaimable', 'sreclaimable', 'sunreclaim', 'kernel_stack', 'page_tables'],
+			'bytes', runStartMs, 1024, L, D);
+		pushChartMetric(chartMetrics, withChartGroup(kernel, 'Memory'));
+		const swapSpace = buildHostDerivedInstantGroup('swap_space', 'Swap Space', 'Swap Used / Free', meminfoRows, [
+			{
+				label: 'Swap used',
+				description: 'swap_total - swap_free from /proc/meminfo',
+				valueFn: (row) => {
+					const total = toNumber(row.swap_total);
+					const free = toNumber(row.swap_free);
+					return total !== null && free !== null ? (total - free) * 1024 : null;
+				}
+			},
+			{ label: 'Swap free', description: D.swap_free, valueFn: (row) => toNumber(row.swap_free) === null ? null : Number(row.swap_free) * 1024 }
+		], 'bytes', runStartMs);
+		pushChartMetric(chartMetrics, withChartGroup(swapSpace, 'Memory'));
+		const hugePages = buildInstantGroup('huge_pages', 'Huge Pages', 'Huge Page Memory', meminfoRows,
+			['anon_huge_pages', 'file_huge_pages', 'hugetlb', 'zswap', 'zswapped'],
+			'bytes', runStartMs, 1024, L, D);
+		pushChartMetric(chartMetrics, withChartGroup(hugePages, 'Memory'));
+		const g2 = buildInstantGroup('mem_commit', 'Mem Commit', 'Committed Memory', meminfoRows,
+			['committed_as', 'commit_limit', 'anon_pages', 'mapped', 'shmem'], 'bytes', runStartMs, 1024, L, D);
+		pushChartMetric(chartMetrics, withChartGroup(g2, 'Memory'));
 	}
 
 	// /proc/stat CPU jiffies → rates
 	if (statRows.length > 1) {
 		const g = buildRateGroup('stat_cpu', 'CPU Jiffies', 'CPU Jiffies /s (/proc/stat)', statRows,
-			['cpu_user', 'cpu_system', 'cpu_iowait', 'cpu_steal', 'cpu_irq', 'cpu_softirq'], 'count', runStartMs, 1, L, D);
-		if (g) chartMetrics.push(g);
+			['cpu_user', 'cpu_nice', 'cpu_system', 'cpu_iowait', 'cpu_steal', 'cpu_irq', 'cpu_softirq'], 'count', runStartMs, 1, L, D);
+		pushChartMetric(chartMetrics, withChartGroup(g, 'CPU'));
 		const g2 = buildRateGroup('stat_ctx', 'Ctx & Forks', 'Context Switches & Forks /s', statRows,
 			['ctxt', 'processes'], 'count', runStartMs, 1, L, D);
-		if (g2) chartMetrics.push(g2);
+		pushChartMetric(chartMetrics, withChartGroup(g2, 'CPU'));
 		const g3 = buildInstantGroup('stat_procs', 'Run Queue', 'Runnable / Blocked Processes', statRows,
 			['procs_running', 'procs_blocked'], 'count', runStartMs, 1, L, D);
-		if (g3) chartMetrics.push(g3);
+		pushChartMetric(chartMetrics, withChartGroup(g3, 'CPU'));
 	}
 
 	// /proc/vmstat
 	if (procVmstatRows.length > 1) {
 		const g = buildRateGroup('page_io', 'Page I/O', 'Page I/O /s', procVmstatRows,
 			['pgpgin', 'pgpgout'], 'count', runStartMs, 1, L, D);
-		if (g) chartMetrics.push(g);
+		pushChartMetric(chartMetrics, withChartGroup(g, 'Memory'));
 		const g2 = buildRateGroup('page_faults', 'Page Faults', 'Page Faults /s', procVmstatRows,
 			['pgfault', 'pgmajfault'], 'count', runStartMs, 1, L, D);
-		if (g2) chartMetrics.push(g2);
+		pushChartMetric(chartMetrics, withChartGroup(g2, 'Memory'));
 		const g3 = buildRateGroup('swap_pages', 'Swap Pages', 'Swap Page Rate /s', procVmstatRows,
 			['pswpin', 'pswpout'], 'count', runStartMs, 1, L, D);
-		if (g3) chartMetrics.push(g3);
+		pushChartMetric(chartMetrics, withChartGroup(g3, 'Memory'));
 		const g4 = buildInstantGroup('dirty_pages', 'Dirty Pages', 'Dirty / Writeback Pages', procVmstatRows,
 			['nr_dirty', 'nr_writeback', 'nr_shmem'], 'count', runStartMs, 1, L, D);
-		if (g4) chartMetrics.push(g4);
+		pushChartMetric(chartMetrics, withChartGroup(g4, 'Memory'));
 		const g5 = buildRateGroup('page_reclaim', 'Page Reclaim', 'Page Reclaim /s', procVmstatRows,
 			['pgsteal_kswapd', 'pgsteal_direct'], 'count', runStartMs, 1, L, D);
-		if (g5) chartMetrics.push(g5);
+		pushChartMetric(chartMetrics, withChartGroup(g5, 'Kernel Pressure'));
+		const reclaimScan = buildRateGroup('page_reclaim_scan', 'Reclaim Scan', 'Page Reclaim Scan /s', procVmstatRows,
+			['pgscan_kswapd', 'pgscan_direct', 'pgsteal_kswapd', 'pgsteal_direct'], 'count', runStartMs, 1, L, D);
+		pushChartMetric(chartMetrics, withChartGroup(reclaimScan, 'Kernel Pressure'));
+		const allocStalls = buildRateGroup('alloc_stalls', 'Alloc Stalls', 'Direct Allocation Stalls /s', procVmstatRows,
+			['allocstall_normal', 'allocstall_movable', 'allocstall_dma', 'allocstall_dma32'], 'count', runStartMs, 1, L, D);
+		pushChartMetric(chartMetrics, withChartGroup(allocStalls, 'Kernel Pressure'));
+		const workingset = buildRateGroup('workingset', 'Workingset', 'Workingset Refaults / Activations /s', procVmstatRows,
+			['workingset_refault_anon', 'workingset_refault_file', 'workingset_activate_anon', 'workingset_activate_file'],
+			'count', runStartMs, 1, L, D);
+		pushChartMetric(chartMetrics, withChartGroup(workingset, 'Kernel Pressure'));
+		const thp = buildRateGroup('thp_activity', 'THP Activity', 'Transparent Huge Page Events /s', procVmstatRows,
+			['thp_fault_alloc', 'thp_fault_fallback', 'thp_collapse_alloc', 'thp_collapse_alloc_failed', 'thp_split_page', 'thp_swpout'],
+			'count', runStartMs, 1, L, D);
+		pushChartMetric(chartMetrics, withChartGroup(thp, 'Kernel Pressure'));
+		const oom = buildRateGroup('oom_kill', 'OOM Kills', 'OOM Kills /s', procVmstatRows,
+			['oom_kill'], 'count', runStartMs, 1, L, D);
+		pushChartMetric(chartMetrics, withChartGroup(oom, 'Kernel Pressure'));
 	}
 
 	// Disk I/O — per device
@@ -2340,18 +2502,24 @@ function buildHostSystemSection(db: Database.Database, runId: number, runStartMs
 	for (const dev of diskDevices) {
 		const devRows = diskstatsRows.filter(r => r.device === dev);
 		if (devRows.length < 2) continue;
-		const g = buildRateGroup(`disk_${dev}_ops`, `${dev} IOPS`, `Disk ${dev} — IOPS`, devRows,
+		const g = buildRateGroup(`disk_${dev}_ops`, 'IOPS', `Disk ${dev} — IOPS`, devRows,
 			['rd_ios', 'wr_ios'], 'count', runStartMs, 1, L, D);
-		if (g) chartMetrics.push(g);
-		const g2 = buildRateGroup(`disk_${dev}_bytes`, `${dev} Throughput`, `Disk ${dev} — Throughput (sectors/s)`, devRows,
+		pushChartMetric(chartMetrics, withChartGroup(g, 'Block Devices', dev));
+		const g2 = buildRateGroup(`disk_${dev}_bytes`, 'Throughput', `Disk ${dev} — Throughput (sectors/s)`, devRows,
 			['rd_sectors', 'wr_sectors'], 'count', runStartMs, 1, L, D);
-		if (g2) chartMetrics.push(g2);
-		const g3 = buildInstantGroup(`disk_${dev}_queue`, `${dev} Queue`, `Disk ${dev} — In-flight I/Os`, devRows,
+		pushChartMetric(chartMetrics, withChartGroup(g2, 'Block Devices', dev));
+		const g2b = buildRateGroup(`disk_${dev}_merges`, 'Merges', `Disk ${dev} — Request Merges /s`, devRows,
+			['rd_merges', 'wr_merges'], 'count', runStartMs, 1, L, D);
+		pushChartMetric(chartMetrics, withChartGroup(g2b, 'Block Devices', dev));
+		const g3 = buildInstantGroup(`disk_${dev}_queue`, 'Queue', `Disk ${dev} — In-flight I/Os`, devRows,
 			['in_flight'], 'count', runStartMs, 1, L, D);
-		if (g3) chartMetrics.push(g3);
-		const g4 = buildRateGroup(`disk_${dev}_time`, `${dev} Latency`, `Disk ${dev} — I/O Wait (ms/s)`, devRows,
-			['rd_ticks', 'wr_ticks', 'io_ticks'], 'count', runStartMs, 1, L, D);
-		if (g4) chartMetrics.push(g4);
+		pushChartMetric(chartMetrics, withChartGroup(g3, 'Block Devices', dev));
+		const g4 = buildRateGroup(`disk_${dev}_time`, 'Latency', `Disk ${dev} — I/O Wait (ms/s)`, devRows,
+			['rd_ticks', 'wr_ticks', 'io_ticks', 'time_in_queue'], 'count', runStartMs, 1, L, D);
+		pushChartMetric(chartMetrics, withChartGroup(g4, 'Block Devices', dev));
+		const g5 = buildRateGroup(`disk_${dev}_discard_flush`, 'Discard/Flush', `Disk ${dev} — Discard and Flush Activity`, devRows,
+			['dc_ios', 'dc_sectors', 'dc_ticks', 'fl_ios', 'fl_ticks'], 'count', runStartMs, 1, L, D);
+		pushChartMetric(chartMetrics, withChartGroup(g5, 'Block Devices', dev));
 	}
 
 	// Network — per interface
@@ -2359,12 +2527,15 @@ function buildHostSystemSection(db: Database.Database, runId: number, runStartMs
 	for (const iface of netIfaces) {
 		const ifaceRows = netdevRows.filter(r => r.iface === iface);
 		if (ifaceRows.length < 2) continue;
-		const g = buildRateGroup(`net_${iface}`, `${iface} Bandwidth`, `Net ${iface} — Bandwidth (KB/s)`,
+		const g = buildRateGroup(`net_${iface}`, 'Bandwidth', `Net ${iface} — Bandwidth (KB/s)`,
 			ifaceRows, ['rx_bytes', 'tx_bytes'], 'bytes', runStartMs, 1 / 1024, L, D);
-		if (g) chartMetrics.push(g);
-		const g2 = buildRateGroup(`net_${iface}_pkts`, `${iface} Packets`, `Net ${iface} — Packets /s`,
+		pushChartMetric(chartMetrics, withChartGroup(g, 'Network', iface));
+		const g2 = buildRateGroup(`net_${iface}_pkts`, 'Packets', `Net ${iface} — Packets /s`,
 			ifaceRows, ['rx_packets', 'tx_packets', 'rx_errs', 'tx_errs', 'rx_drop', 'tx_drop'], 'count', runStartMs, 1, L, D);
-		if (g2) chartMetrics.push(g2);
+		pushChartMetric(chartMetrics, withChartGroup(g2, 'Network', iface));
+		const g3 = buildRateGroup(`net_${iface}_errors`, 'Error Detail', `Net ${iface} — Error Detail /s`,
+			ifaceRows, ['rx_fifo', 'rx_frame', 'tx_fifo', 'tx_colls', 'tx_carrier', 'rx_multicast'], 'count', runStartMs, 1, L, D);
+		pushChartMetric(chartMetrics, withChartGroup(g3, 'Network', iface));
 	}
 
 	// PSI
@@ -2372,7 +2543,15 @@ function buildHostSystemSection(db: Database.Database, runId: number, runStartMs
 		const g = buildInstantGroup('psi', 'Pressure (PSI)', 'Pressure Stall Index — avg10 %', psiRows,
 			['cpu_some_avg10', 'memory_some_avg10', 'io_some_avg10', 'memory_full_avg10', 'io_full_avg10'],
 			'percent', runStartMs, 1, L, D);
-		if (g) chartMetrics.push(g);
+		pushChartMetric(chartMetrics, withChartGroup(g, 'Kernel Pressure'));
+		const g2 = buildInstantGroup('psi_windows', 'PSI Windows', 'Pressure Stall Index — avg60 / avg300 %', psiRows,
+			['cpu_some_avg60', 'memory_some_avg60', 'io_some_avg60', 'cpu_some_avg300', 'memory_some_avg300', 'io_some_avg300'],
+			'percent', runStartMs, 1, L, D);
+		pushChartMetric(chartMetrics, withChartGroup(g2, 'Kernel Pressure'));
+		const g3 = buildRateGroup('psi_stall_rate', 'PSI Stall Time', 'Pressure Stall Time Growth /s', psiRows,
+			['cpu_some_total', 'memory_some_total', 'io_some_total', 'cpu_full_total', 'memory_full_total', 'io_full_total'],
+			'count', runStartMs, 1, L, D);
+		pushChartMetric(chartMetrics, withChartGroup(g3, 'Kernel Pressure'));
 	}
 
 	// /proc/schedstat — per CPU
@@ -2382,13 +2561,35 @@ function buildHostSystemSection(db: Database.Database, runId: number, runStartMs
 			const cpuRows = schedstatRows.filter(r => r.cpu_id === cpuId);
 			if (cpuRows.length < 2) continue;
 			const g = buildRateGroup(`sched_${cpuId}`, `${cpuId} Sched`, `Scheduler ${cpuId} (ns/s)`,
-				cpuRows, ['run_time_ns', 'wait_time_ns'], 'count', runStartMs, 1, L, D);
-			if (g) chartMetrics.push(g);
+				cpuRows, ['run_time_ns', 'wait_time_ns', 'timeslices'], 'count', runStartMs, 1, L, D);
+			pushChartMetric(chartMetrics, withChartGroup(g, 'CPU'));
 		}
+	}
+
+	if (fileNrRows.length > 0) {
+		const g = buildInstantGroup('file_table', 'File Table', 'System File Table', fileNrRows,
+			['allocated', 'max'], 'count', runStartMs, 1, L, D);
+		pushChartMetric(chartMetrics, withChartGroup(g, 'Kernel Pressure'));
+		const ratio = buildHostDerivedInstantGroup('file_table_usage', 'FD Capacity', 'System File Table Usage', fileNrRows, [
+			{
+				label: 'Allocated / max',
+				description: 'Allocated file handles divided by system file-max',
+				valueFn: (row) => safeRatio(toNumber(row.allocated), toNumber(row.max))
+			}
+		], 'percent', runStartMs);
+		pushChartMetric(chartMetrics, withChartGroup(ratio, 'Kernel Pressure'));
 	}
 
 	// Summary cards
 	const summary: TelemetryCard[] = [];
+	const nproc = toNumber(hostConfig.nproc);
+	if (nproc !== null) summary.push(metricCard('host_nproc', 'vCPU', 'count', nproc));
+	const memTotalKb = toNumber(hostConfig.mem_total_kb);
+	if (memTotalKb !== null) summary.push(metricCard('host_mem_total', 'Host Memory', 'bytes', memTotalKb * 1024));
+	const swapTotalKb = toNumber(hostConfig.swap_total_kb);
+	if (swapTotalKb !== null && swapTotalKb > 0) summary.push(metricCard('host_swap_total', 'Host Swap', 'bytes', swapTotalKb * 1024));
+	const swappiness = toNumber(hostConfig.swappiness);
+	if (swappiness !== null) summary.push(metricCard('host_swappiness', 'Swappiness', 'count', swappiness));
 	if (vmstatRows.length > 0) {
 		const maxWa = Math.max(...vmstatRows.map(r => Number(r.wa) || 0));
 		summary.push(metricCard('host_cpu_iowait_peak', 'Peak IO Wait', 'percent', maxWa / 100));
@@ -2403,21 +2604,66 @@ function buildHostSystemSection(db: Database.Database, runId: number, runStartMs
 		const maxIoPsi = Math.max(...psiRows.map(r => Number(r.io_full_avg10) || 0));
 		if (maxIoPsi > 0) summary.push(metricCard('host_psi_io_peak', 'Peak IO PSI', 'percent', maxIoPsi / 100));
 	}
+	if (fileNrRows.length > 0) {
+		const maxAllocated = Math.max(...fileNrRows.map(r => Number(r.allocated) || 0));
+		if (maxAllocated > 0) summary.push(metricCard('host_file_alloc_peak', 'Peak Files', 'count', maxAllocated));
+		const maxFileUse = Math.max(...fileNrRows.map(r => safeRatio(toNumber(r.allocated), toNumber(r.max)) ?? 0));
+		if (maxFileUse > 0) summary.push(metricCard('host_file_use_peak', 'Peak File Table', 'percent', maxFileUse));
+	}
 
 	// Table: last vmstat + meminfo snapshot
 	const tableRows: Record<string, unknown>[] = [];
+	for (const [k, v] of Object.entries(hostConfig)) {
+		tableRows.push({
+			source: 'host config',
+			metric: L[k] ?? k,
+			raw: k,
+			value: v,
+			unit: k.endsWith('_kb') ? 'kB' : '',
+			value_kind: typeof v === 'number' ? 'count' : 'text'
+		});
+	}
+	const addLastRows = (
+		source: string,
+		rows: Record<string, unknown>[],
+		cols: string[],
+		unit = '',
+		kind: TelemetryValueKind = 'count'
+	) => {
+		const row = rows[rows.length - 1];
+		if (!row) return;
+		for (const k of cols) {
+			if (row[k] === null || row[k] === undefined) continue;
+			tableRows.push({ source, metric: L[k] ?? k, raw: k, value: row[k], unit, value_kind: kind });
+		}
+	};
+	addLastRows('/proc/loadavg', loadavgRows, ['load1', 'load5', 'load15', 'running_threads', 'total_threads']);
+	addLastRows('/proc/stat', statRows, ['procs_running', 'procs_blocked', 'ctxt', 'processes']);
+	addLastRows('/proc/vmstat', procVmstatRows, [
+		'pgfault', 'pgmajfault', 'pgpgin', 'pgpgout', 'pswpin', 'pswpout',
+		'pgscan_kswapd', 'pgscan_direct', 'pgsteal_kswapd', 'pgsteal_direct',
+		'allocstall_normal', 'allocstall_movable', 'oom_kill',
+		'workingset_refault_anon', 'workingset_refault_file',
+		'thp_fault_alloc', 'thp_fault_fallback', 'thp_collapse_alloc_failed'
+	]);
+	addLastRows('/proc/pressure/*', psiRows, [
+		'cpu_some_avg10', 'memory_some_avg10', 'io_some_avg10',
+		'memory_full_avg10', 'io_full_avg10',
+		'cpu_some_avg60', 'memory_some_avg60', 'io_some_avg60'
+	], '%');
+	addLastRows('/proc/sys/fs/file-nr', fileNrRows, ['allocated', 'max']);
 	const lastVmstat = vmstatRows[vmstatRows.length - 1];
 	if (lastVmstat) {
 		for (const [k, v] of Object.entries(lastVmstat)) {
 			if (k.startsWith('_')) continue;
-			tableRows.push({ source: 'vmstat', metric: L[k] ?? k, raw: k, value: v, unit: '' });
+			tableRows.push({ source: 'vmstat', metric: L[k] ?? k, raw: k, value: v, unit: '', value_kind: 'count' });
 		}
 	}
 	const lastMeminfo = meminfoRows[meminfoRows.length - 1];
 	if (lastMeminfo) {
 		for (const [k, v] of Object.entries(lastMeminfo)) {
 			if (k.startsWith('_')) continue;
-			tableRows.push({ source: '/proc/meminfo', metric: L[k] ?? k, raw: k, value: v, unit: 'kB' });
+			tableRows.push({ source: '/proc/meminfo', metric: L[k] ?? k, raw: k, value: v, unit: 'kB', value_kind: 'count' });
 		}
 	}
 

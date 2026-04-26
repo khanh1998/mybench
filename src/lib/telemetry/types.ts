@@ -33,6 +33,8 @@ export interface TelemetryChartMetric {
   kind: TelemetryValueKind;
   title: string;
   series: TelemetrySeries[];
+  group?: string;
+  entity?: string;
 }
 
 export interface TelemetryMarker {

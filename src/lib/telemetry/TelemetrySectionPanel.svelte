@@ -2,7 +2,7 @@
   import LineChart from '$lib/LineChart.svelte';
   import { formatValue } from '$lib/telemetry/format';
   import TelemetryValueCard from '$lib/telemetry/TelemetryValueCard.svelte';
-  import type { TelemetryMarker, TelemetrySection, TelemetryTableSnapshot, TelemetryValueKind } from '$lib/telemetry/types';
+  import type { TelemetryChartMetric, TelemetryMarker, TelemetrySection, TelemetryTableSnapshot, TelemetryValueKind } from '$lib/telemetry/types';
 
   let {
     section,
@@ -21,15 +21,58 @@
   } = $props();
 
   let selectedChartMetricKey = $state<string | null>(null);
+  let selectedChartMetricGroup = $state<string | null>(null);
+  let selectedChartMetricEntity = $state<string | null>(null);
   let tableExpanded = $state(false);
   let selectedTableTime = $state<number | null>(null);
   let lastSectionKey = $state('');
 
+  const chartMetricGroups = $derived.by(() => {
+    const groups: string[] = [];
+    for (const metric of section.chartMetrics ?? []) {
+      const group = metric.group ?? 'Metrics';
+      if (!groups.includes(group)) groups.push(group);
+    }
+    return groups;
+  });
+
+  const activeChartMetricGroup = $derived(selectedChartMetricGroup ?? chartMetricGroups[0] ?? null);
+
+  const groupedChartMetrics = $derived.by((): TelemetryChartMetric[] => {
+    const metrics = section.chartMetrics ?? [];
+    if (chartMetricGroups.length <= 1) return metrics;
+    return metrics.filter((metric) => (metric.group ?? 'Metrics') === activeChartMetricGroup);
+  });
+
+  const chartMetricEntities = $derived.by(() => {
+    const entities: string[] = [];
+    for (const metric of groupedChartMetrics) {
+      if (!metric.entity) continue;
+      if (!entities.includes(metric.entity)) entities.push(metric.entity);
+    }
+    return entities;
+  });
+
+  const activeChartMetricEntity = $derived(selectedChartMetricEntity ?? chartMetricEntities[0] ?? null);
+
+  const entitySelectorLabel = $derived(
+    activeChartMetricGroup === 'Block Devices'
+      ? 'Device'
+      : activeChartMetricGroup === 'Network'
+        ? 'Interface'
+        : 'Target'
+  );
+
+  const visibleChartMetrics = $derived.by((): TelemetryChartMetric[] => {
+    if (chartMetricEntities.length === 0) return groupedChartMetrics;
+    return groupedChartMetrics.filter((metric) => metric.entity === activeChartMetricEntity);
+  });
+
   const activeChartMetric = $derived.by(() => {
-    if (!section.chartMetrics?.length) return null;
+    if (!visibleChartMetrics.length) return null;
     const selected =
-      selectedChartMetricKey ?? section.defaultChartMetricKey ?? section.chartMetrics[0].key;
-    return section.chartMetrics.find((metric) => metric.key === selected) ?? section.chartMetrics[0];
+      selectedChartMetricKey ?? section.defaultChartMetricKey ?? visibleChartMetrics[0].key;
+    return visibleChartMetrics.find((metric) => metric.key === selected) ?? visibleChartMetrics[0];
   });
 
   const tableSnapshots = $derived(section.tableSnapshots ?? []);
@@ -44,19 +87,41 @@
   const displayedTableRows = $derived(displayedTableSnapshot?.rows ?? section.tableRows);
 
   $effect(() => {
-    const metrics = section.chartMetrics ?? [];
+    const metrics = visibleChartMetrics;
     if (!metrics.length) {
       selectedChartMetricKey = null;
       return;
     }
     if (selectedChartMetricKey && metrics.some((metric) => metric.key === selectedChartMetricKey)) return;
-    selectedChartMetricKey = section.defaultChartMetricKey ?? metrics[0].key;
+    selectedChartMetricKey = metrics.some((metric) => metric.key === section.defaultChartMetricKey)
+      ? (section.defaultChartMetricKey ?? metrics[0].key)
+      : metrics[0].key;
+  });
+
+  $effect(() => {
+    if (chartMetricGroups.length === 0) {
+      selectedChartMetricGroup = null;
+      return;
+    }
+    if (selectedChartMetricGroup && chartMetricGroups.includes(selectedChartMetricGroup)) return;
+    selectedChartMetricGroup = chartMetricGroups[0];
+  });
+
+  $effect(() => {
+    if (chartMetricEntities.length === 0) {
+      selectedChartMetricEntity = null;
+      return;
+    }
+    if (selectedChartMetricEntity && chartMetricEntities.includes(selectedChartMetricEntity)) return;
+    selectedChartMetricEntity = chartMetricEntities[0];
   });
 
   $effect(() => {
     if (lastSectionKey === section.key) return;
     lastSectionKey = section.key;
     tableExpanded = false;
+    selectedChartMetricGroup = null;
+    selectedChartMetricEntity = null;
   });
 
   $effect(() => {
@@ -125,11 +190,45 @@
       {/each}
     </div>
 
-    {#if section.chartMetrics && section.chartMetrics.length > 0}
+    {#if chartMetricGroups.length > 1}
+      <div class="chart-group-tabs" aria-label="Metric sections">
+        {#each chartMetricGroups as group}
+          <button
+            type="button"
+            class="chart-group-tab"
+            class:active={(selectedChartMetricGroup ?? chartMetricGroups[0]) === group}
+            onclick={() => {
+              selectedChartMetricGroup = group;
+              selectedChartMetricEntity = null;
+              selectedChartMetricKey = null;
+            }}
+          >{group}</button>
+        {/each}
+      </div>
+    {/if}
+
+    {#if visibleChartMetrics.length > 0}
       <div class="chart-metric-toolbar">
+        {#if chartMetricEntities.length > 0}
+          <label class="chart-entity-select-label">
+            <span>{entitySelectorLabel}</span>
+            <select
+              class="chart-entity-select"
+              value={activeChartMetricEntity ?? ''}
+              onchange={(event) => {
+                selectedChartMetricEntity = event.currentTarget.value;
+                selectedChartMetricKey = null;
+              }}
+            >
+              {#each chartMetricEntities as entity}
+                <option value={entity}>{entity}</option>
+              {/each}
+            </select>
+          </label>
+        {/if}
         <span class="chart-metric-label">Metric</span>
         <div class="chart-metric-list">
-          {#each section.chartMetrics as metric}
+          {#each visibleChartMetrics as metric}
             <button
               type="button"
               class="chart-metric-chip"
@@ -285,11 +384,67 @@
     gap: 8px;
   }
 
+  .chart-group-tabs {
+    display: flex;
+    gap: 2px;
+    border-bottom: 1px solid #e5e7eb;
+    overflow-x: auto;
+  }
+
+  .chart-group-tab {
+    background: transparent;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    color: #64748b;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 700;
+    padding: 6px 10px;
+    white-space: nowrap;
+  }
+
+  .chart-group-tab:hover {
+    color: #1f2937;
+    background: #f8fafc;
+  }
+
+  .chart-group-tab.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+
   .chart-metric-toolbar {
     display: flex;
     gap: 8px;
     align-items: center;
     flex-wrap: wrap;
+  }
+
+  .chart-entity-select-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: #666;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+
+  .chart-entity-select {
+    min-width: 108px;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    background: #fff;
+    color: #1f2937;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 4px 28px 4px 8px;
+    text-transform: none;
+  }
+
+  .chart-entity-select:focus {
+    outline: 2px solid color-mix(in srgb, var(--accent) 28%, transparent);
+    border-color: var(--accent);
   }
 
   .chart-metric-label {
