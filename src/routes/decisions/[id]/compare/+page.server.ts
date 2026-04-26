@@ -21,6 +21,7 @@ export const load: PageServerLoad = ({ params }) => {
     bench_started_at: string | null;
     post_started_at: string | null;
     finished_at: string | null;
+    host_config: string | null;
     design_id: number;
     design_name: string | null;
     bench_step_type: string | null;
@@ -45,7 +46,7 @@ export const load: PageServerLoad = ({ params }) => {
     .prepare(
       `SELECT br.id, br.name, br.status, br.tps, br.latency_avg_ms, br.latency_stddev_ms, br.transactions,
               br.profile_name, br.run_params, br.started_at, br.bench_started_at, br.post_started_at, br.finished_at,
-              d.id AS design_id, d.name AS design_name,
+              br.host_config, d.id AS design_id, d.name AS design_name,
               rs.type AS bench_step_type,
               rs.pgbench_summary_json,
               rs.sysbench_summary_json,

@@ -29,6 +29,7 @@ export interface CompareRunInfo {
   bench_started_at: string | null;
   post_started_at: string | null;
   finished_at: string | null;
+  host_config?: string | null;
   design_id?: number;
   design_name?: string | null;
   compare_label?: string;

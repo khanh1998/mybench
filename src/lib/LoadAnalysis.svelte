@@ -9,6 +9,7 @@
     color: string;
     bench_started_at: string | null;
     post_started_at: string | null;
+    host_config?: string | null;
   }
   let {
     runs,
@@ -281,8 +282,6 @@
 
   let sqlSort    = $state<{ col: keyof SqlRow; asc: boolean }>({ col: 'delta_exec_time', asc: false });
   let sqlMode    = $state<'total' | 'persec'>('total');
-  let vcpuCount  = $state<number>(4);
-
   let expandedLockNodes       = $state<Set<string>>(new Set());
   let activeLockNode          = $state<ActiveLockNode | null>(null);
   let lockSort                = $state<'times_seen' | 'pid'>('times_seen');
@@ -330,6 +329,30 @@
       AND (${waitAlias}.objid = ${holdAlias}.objid OR (${waitAlias}.objid IS NULL AND ${holdAlias}.objid IS NULL))
       AND (${waitAlias}.objsubid = ${holdAlias}.objsubid OR (${waitAlias}.objsubid IS NULL AND ${holdAlias}.objsubid IS NULL))
     `;
+  }
+
+  function hostConfigValue(run: RunMeta, keys: string[]): number | null {
+    if (!run.host_config?.trim()) return null;
+    try {
+      const config = JSON.parse(run.host_config) as Record<string, unknown>;
+      for (const key of keys) {
+        const value = config[key];
+        const n = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
+        if (Number.isFinite(n) && n > 0) return n;
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  function runVcpuCount(run: RunMeta): number {
+    return hostConfigValue(run, ['vcpu', 'vcpus', 'vCPU', 'nproc', 'cpu_count']) ?? 4;
+  }
+
+  function buildVcpuReferenceLines(run: RunMeta) {
+    const vcpu = runVcpuCount(run);
+    return [{ value: vcpu, label: `${vcpu} vCPU`, color: '#111827' }];
   }
 
   function lockResourceExpr(alias: string): string {
@@ -1325,7 +1348,7 @@
         {@const rawRows = buildAasRawRows(run)}
         <div>
           <div class="run-label" style="color:{run.color}">{run.label}</div>
-          <StackedAreaChart {series} {rawRows} title="AAS by wait type" markers={buildMarkers(run)} originMs={origin(run)} granularity={aasGranularity} showDetailToggle={false} />
+          <StackedAreaChart {series} {rawRows} title="AAS by wait type" markers={buildMarkers(run)} referenceLines={buildVcpuReferenceLines(run)} originMs={origin(run)} granularity={aasGranularity} showDetailToggle={false} />
         </div>
       {/each}
     </div>
@@ -1333,7 +1356,7 @@
     {#each runs as run}
       {@const series = buildAasSeries(run)}
       {@const rawRows = buildAasRawRows(run)}
-      <StackedAreaChart {series} {rawRows} title="AAS by wait type" markers={buildMarkers(run)} originMs={origin(run)} />
+      <StackedAreaChart {series} {rawRows} title="AAS by wait type" markers={buildMarkers(run)} referenceLines={buildVcpuReferenceLines(run)} originMs={origin(run)} />
     {/each}
   {/if}
 </div>
@@ -1364,11 +1387,7 @@
     </div>
   </div>
   <div class="waits-header-row">
-    <p class="section-desc" style="margin:0">Most frequent wait events across active sessions. AAS = avg active sessions (bar scaled to vCPU count).{waitsView === 'broad' ? ' Broad mode groups by wait type.' : ''}</p>
-    <label class="vcpu-label">
-      vCPUs:
-      <input type="number" class="vcpu-input" min="1" max="512" bind:value={vcpuCount} />
-    </label>
+    <p class="section-desc" style="margin:0">Most frequent wait events across active sessions. AAS = avg active sessions (bar scaled to stored vCPU count).{waitsView === 'broad' ? ' Broad mode groups by wait type.' : ''}</p>
   </div>
   <div class="waits-grid" style="margin-top:10px">
     {#each runs as run}
@@ -1376,6 +1395,7 @@
       {@const pageRows = pagedWaits(run.id)}
       {@const totalSnapshots = allRows.length ? Math.max(...allRows.map(r => Number(r.snapshot_count || 1))) : 1}
       {@const totalPages = waitsPageCount(run.id)}
+      {@const vcpuCount = runVcpuCount(run)}
       <div class="waits-panel">
         {#if isCompare}<div class="run-label" style="color:{run.color}">{run.label}</div>{/if}
         {#if (waitsData[run.id] ?? []).length === 0}
@@ -1388,7 +1408,7 @@
                 {#if waitsView === 'detail'}<th>Wait Event</th>{/if}
                 <th style="text-align:right;cursor:pointer;user-select:none" onclick={() => { waitsSort = 'count'; waitsPage = 0; }}>Count{waitsSort === 'count' ? ' ▾' : ''}</th>
                 <th style="text-align:right;cursor:pointer;user-select:none" onclick={() => { waitsSort = 'aas'; waitsPage = 0; }}>AAS{waitsSort === 'aas' ? ' ▾' : ''}</th>
-                <th style="width:100px" title="Load by waits (AAS), bar scaled to {vcpuCount} vCPUs">Load (AAS/{vcpuCount} vCPU)</th>
+                <th style="width:100px" title="Load by waits (AAS), bar scaled to this run's stored {vcpuCount} vCPUs">Load (AAS/{vcpuCount} vCPU)</th>
               </tr>
             </thead>
             <tbody>
@@ -1980,10 +2000,8 @@
   .bar-bg { height: 8px; background: #f0f0f0; border-radius: 4px; overflow: hidden; }
   .bar-fill { height: 100%; border-radius: 4px; transition: width 0.2s; }
 
-  /* Waits header row (desc + vCPU input) */
+  /* Waits header row */
   .waits-header-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-  .vcpu-label { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #555; white-space: nowrap; margin-left: auto; }
-  .vcpu-input { width: 52px; padding: 2px 6px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px; text-align: right; }
 
   /* SQL mode toggle */
   .mode-toggle { display: flex; border: 1px solid #e0e0e0; border-radius: 4px; overflow: hidden; flex-shrink: 0; }

@@ -1,6 +1,7 @@
 <script lang="ts">
   interface ChartSeries { label: string; color: string; points: { t: number; v: number }[]; }
   interface Marker { t: number; label: string; color?: string; }
+  interface ReferenceLine { value: number; label: string; color?: string; }
   interface RawRow { t: number; typeKey: string; eventKey: string; color: string; v: number; }
 
   let {
@@ -8,6 +9,7 @@
     rawRows = [],
     title,
     markers = [],
+    referenceLines = [],
     originMs = null,
     showDetailToggle = true,
     granularity = undefined,
@@ -16,6 +18,7 @@
     rawRows?: RawRow[];
     title: string;
     markers?: Marker[];
+    referenceLines?: ReferenceLine[];
     originMs?: number | null;
     showDetailToggle?: boolean;
     granularity?: 'detail' | 'broad';
@@ -80,7 +83,8 @@
       for (let j = 0; j < n; j++) run[j] += maps[i].get(allTimes[j]) ?? 0;
       tops.push([...run]);
     }
-    return { bottoms, tops, vMax: Math.max(...run, 1) };
+    const lineMax = Math.max(...referenceLines.map((line) => line.value).filter((value) => Number.isFinite(value) && value > 0), 1);
+    return { bottoms, tops, vMax: Math.max(...run, lineMax, 1) };
   });
 
   const hasData = $derived(activeSeries.some(s => s.points.length > 0));
@@ -233,6 +237,14 @@
           {@const xp = tx(m.t)}
           <line x1={xp} y1="0" x2={xp} y2={IH} stroke={m.color ?? '#aaa'} stroke-width="1" stroke-dasharray="4,3" />
           <text x={xp + 3} y="8" font-size="9" fill={m.color ?? '#999'}>{m.label}</text>
+        {/each}
+        <!-- Reference lines -->
+        {#each referenceLines as line}
+          {#if Number.isFinite(line.value) && line.value >= 0}
+            {@const yp = ty(line.value)}
+            <line x1="0" y1={yp} x2={IW} y2={yp} stroke={line.color ?? '#111827'} stroke-width="1.2" stroke-dasharray="6,4" />
+            <text x={IW - 4} y={Math.max(9, yp - 4)} text-anchor="end" font-size="9" fill={line.color ?? '#111827'}>{line.label}</text>
+          {/if}
         {/each}
         <!-- Crosshair + dots -->
         {#if crosshairX !== null}

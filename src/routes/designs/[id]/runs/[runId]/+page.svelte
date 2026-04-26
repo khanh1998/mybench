@@ -31,6 +31,7 @@
     pre_collect_secs: number; post_collect_secs: number;
     is_imported?: number;
     name: string; notes: string; profile_name: string; run_params: string;
+    host_config?: string | null;
     ec2_server_id?: number | null;
     ec2_run_token?: string | null;
     steps: StepResult[];
@@ -653,7 +654,8 @@
   <div class="card">
     <LoadAnalysis
       runs={run ? [{ id: run.id, label: run.name || `Run #${run.id}`, color: '#0066cc',
-        bench_started_at: run.bench_started_at, post_started_at: run.post_started_at }] : []}
+        bench_started_at: run.bench_started_at, post_started_at: run.post_started_at,
+        host_config: run.host_config ?? null }] : []}
       showPhaseFilter={true}
     />
   </div>

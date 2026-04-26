@@ -117,11 +117,12 @@
           label: getRunLabel(runId, true),
           color: COLORS[index % COLORS.length],
           bench_started_at: run.bench_started_at,
-          post_started_at: run.post_started_at
+          post_started_at: run.post_started_at,
+          host_config: run.host_config ?? null
         };
       })
       .filter(
-        (run): run is { id: number; label: string; color: string; bench_started_at: string | null; post_started_at: string | null } =>
+        (run): run is { id: number; label: string; color: string; bench_started_at: string | null; post_started_at: string | null; host_config: string | null } =>
           run !== null
       )
   );
