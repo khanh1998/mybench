@@ -53,6 +53,8 @@ for pid in $(pgrep -x postgres 2>/dev/null | sort -u); do
   cat /proc/$pid/io 2>/dev/null
   echo "===SECTION:pid_schedstat:$pid==="
   cat /proc/$pid/schedstat 2>/dev/null
+  echo "===SECTION:pid_wchan:$pid==="
+  cat /proc/$pid/wchan 2>/dev/null; echo
   echo "===SECTION:pid_fd_count:$pid==="
   ls /proc/$pid/fd 2>/dev/null | wc -l
   echo "===SECTION:pid_status:$pid==="
@@ -302,7 +304,7 @@ func (c *HostMetricsCollector) collectOnce() {
 
 	// Per-PID sections: keys are "pid_stat:<pid>", "pid_statm:<pid>", etc.
 	for key, text := range sections {
-		for _, prefix := range []string{"pid_stat:", "pid_statm:", "pid_io:", "pid_schedstat:", "pid_fd_count:", "pid_status:"} {
+		for _, prefix := range []string{"pid_stat:", "pid_statm:", "pid_io:", "pid_schedstat:", "pid_wchan:", "pid_fd_count:", "pid_status:"} {
 			if !strings.HasPrefix(key, prefix) {
 				continue
 			}
@@ -331,6 +333,10 @@ func (c *HostMetricsCollector) collectOnce() {
 			case "pid_schedstat":
 				if row := parsePidSchedstat(text, pid); row != nil {
 					addRow("host_snap_proc_pid_schedstat", row)
+				}
+			case "pid_wchan":
+				if row := parsePidWchan(text, pid); row != nil {
+					addRow("host_snap_proc_pid_wchan", row)
 				}
 			case "pid_fd_count":
 				if row := parsePidFdCount(text, pid); row != nil {
@@ -462,14 +468,14 @@ func parseMeminfo(text string) result.SnapshotRow {
 		"SReclaimable": "sreclaimable", "SUnreclaim": "sunreclaim",
 		"KernelStack": "kernel_stack", "PageTables": "page_tables",
 		"SecPageTables": "sec_page_tables",
-		"NFS_Unstable": "nfs_unstable", "Bounce": "bounce", "WritebackTmp": "writeback_tmp",
+		"NFS_Unstable":  "nfs_unstable", "Bounce": "bounce", "WritebackTmp": "writeback_tmp",
 		"CommitLimit": "commit_limit", "Committed_AS": "committed_as",
 		"VmallocTotal": "vmalloc_total", "VmallocUsed": "vmalloc_used", "VmallocChunk": "vmalloc_chunk",
 		"Percpu": "percpu", "HardwareCorrupted": "hardware_corrupted",
-		"AnonHugePages": "anon_huge_pages",
+		"AnonHugePages":  "anon_huge_pages",
 		"ShmemHugePages": "shmem_huge_pages", "ShmemPmdMapped": "shmem_pmd_mapped",
 		"FileHugePages": "file_huge_pages", "FilePmdMapped": "file_pmd_mapped",
-		"Unaccepted": "unaccepted",
+		"Unaccepted":      "unaccepted",
 		"HugePages_Total": "hugepages_total", "HugePages_Free": "hugepages_free",
 		"HugePages_Rsvd": "hugepages_rsvd", "HugePages_Surp": "hugepages_surp",
 		"Hugepagesize": "hugepagesize", "Hugetlb": "hugetlb",
@@ -831,6 +837,14 @@ func parsePidSchedstat(text string, pid int) result.SnapshotRow {
 	return row
 }
 
+func parsePidWchan(text string, pid int) result.SnapshotRow {
+	wchan := strings.TrimSpace(text)
+	if wchan == "" {
+		return nil
+	}
+	return result.SnapshotRow{"pid": int64(pid), "wchan": wchan}
+}
+
 func parsePidFdCount(text string, pid int) result.SnapshotRow {
 	v, err := strconv.ParseInt(strings.TrimSpace(text), 10, 64)
 	if err != nil {
@@ -844,7 +858,7 @@ func parsePidStatus(text string, pid int) result.SnapshotRow {
 		"Name": "name", "State": "state", "FDSize": "fd_size", "Threads": "threads",
 		"VmPeak": "vm_peak_kb", "VmSize": "vm_size_kb", "VmRSS": "vm_rss_kb",
 		"RssAnon": "rss_anon_kb", "RssFile": "rss_file_kb", "RssShmem": "rss_shmem_kb",
-		"VmSwap": "vm_swap_kb",
+		"VmSwap":                     "vm_swap_kb",
 		"voluntary_ctxt_switches":    "vol_ctxt_sw",
 		"nonvoluntary_ctxt_switches": "nvol_ctxt_sw",
 	}

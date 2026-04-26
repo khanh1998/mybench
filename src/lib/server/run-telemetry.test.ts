@@ -470,4 +470,150 @@ describe('buildRunTelemetry', () => {
 			}
 		]);
 	});
+
+	it('exposes expanded per-process host metrics', () => {
+		db.exec(`
+			CREATE TABLE host_snap_proc_pid_stat (
+				_id INTEGER PRIMARY KEY AUTOINCREMENT,
+				_run_id INTEGER NOT NULL,
+				_collected_at TEXT NOT NULL,
+				pid INTEGER,
+				comm TEXT,
+				state TEXT,
+				cmdline TEXT,
+				minflt INTEGER,
+				majflt INTEGER,
+				utime INTEGER,
+				stime INTEGER,
+				num_threads INTEGER
+			);
+			CREATE TABLE host_snap_proc_pid_status (
+				_id INTEGER PRIMARY KEY AUTOINCREMENT,
+				_run_id INTEGER NOT NULL,
+				_collected_at TEXT NOT NULL,
+				pid INTEGER,
+				name TEXT,
+				state TEXT,
+				fd_size INTEGER,
+				threads INTEGER,
+				vm_peak_kb INTEGER,
+				vm_size_kb INTEGER,
+				vm_rss_kb INTEGER,
+				rss_anon_kb INTEGER,
+				rss_file_kb INTEGER,
+				rss_shmem_kb INTEGER,
+				vm_swap_kb INTEGER,
+				vol_ctxt_sw INTEGER,
+				nvol_ctxt_sw INTEGER
+			);
+			CREATE TABLE host_snap_proc_pid_io (
+				_id INTEGER PRIMARY KEY AUTOINCREMENT,
+				_run_id INTEGER NOT NULL,
+				_collected_at TEXT NOT NULL,
+				pid INTEGER,
+				rchar INTEGER,
+				wchar INTEGER,
+				syscr INTEGER,
+				syscw INTEGER,
+				read_bytes INTEGER,
+				write_bytes INTEGER,
+				cancelled_write_bytes INTEGER
+			);
+			CREATE TABLE host_snap_proc_pid_schedstat (
+				_id INTEGER PRIMARY KEY AUTOINCREMENT,
+				_run_id INTEGER NOT NULL,
+				_collected_at TEXT NOT NULL,
+				pid INTEGER,
+				run_time_ns INTEGER,
+				wait_time_ns INTEGER,
+				timeslices INTEGER
+			);
+			CREATE TABLE host_snap_proc_pid_fd_count (
+				_id INTEGER PRIMARY KEY AUTOINCREMENT,
+				_run_id INTEGER NOT NULL,
+				_collected_at TEXT NOT NULL,
+				pid INTEGER,
+				fd_count INTEGER
+			);
+			CREATE TABLE host_snap_proc_pid_wchan (
+				_id INTEGER PRIMARY KEY AUTOINCREMENT,
+				_run_id INTEGER NOT NULL,
+				_collected_at TEXT NOT NULL,
+				pid INTEGER,
+				wchan TEXT
+			);
+		`);
+
+		const t1 = '2026-03-30T05:57:59Z';
+		const t2 = '2026-03-30T05:58:09Z';
+		db.prepare(`
+			INSERT INTO host_snap_proc_pid_stat (_run_id, _collected_at, pid, comm, state, cmdline, minflt, majflt, utime, stime, num_threads)
+			VALUES (1, ?, 123, 'postgres', 'S', 'postgres: client backend', ?, ?, ?, ?, ?)
+		`).run(t1, 10, 1, 100, 20, 2);
+		db.prepare(`
+			INSERT INTO host_snap_proc_pid_stat (_run_id, _collected_at, pid, comm, state, cmdline, minflt, majflt, utime, stime, num_threads)
+			VALUES (1, ?, 123, 'postgres', 'R', 'postgres: client backend', ?, ?, ?, ?, ?)
+		`).run(t2, 25, 3, 160, 35, 3);
+		db.prepare(`
+			INSERT INTO host_snap_proc_pid_status (_run_id, _collected_at, pid, name, state, fd_size, threads, vm_peak_kb, vm_size_kb, vm_rss_kb, rss_anon_kb, rss_file_kb, rss_shmem_kb, vm_swap_kb, vol_ctxt_sw, nvol_ctxt_sw)
+			VALUES (1, ?, 123, 'postgres', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`).run(t1, 'S', 64, 2, 200000, 180000, 50000, 30000, 15000, 5000, 0, 100, 10);
+		db.prepare(`
+			INSERT INTO host_snap_proc_pid_status (_run_id, _collected_at, pid, name, state, fd_size, threads, vm_peak_kb, vm_size_kb, vm_rss_kb, rss_anon_kb, rss_file_kb, rss_shmem_kb, vm_swap_kb, vol_ctxt_sw, nvol_ctxt_sw)
+			VALUES (1, ?, 123, 'postgres', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`).run(t2, 'R', 128, 3, 210000, 190000, 64000, 42000, 17000, 5000, 1024, 145, 30);
+		db.prepare(`
+			INSERT INTO host_snap_proc_pid_io (_run_id, _collected_at, pid, rchar, wchar, syscr, syscw, read_bytes, write_bytes, cancelled_write_bytes)
+			VALUES (1, ?, 123, ?, ?, ?, ?, ?, ?, ?)
+		`).run(t1, 1000, 2000, 10, 20, 4096, 8192, 0);
+		db.prepare(`
+			INSERT INTO host_snap_proc_pid_io (_run_id, _collected_at, pid, rchar, wchar, syscr, syscw, read_bytes, write_bytes, cancelled_write_bytes)
+			VALUES (1, ?, 123, ?, ?, ?, ?, ?, ?, ?)
+		`).run(t2, 2500, 5000, 25, 50, 20480, 32768, 1024);
+		db.prepare(`
+			INSERT INTO host_snap_proc_pid_schedstat (_run_id, _collected_at, pid, run_time_ns, wait_time_ns, timeslices)
+			VALUES (1, ?, 123, ?, ?, ?)
+		`).run(t1, 1000000, 2000000, 5);
+		db.prepare(`
+			INSERT INTO host_snap_proc_pid_schedstat (_run_id, _collected_at, pid, run_time_ns, wait_time_ns, timeslices)
+			VALUES (1, ?, 123, ?, ?, ?)
+		`).run(t2, 3000000, 7000000, 9);
+		db.prepare(`INSERT INTO host_snap_proc_pid_fd_count (_run_id, _collected_at, pid, fd_count) VALUES (1, ?, 123, ?)`).run(t1, 12);
+		db.prepare(`INSERT INTO host_snap_proc_pid_fd_count (_run_id, _collected_at, pid, fd_count) VALUES (1, ?, 123, ?)`).run(t2, 18);
+		db.prepare(`INSERT INTO host_snap_proc_pid_wchan (_run_id, _collected_at, pid, wchan) VALUES (1, ?, 123, ?)`).run(t2, 'ep_poll');
+
+		const telemetry = buildRunTelemetry(db, 1);
+		const processes = telemetry.sections.find((section) => section.key === 'host_processes');
+
+		expect(processes?.status).toBe('ok');
+		expect(processes?.chartMetrics?.map((metric) => metric.key)).toEqual([
+			'pid_123_cpu',
+			'pid_123_faults',
+			'pid_123_mem',
+			'pid_123_io_bytes',
+			'pid_123_io_syscalls',
+			'pid_123_sched',
+			'pid_123_timeslices',
+			'pid_123_ctx',
+			'pid_123_threads',
+			'pid_123_fds'
+		]);
+		expect(processes?.tableRows[0]).toEqual(expect.objectContaining({
+			pid: 123,
+			state: 'R',
+			wchan: 'ep_poll',
+			vm_rss_kb: 64000,
+			vm_swap_kb: 1024,
+			threads: 3,
+			fd_count: 18,
+			fd_size: 128,
+			peak_vm_rss_kb: 64000,
+			peak_fd_count: 18
+		}));
+		expect(processes?.chartMetrics?.find((metric) => metric.key === 'pid_123_io_bytes')?.series.map((series) => series.label)).toEqual([
+			'Read KB/s',
+			'Write KB/s',
+			'Cancelled write KB/s'
+		]);
+	});
 });

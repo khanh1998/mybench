@@ -13,7 +13,12 @@
   } = $props();
 
   // --- Derive process list from tableRows (populated by buildHostProcessesSection) ---
-  interface ProcessInfo { pid: number; processName: string; cmdline: string; }
+  interface ProcessInfo {
+    pid: number;
+    processName: string;
+    cmdline: string;
+    row: Record<string, unknown>;
+  }
 
   const processes = $derived.by((): ProcessInfo[] => {
     const seen = new Set<number>();
@@ -26,16 +31,23 @@
         pid,
         processName: String(row.processName ?? row.comm ?? `pid:${pid}`),
         cmdline:     String(row.cmdline ?? ''),
+        row,
       });
     }
     return list;
   });
 
   const METRIC_TYPES = [
-    { key: 'cpu',   label: 'CPU'  },
-    { key: 'mem',   label: 'Mem'  },
-    { key: 'io',    label: 'I/O'  },
-    { key: 'sched', label: 'Sched'},
+    { key: 'cpu',         label: 'CPU' },
+    { key: 'faults',      label: 'Faults' },
+    { key: 'mem',         label: 'Mem' },
+    { key: 'io_bytes',    label: 'I/O Bytes' },
+    { key: 'io_syscalls', label: 'I/O Calls' },
+    { key: 'sched',       label: 'Sched Time' },
+    { key: 'timeslices',  label: 'Timeslices' },
+    { key: 'ctx',         label: 'Ctx Switches' },
+    { key: 'threads',     label: 'Threads' },
+    { key: 'fds',         label: 'FDs' },
   ] as const;
   type MetricTypeKey = typeof METRIC_TYPES[number]['key'];
 
@@ -119,18 +131,6 @@
     {:else}
       <div class="no-data">No {selectedType.toUpperCase()} data for this process.</div>
     {/if}
-
-    <!-- Summary cards (peak RSS per process) -->
-    {#if section.summary.length > 0}
-      <div class="summary-row">
-        {#each section.summary as card}
-          <div class="summary-chip" title="Peak resident set size (pages)">
-            <span class="summary-label">{card.label}</span>
-            <span class="summary-value">{typeof card.value === 'number' ? card.value.toLocaleString() : card.value} pg</span>
-          </div>
-        {/each}
-      </div>
-    {/if}
   {/if}
 </div>
 
@@ -170,6 +170,7 @@
 
   .metric-pills {
     display: flex;
+    flex-wrap: wrap;
     gap: 4px;
   }
 
@@ -207,22 +208,4 @@
     font-size: 13px;
   }
 
-  .summary-row {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-  }
-
-  .summary-chip {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    background: #f5f5f5;
-    border: 1px solid #e0e0e0;
-    border-radius: 6px;
-    padding: 4px 10px;
-    font-size: 11px;
-  }
-  .summary-label { color: #666; font-weight: 600; }
-  .summary-value { color: #222; font-variant-numeric: tabular-nums; font-family: ui-monospace, monospace; }
 </style>

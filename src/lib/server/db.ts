@@ -1188,6 +1188,13 @@ FROM snap_pg_stat_bgwriter WHERE _run_id = ? ORDER BY _collected_at DESC LIMIT 1
       _collected_at TEXT NOT NULL,
       pid INTEGER
     );
+    CREATE TABLE IF NOT EXISTS host_snap_proc_pid_wchan (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL,
+      pid INTEGER,
+      wchan TEXT
+    );
     CREATE TABLE IF NOT EXISTS host_snap_proc_pid_fd_count (
       _id INTEGER PRIMARY KEY AUTOINCREMENT,
       _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,

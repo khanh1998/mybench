@@ -332,7 +332,7 @@ export function importResultIntoRun(runId: number, result: RunnerResult): void {
 
 function hostSnapColumnType(tableName: string, colName: string): string {
 	// Known text discriminator columns
-	const textCols = new Set(['device', 'iface', 'comm', 'state', 'name', 'cpu_id']);
+	const textCols = new Set(['device', 'iface', 'comm', 'state', 'name', 'cpu_id', 'wchan']);
 	if (textCols.has(colName)) return 'TEXT';
 	// PSI values and load averages are REAL
 	if (tableName === 'host_snap_proc_psi') return 'REAL';

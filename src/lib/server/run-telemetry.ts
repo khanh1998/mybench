@@ -2109,8 +2109,21 @@ const HOST_COL_LABELS: Record<string, string> = {
 	run_time_ns: 'Run time ns/s', wait_time_ns: 'Wait time ns/s',
 	// per-pid
 	utime: 'User jiffies/s', stime: 'Sys jiffies/s',
-	resident: 'Resident pages', data: 'Data pages', shared: 'Shared pages',
+	minflt: 'Minor faults/s', majflt: 'Major faults/s',
+	num_threads: 'Threads',
+	vsize: 'Virtual bytes', rss: 'RSS pages',
+	size: 'Total pages', resident: 'Resident pages', shared: 'Shared pages',
+	text: 'Text pages', lib: 'Library pages', data: 'Data pages', dt: 'Dirty pages',
+	rchar: 'Read chars/s', wchar: 'Write chars/s',
+	syscr: 'Read syscalls/s', syscw: 'Write syscalls/s',
 	read_bytes: 'Read KB/s', write_bytes: 'Write KB/s',
+	cancelled_write_bytes: 'Cancelled write KB/s',
+	vm_peak_kb: 'Peak virtual', vm_size_kb: 'Virtual size', vm_rss_kb: 'RSS',
+	rss_anon_kb: 'Anonymous RSS', rss_file_kb: 'File RSS', rss_shmem_kb: 'Shared RSS',
+	vm_swap_kb: 'Swap',
+	threads: 'Threads', fd_size: 'FD table size', fd_count: 'Open FDs',
+	timeslices: 'Timeslices/s',
+	vol_ctxt_sw: 'Voluntary ctx/s', nvol_ctxt_sw: 'Involuntary ctx/s',
 };
 
 // One-line descriptions shown on hover in chart legend and tooltip.
@@ -2198,11 +2211,38 @@ const HOST_COL_DESCS: Record<string, string> = {
 	// per-pid
 	utime: 'CPU jiffies in user mode per second',
 	stime: 'CPU jiffies in kernel mode (syscalls) per second',
+	minflt: 'Minor page faults per second — pages already resident or mapped without disk I/O',
+	majflt: 'Major page faults per second — pages that required disk I/O',
+	num_threads: 'Kernel thread count reported by /proc/pid/stat',
+	vsize: 'Virtual memory size in bytes from /proc/pid/stat',
+	rss: 'Resident set size in pages from /proc/pid/stat',
+	size: 'Total program size in pages from /proc/pid/statm',
 	resident: 'Resident set size in pages (physical memory in use)',
+	text: 'Text/code size in pages',
+	lib: 'Shared library pages, retained for kernel compatibility',
 	data: 'Data + stack size in pages',
+	dt: 'Dirty pages, retained for kernel compatibility',
 	shared: 'Shared memory pages mapped by this process',
+	rchar: 'Bytes returned by read-like syscalls per second, including cache hits',
+	wchar: 'Bytes passed to write-like syscalls per second, before cancellation',
+	syscr: 'Read-like system calls per second',
+	syscw: 'Write-like system calls per second',
 	read_bytes: 'Kilobytes read from storage per second (/proc/pid/io)',
 	write_bytes: 'Kilobytes written to storage per second (/proc/pid/io)',
+	cancelled_write_bytes: 'Kilobytes of previously accounted writes cancelled per second',
+	vm_peak_kb: 'Peak virtual memory size',
+	vm_size_kb: 'Current virtual memory size',
+	vm_rss_kb: 'Resident set size in physical memory',
+	rss_anon_kb: 'Anonymous resident memory such as heap and stack',
+	rss_file_kb: 'File-backed resident memory',
+	rss_shmem_kb: 'Shared memory resident set',
+	vm_swap_kb: 'Swapped-out virtual memory',
+	threads: 'Thread count from /proc/pid/status',
+	fd_size: 'Allocated file descriptor table slots',
+	fd_count: 'Open file descriptors counted from /proc/pid/fd',
+	timeslices: 'Scheduler timeslices per second',
+	vol_ctxt_sw: 'Voluntary context switches per second',
+	nvol_ctxt_sw: 'Involuntary context switches per second',
 };
 
 function buildHostSystemSection(db: Database.Database, runId: number, runStartMs: number): TelemetrySection {
@@ -2443,6 +2483,45 @@ function formatPgProcessName(cmdline: unknown, comm: unknown): string {
 	return desc;
 }
 
+function latestRow(rows: Record<string, unknown>[]): Record<string, unknown> | null {
+	return rows.length > 0 ? rows[rows.length - 1] : null;
+}
+
+function latestValue(rows: Record<string, unknown>[], col: string): unknown {
+	for (let i = rows.length - 1; i >= 0; i--) {
+		const value = rows[i][col];
+		if (value !== null && value !== undefined && value !== '') return value;
+	}
+	return null;
+}
+
+function maxNumber(rows: Record<string, unknown>[], col: string): number | null {
+	let max: number | null = null;
+	for (const row of rows) {
+		const value = Number(row[col]);
+		if (!Number.isFinite(value)) continue;
+		max = max === null ? value : Math.max(max, value);
+	}
+	return max;
+}
+
+function mergeRowsByCollectedAt(...rowSets: Record<string, unknown>[][]): Record<string, unknown>[] {
+	const byTime = new Map<string, Record<string, unknown>>();
+	for (const rows of rowSets) {
+		for (const row of rows) {
+			const t = String(row._collected_at ?? '');
+			if (!t) continue;
+			const existing = byTime.get(t) ?? { _collected_at: row._collected_at };
+			for (const [key, value] of Object.entries(row)) {
+				if (key === '_id' || key === '_run_id') continue;
+				if (value !== null && value !== undefined) existing[key] = value;
+			}
+			byTime.set(t, existing);
+		}
+	}
+	return [...byTime.values()].sort((a, b) => String(a._collected_at).localeCompare(String(b._collected_at)));
+}
+
 function buildHostProcessesSection(db: Database.Database, runId: number, runStartMs: number): TelemetrySection {
 	const noData: TelemetrySection = {
 		key: 'host_processes',
@@ -2456,12 +2535,19 @@ function buildHostProcessesSection(db: Database.Database, runId: number, runStar
 	const pidStatRows      = fetchHostRows(db, 'host_snap_proc_pid_stat', runId);
 	const pidStatmRows     = fetchHostRows(db, 'host_snap_proc_pid_statm', runId);
 	const pidIoRows        = fetchHostRows(db, 'host_snap_proc_pid_io', runId);
+	const pidStatusRows    = fetchHostRows(db, 'host_snap_proc_pid_status', runId);
 	const pidSchedstatRows = fetchHostRows(db, 'host_snap_proc_pid_schedstat', runId);
+	const pidFdRows        = fetchHostRows(db, 'host_snap_proc_pid_fd_count', runId);
+	const pidWchanRows     = fetchHostRows(db, 'host_snap_proc_pid_wchan', runId);
 
 	const allPids = [...new Set([
 		...pidStatRows.map(r => r.pid as number),
 		...pidStatmRows.map(r => r.pid as number),
 		...pidIoRows.map(r => r.pid as number),
+		...pidStatusRows.map(r => r.pid as number),
+		...pidSchedstatRows.map(r => r.pid as number),
+		...pidFdRows.map(r => r.pid as number),
+		...pidWchanRows.map(r => r.pid as number),
 	].filter(p => p != null))].slice(0, 12);
 
 	if (allPids.length === 0) return noData;
@@ -2472,18 +2558,21 @@ function buildHostProcessesSection(db: Database.Database, runId: number, runStar
 	const summary: TelemetryCard[] = [];
 
 	// tableRows doubles as the process list consumed by HostProcessPanel.
-	// Each row: { pid, processName, comm, cmdline, resident, data, shared }
 	const tableRows: Record<string, unknown>[] = [];
 
 	for (const pid of allPids) {
 		const pStatRows  = pidStatRows.filter(r => r.pid === pid);
 		const pStatmRows = pidStatmRows.filter(r => r.pid === pid);
 		const pIoRows    = pidIoRows.filter(r => r.pid === pid);
+		const pStatusRows = pidStatusRows.filter(r => r.pid === pid);
 		const pSchedRows = pidSchedstatRows.filter(r => r.pid === pid);
+		const pFdRows = pidFdRows.filter(r => r.pid === pid);
+		const pWchanRows = pidWchanRows.filter(r => r.pid === pid);
 
 		// Use the first row that has cmdline; fall back to comm
 		const firstStat = pStatRows[0];
-		const comm       = (firstStat?.comm    as string) ?? '';
+		const firstStatus = pStatusRows[0];
+		const comm       = ((firstStat?.comm ?? firstStatus?.name) as string) ?? '';
 		const cmdline    = (firstStat?.cmdline as string) ?? '';
 		const processName = formatPgProcessName(cmdline, comm);
 		const tag = `${processName} (${pid})`;
@@ -2492,39 +2581,99 @@ function buildHostProcessesSection(db: Database.Database, runId: number, runStar
 			const g = buildRateGroup(`pid_${pid}_cpu`, `${tag} — CPU`, `${tag} — CPU jiffies /s`,
 				pStatRows, ['utime', 'stime'], 'count', runStartMs, 1, L, D);
 			if (g) chartMetrics.push(g);
+
+			const faults = buildRateGroup(`pid_${pid}_faults`, `${tag} — Faults`, `${tag} — Page Faults /s`,
+				pStatRows, ['minflt', 'majflt'], 'count', runStartMs, 1, L, D);
+			if (faults) chartMetrics.push(faults);
 		}
-		if (pStatmRows.length > 0) {
+		if (pStatusRows.length > 0) {
+			const g = buildInstantGroup(`pid_${pid}_mem`, `${tag} — Mem`, `${tag} — Memory (bytes)`,
+				pStatusRows, ['vm_rss_kb', 'rss_anon_kb', 'rss_file_kb', 'rss_shmem_kb', 'vm_size_kb', 'vm_peak_kb', 'vm_swap_kb'], 'bytes', runStartMs, 1024, L, D);
+			if (g) chartMetrics.push(g);
+		} else if (pStatmRows.length > 0) {
 			const g = buildInstantGroup(`pid_${pid}_mem`, `${tag} — Mem`, `${tag} — Memory (pages)`,
-				pStatmRows, ['resident', 'data', 'shared'], 'count', runStartMs, 1, L, D);
+				pStatmRows, ['size', 'resident', 'shared', 'text', 'data'], 'count', runStartMs, 1, L, D);
 			if (g) chartMetrics.push(g);
 		}
 		if (pIoRows.length > 1) {
-			const g = buildRateGroup(`pid_${pid}_io`, `${tag} — I/O`, `${tag} — Storage I/O (KB/s)`,
-				pIoRows, ['read_bytes', 'write_bytes'], 'bytes', runStartMs, 1 / 1024, L, D);
+			const g = buildRateGroup(`pid_${pid}_io_bytes`, `${tag} — I/O Bytes`, `${tag} — I/O Bytes (KB/s)`,
+				pIoRows, ['read_bytes', 'write_bytes', 'cancelled_write_bytes'], 'bytes', runStartMs, 1 / 1024, L, D);
 			if (g) chartMetrics.push(g);
+
+			const syscalls = buildRateGroup(`pid_${pid}_io_syscalls`, `${tag} — I/O Syscalls`, `${tag} — I/O Syscalls /s`,
+				pIoRows, ['rchar', 'wchar', 'syscr', 'syscw'], 'count', runStartMs, 1, L, D);
+			if (syscalls) chartMetrics.push(syscalls);
 		}
 		if (pSchedRows.length > 1) {
 			const g = buildRateGroup(`pid_${pid}_sched`, `${tag} — Sched`, `${tag} — Scheduler (ns/s)`,
 				pSchedRows, ['run_time_ns', 'wait_time_ns'], 'count', runStartMs, 1, L, D);
 			if (g) chartMetrics.push(g);
+
+			const slices = buildRateGroup(`pid_${pid}_timeslices`, `${tag} — Timeslices`, `${tag} — Scheduler Timeslices /s`,
+				pSchedRows, ['timeslices'], 'count', runStartMs, 1, L, D);
+			if (slices) chartMetrics.push(slices);
+		}
+		if (pStatusRows.length > 1) {
+			const ctx = buildRateGroup(`pid_${pid}_ctx`, `${tag} — Ctx`, `${tag} — Context Switches /s`,
+				pStatusRows, ['vol_ctxt_sw', 'nvol_ctxt_sw'], 'count', runStartMs, 1, L, D);
+			if (ctx) chartMetrics.push(ctx);
+		}
+		if (pStatusRows.length > 0) {
+			const threads = buildInstantGroup(`pid_${pid}_threads`, `${tag} — Threads`, `${tag} — Threads`,
+				pStatusRows, ['threads'], 'count', runStartMs, 1, L, D);
+			if (threads) chartMetrics.push(threads);
+		} else if (pStatRows.length > 0) {
+			const threads = buildInstantGroup(`pid_${pid}_threads`, `${tag} — Threads`, `${tag} — Threads`,
+				pStatRows, ['num_threads'], 'count', runStartMs, 1, L, D);
+			if (threads) chartMetrics.push(threads);
+		}
+		if (pFdRows.length > 0 || pStatusRows.length > 0) {
+			const fdMetricRows = mergeRowsByCollectedAt(pFdRows, pStatusRows);
+			const fds = buildInstantGroup(`pid_${pid}_fds`, `${tag} — FDs`, `${tag} — File Descriptors`,
+				fdMetricRows, ['fd_count', 'fd_size'], 'count', runStartMs, 1, L, D);
+			if (fds) chartMetrics.push(fds);
 		}
 
 		// Summary: peak resident pages per process
-		if (pStatmRows.length > 0) {
-			const maxRes = Math.max(...pStatmRows.map(r => Number(r.resident) || 0));
-			if (maxRes > 0) summary.push(metricCard(`pid_${pid}_res_peak`, `${processName} Peak RSS`, 'count', maxRes));
+		const peakRssKb = maxNumber(pStatusRows, 'vm_rss_kb');
+		const peakResidentPages = maxNumber(pStatmRows, 'resident');
+		if (peakRssKb !== null && peakRssKb > 0) {
+			summary.push(metricCard(`pid_${pid}_rss_peak`, `${processName} Peak RSS`, 'bytes', peakRssKb * 1024));
+		} else if (peakResidentPages !== null && peakResidentPages > 0) {
+			summary.push(metricCard(`pid_${pid}_res_peak`, `${processName} Peak RSS`, 'count', peakResidentPages));
 		}
 
 		// Row used by HostProcessPanel for the process dropdown
 		const lastStatm = pStatmRows[pStatmRows.length - 1];
+		const lastStatus = latestRow(pStatusRows);
+		const lastFd = latestRow(pFdRows);
+		const lastWchan = latestRow(pWchanRows);
 		tableRows.push({
 			pid,
 			processName,
 			comm,
 			cmdline,
+			state: latestValue(pStatusRows, 'state') ?? latestValue(pStatRows, 'state'),
+			wchan: lastWchan?.wchan ?? null,
 			resident: lastStatm?.resident ?? null,
 			data:     lastStatm?.data     ?? null,
 			shared:   lastStatm?.shared   ?? null,
+			vm_rss_kb: lastStatus?.vm_rss_kb ?? null,
+			vm_size_kb: lastStatus?.vm_size_kb ?? null,
+			vm_swap_kb: lastStatus?.vm_swap_kb ?? null,
+			rss_anon_kb: lastStatus?.rss_anon_kb ?? null,
+			rss_file_kb: lastStatus?.rss_file_kb ?? null,
+			rss_shmem_kb: lastStatus?.rss_shmem_kb ?? null,
+			threads: lastStatus?.threads ?? latestValue(pStatRows, 'num_threads'),
+			fd_count: lastFd?.fd_count ?? null,
+			fd_size: lastStatus?.fd_size ?? null,
+			peak_vm_rss_kb: peakRssKb,
+			peak_resident_pages: peakResidentPages,
+			peak_vm_swap_kb: maxNumber(pStatusRows, 'vm_swap_kb'),
+			peak_fd_count: maxNumber(pFdRows, 'fd_count'),
+			peak_threads: maxNumber(pStatusRows, 'threads') ?? maxNumber(pStatRows, 'num_threads'),
+			latest_read_bytes: latestValue(pIoRows, 'read_bytes'),
+			latest_write_bytes: latestValue(pIoRows, 'write_bytes'),
 		});
 	}
 
@@ -2539,11 +2688,17 @@ function buildHostProcessesSection(db: Database.Database, runId: number, runStar
 		chartSeries: chartMetrics[0]?.series ?? [],
 		chartMetrics,
 		defaultChartMetricKey: chartMetrics[0]?.key,
-		tableTitle: 'Process memory (last snapshot)',
+		tableTitle: 'Process details (last snapshot)',
 		tableColumns: [
 			{ key: 'pid',         label: 'PID',            kind: 'count' },
 			{ key: 'processName', label: 'Process',        kind: 'text'  },
+			{ key: 'state',       label: 'State',          kind: 'text'  },
+			{ key: 'wchan',       label: 'Wait channel',   kind: 'text'  },
 			{ key: 'cmdline',     label: 'Full cmdline',   kind: 'text'  },
+			{ key: 'vm_rss_kb',   label: 'RSS kB',         kind: 'count' },
+			{ key: 'vm_swap_kb',  label: 'Swap kB',        kind: 'count' },
+			{ key: 'threads',     label: 'Threads',        kind: 'count' },
+			{ key: 'fd_count',    label: 'Open FDs',       kind: 'count' },
 			{ key: 'resident',    label: 'Resident pages', kind: 'count' },
 			{ key: 'data',        label: 'Data pages',     kind: 'count' },
 			{ key: 'shared',      label: 'Shared pages',   kind: 'count' },
