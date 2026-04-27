@@ -58,12 +58,20 @@ export const PUT: RequestHandler = async ({ params: routeParams, request }) => {
          script=excluded.script, pgbench_options=excluded.pgbench_options, enabled=excluded.enabled,
          duration_secs=excluded.duration_secs, no_transaction=excluded.no_transaction`
 		);
+		const submittedStepIds = body.steps.map((s: { id: number }) => s.id);
+		const deleteRemovedSteps =
+			submittedStepIds.length > 0
+				? db.prepare(
+						`DELETE FROM design_steps WHERE design_id = ? AND id NOT IN (${submittedStepIds.map(() => '?').join(',')})`
+					)
+				: db.prepare('DELETE FROM design_steps WHERE design_id = ?');
 
 		const doUpsert = db.transaction(() => {
+			deleteRemovedSteps.run(designId, ...submittedStepIds);
 			for (const s of body.steps) {
 				upsert.run({ ...s, design_id: designId, duration_secs: s.duration_secs ?? 0, no_transaction: s.no_transaction ?? 0 });
+				deleteScripts.run(s.id);
 				if (s.type === 'pgbench') {
-					deleteScripts.run(s.id);
 					for (const ps of s.pgbench_scripts ?? []) {
 						insertScript.run(s.id, ps.position, ps.name, ps.weight, ps.weight_expr ?? null, ps.script);
 					}
