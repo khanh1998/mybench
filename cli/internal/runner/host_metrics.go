@@ -208,13 +208,12 @@ func (c *HostMetricsCollector) collectConfig() map[string]any {
 }
 
 func (c *HostMetricsCollector) collectOnce() {
+	ts := time.Now().UTC().Format(time.RFC3339Nano)
 	out, err := c.runCommand(collectionScript)
 	if err != nil {
 		fmt.Printf("warning: host_metrics: collect: %v\n", err)
 		return
 	}
-
-	ts := time.Now().UTC().Format(time.RFC3339)
 	sections := parseSections(out)
 
 	addRow := func(tableName string, row result.SnapshotRow) {
