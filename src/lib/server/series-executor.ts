@@ -363,9 +363,10 @@ async function executeEc2SeriesAsync(
 			}
 		}
 
-		// Cleanup remote plan file
+		// Cleanup remote files (plan, all result files, log dir)
 		try {
-			await exec(conn, `rm -f ${shellQuote(remotePlanPath)}`);
+			const filesToRemove = [remotePlanPath, ...entries.map(e => `${resolvedRemoteDir}/result-${e.token}.json`)];
+			await exec(conn, `rm -f ${filesToRemove.map(shellQuote).join(' ')} && rm -rf ${shellQuote(resolvedLogDir)}`);
 		} catch { /* ignore */ }
 
 		db.prepare(`UPDATE benchmark_series SET status='completed', finished_at=? WHERE id=?`)
