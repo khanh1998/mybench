@@ -2075,6 +2075,40 @@ function buildRateGroup(
 	return { key, label, kind, title, series };
 }
 
+function buildHostDerivedRateGroup(
+	key: string,
+	label: string,
+	title: string,
+	rows: Record<string, unknown>[],
+	seriesDefs: Array<{
+		label: string;
+		description?: string;
+		valueFn: (cur: Record<string, unknown>, prev: Record<string, unknown>, dt: number) => number | null;
+	}>,
+	kind: TelemetryValueKind,
+	runStartMs: number
+): TelemetryChartMetric | null {
+	const series = seriesDefs
+		.map((def, index): TelemetrySeries | null => {
+			const points: TelemetrySeriesPoint[] = [];
+			for (let i = 1; i < rows.length; i++) {
+				const t1 = toMs(rows[i]._collected_at as string | null);
+				const t0 = toMs(rows[i - 1]._collected_at as string | null);
+				if (t1 === null || t0 === null) continue;
+				const dt = (t1 - t0) / 1000;
+				if (dt <= 0) continue;
+				const value = def.valueFn(rows[i], rows[i - 1], dt);
+				if (value === null || !Number.isFinite(value)) continue;
+				points.push({ t: t1 - runStartMs, v: value });
+			}
+			if (points.length === 0) return null;
+			return { label: def.label, description: def.description, color: COLORS[index % COLORS.length], points };
+		})
+		.filter((item): item is TelemetrySeries => item !== null);
+	if (series.length === 0) return null;
+	return { key, label, kind, title, series };
+}
+
 function withChartGroup(metric: TelemetryChartMetric | null, group: string, entity?: string): TelemetryChartMetric | null {
 	if (!metric) return null;
 	return { ...metric, group, entity };
@@ -2123,12 +2157,6 @@ function buildHostDerivedInstantGroup(
 
 // Human-readable labels for raw /proc column names.
 const HOST_COL_LABELS: Record<string, string> = {
-	// vmstat CPU
-	us: 'User %', sy: 'System %', wa: 'IO Wait %', st: 'Stolen %', id: 'Idle %',
-	// vmstat misc
-	intr: 'Interrupts/s', cs: 'Ctx switches/s',
-	si: 'Swap in (pg/s)', so: 'Swap out (pg/s)',
-	r: 'Run queue', b: 'Uninterruptible',
 	// loadavg
 	load1: '1 min', load5: '5 min', load15: '15 min', running_threads: 'Running threads',
 	// meminfo
@@ -2212,19 +2240,6 @@ const HOST_COL_LABELS: Record<string, string> = {
 
 // One-line descriptions shown on hover in chart legend and tooltip.
 const HOST_COL_DESCS: Record<string, string> = {
-	// vmstat CPU
-	us: 'CPU time in user space (non-kernel processes)',
-	sy: 'CPU time in kernel space (system calls, drivers)',
-	wa: 'CPU idle time waiting for I/O to complete',
-	st: 'CPU time stolen by the hypervisor (VMs only)',
-	id: 'CPU completely idle',
-	// vmstat misc
-	intr: 'Hardware and software interrupts per second',
-	cs: 'Process/thread context switches per second',
-	si: 'Pages swapped in from disk per second',
-	so: 'Pages swapped out to disk per second',
-	r: 'Processes waiting to run (run queue length)',
-	b: 'Processes in uninterruptible sleep (blocked on I/O)',
 	// loadavg
 	load1: '1-minute exponential moving average of runnable + uninterruptible tasks',
 	load5: '5-minute load average',
@@ -2339,7 +2354,6 @@ function buildHostSystemSection(db: Database.Database, runId: number, runStartMs
 		tableTitle: '', tableColumns: [], tableRows: [], tableSnapshots: []
 	};
 
-	const vmstatRows     = fetchHostRows(db, 'host_snap_vmstat', runId);
 	const loadavgRows    = fetchHostRows(db, 'host_snap_proc_loadavg', runId);
 	const meminfoRows    = fetchHostRows(db, 'host_snap_proc_meminfo', runId);
 	const statRows       = fetchHostRows(db, 'host_snap_proc_stat', runId);
@@ -2362,7 +2376,7 @@ function buildHostSystemSection(db: Database.Database, runId: number, runStartMs
 		}
 	}
 
-	const hasData = vmstatRows.length > 0 || loadavgRows.length > 0 || meminfoRows.length > 0
+	const hasData = loadavgRows.length > 0 || meminfoRows.length > 0
 		|| statRows.length > 0 || diskstatsRows.length > 0 || fileNrRows.length > 0
 		|| Object.keys(hostConfig).length > 0;
 	if (!hasData) return noData;
@@ -2370,19 +2384,6 @@ function buildHostSystemSection(db: Database.Database, runId: number, runStartMs
 	const L = HOST_COL_LABELS;
 	const D = HOST_COL_DESCS;
 	const chartMetrics: TelemetryChartMetric[] = [];
-
-	// CPU — vmstat already outputs per-second values
-	if (vmstatRows.length > 0) {
-		const g = buildInstantGroup('cpu', 'CPU %', 'CPU Usage (%)', vmstatRows,
-			['us', 'sy', 'wa', 'st', 'id'], 'percent', runStartMs, 1, L, D);
-		pushChartMetric(chartMetrics, withChartGroup(g, 'CPU'));
-		const g2 = buildInstantGroup('ctx_sw', 'Ctx & Interrupts', 'Context Switches & Interrupts /s', vmstatRows,
-			['intr', 'cs'], 'count', runStartMs, 1, L, D);
-		pushChartMetric(chartMetrics, withChartGroup(g2, 'CPU'));
-		const g3 = buildInstantGroup('swap_rate', 'Swap I/O', 'Swap Page Rate /s', vmstatRows,
-			['si', 'so'], 'count', runStartMs, 1, L, D);
-		pushChartMetric(chartMetrics, withChartGroup(g3, 'Memory'));
-	}
 
 	// Load average
 	if (loadavgRows.length > 0) {
@@ -2450,11 +2451,38 @@ function buildHostSystemSection(db: Database.Database, runId: number, runStartMs
 
 	// /proc/stat CPU jiffies → rates
 	if (statRows.length > 1) {
+		const CPU_TOTAL_COLS = ['cpu_user', 'cpu_nice', 'cpu_system', 'cpu_idle', 'cpu_iowait', 'cpu_irq', 'cpu_softirq', 'cpu_steal', 'cpu_guest', 'cpu_guest_nice'];
+		function cpuTotalDelta(cur: Record<string, unknown>, prev: Record<string, unknown>): number {
+			return CPU_TOTAL_COLS.reduce((sum, col) => {
+				const d = Number(cur[col]) - Number(prev[col]);
+				return sum + (Number.isFinite(d) ? d : 0);
+			}, 0);
+		}
+		function cpuPct(cols: string[]): (cur: Record<string, unknown>, prev: Record<string, unknown>) => number | null {
+			return (cur, prev) => {
+				const total = cpuTotalDelta(cur, prev);
+				if (total <= 0) return null;
+				const comp = cols.reduce((sum, col) => {
+					const d = Number(cur[col]) - Number(prev[col]);
+					return sum + (Number.isFinite(d) && d >= 0 ? d : 0);
+				}, 0);
+				return (comp / total) * 100;
+			};
+		}
+		const cpuPctGroup = buildHostDerivedRateGroup('stat_cpu_pct', 'CPU %', 'CPU Usage % (/proc/stat)', statRows, [
+			{ label: 'User %',    valueFn: cpuPct(['cpu_user', 'cpu_nice']) },
+			{ label: 'System %',  valueFn: cpuPct(['cpu_system']) },
+			{ label: 'IO Wait %', valueFn: cpuPct(['cpu_iowait']) },
+			{ label: 'Stolen %',  valueFn: cpuPct(['cpu_steal']) },
+			{ label: 'Idle %',    valueFn: cpuPct(['cpu_idle']) },
+		], 'percent', runStartMs);
+		pushChartMetric(chartMetrics, withChartGroup(cpuPctGroup, 'CPU'));
+
 		const g = buildRateGroup('stat_cpu', 'CPU Jiffies', 'CPU Jiffies /s (/proc/stat)', statRows,
 			['cpu_user', 'cpu_nice', 'cpu_system', 'cpu_iowait', 'cpu_steal', 'cpu_irq', 'cpu_softirq'], 'count', runStartMs, 1, L, D);
 		pushChartMetric(chartMetrics, withChartGroup(g, 'CPU'));
-		const g2 = buildRateGroup('stat_ctx', 'Ctx & Forks', 'Context Switches & Forks /s', statRows,
-			['ctxt', 'processes'], 'count', runStartMs, 1, L, D);
+		const g2 = buildRateGroup('stat_ctx', 'Ctx & Interrupts', 'Context Switches, Interrupts & Forks /s', statRows,
+			['ctxt', 'intr', 'processes'], 'count', runStartMs, 1, L, D);
 		pushChartMetric(chartMetrics, withChartGroup(g2, 'CPU'));
 		const g3 = buildInstantGroup('stat_procs', 'Run Queue', 'Runnable / Blocked Processes', statRows,
 			['procs_running', 'procs_blocked'], 'count', runStartMs, 1, L, D);
@@ -2590,9 +2618,16 @@ function buildHostSystemSection(db: Database.Database, runId: number, runStartMs
 	if (swapTotalKb !== null && swapTotalKb > 0) summary.push(metricCard('host_swap_total', 'Host Swap', 'bytes', swapTotalKb * 1024));
 	const swappiness = toNumber(hostConfig.swappiness);
 	if (swappiness !== null) summary.push(metricCard('host_swappiness', 'Swappiness', 'count', swappiness));
-	if (vmstatRows.length > 0) {
-		const maxWa = Math.max(...vmstatRows.map(r => Number(r.wa) || 0));
-		summary.push(metricCard('host_cpu_iowait_peak', 'Peak IO Wait', 'percent', maxWa / 100));
+	if (statRows.length > 1) {
+		const CPU_TOTAL_COLS = ['cpu_user', 'cpu_nice', 'cpu_system', 'cpu_idle', 'cpu_iowait', 'cpu_irq', 'cpu_softirq', 'cpu_steal', 'cpu_guest', 'cpu_guest_nice'];
+		let maxIowaitPct = 0;
+		for (let i = 1; i < statRows.length; i++) {
+			const total = CPU_TOTAL_COLS.reduce((s, c) => s + Math.max(0, Number(statRows[i][c]) - Number(statRows[i-1][c])), 0);
+			if (total <= 0) continue;
+			const iowait = Math.max(0, Number(statRows[i].cpu_iowait) - Number(statRows[i-1].cpu_iowait));
+			maxIowaitPct = Math.max(maxIowaitPct, (iowait / total) * 100);
+		}
+		if (maxIowaitPct > 0) summary.push(metricCard('host_cpu_iowait_peak', 'Peak IO Wait', 'percent', maxIowaitPct / 100));
 	}
 	if (meminfoRows.length > 0) {
 		const minAvail = Math.min(...meminfoRows.map(r => Number(r.mem_available) || Infinity));
@@ -2611,7 +2646,7 @@ function buildHostSystemSection(db: Database.Database, runId: number, runStartMs
 		if (maxFileUse > 0) summary.push(metricCard('host_file_use_peak', 'Peak File Table', 'percent', maxFileUse));
 	}
 
-	// Table: last vmstat + meminfo snapshot
+	// Table: last /proc snapshot
 	const tableRows: Record<string, unknown>[] = [];
 	for (const [k, v] of Object.entries(hostConfig)) {
 		tableRows.push({
@@ -2652,13 +2687,6 @@ function buildHostSystemSection(db: Database.Database, runId: number, runStartMs
 		'cpu_some_avg60', 'memory_some_avg60', 'io_some_avg60'
 	], '%');
 	addLastRows('/proc/sys/fs/file-nr', fileNrRows, ['allocated', 'max']);
-	const lastVmstat = vmstatRows[vmstatRows.length - 1];
-	if (lastVmstat) {
-		for (const [k, v] of Object.entries(lastVmstat)) {
-			if (k.startsWith('_')) continue;
-			tableRows.push({ source: 'vmstat', metric: L[k] ?? k, raw: k, value: v, unit: '', value_kind: 'count' });
-		}
-	}
 	const lastMeminfo = meminfoRows[meminfoRows.length - 1];
 	if (lastMeminfo) {
 		for (const [k, v] of Object.entries(lastMeminfo)) {

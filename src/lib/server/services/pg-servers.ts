@@ -305,9 +305,9 @@ export async function testPgServerSsh(serverId: number): Promise<{ ok: boolean; 
 	}
 
 	try {
-		const { stdout, code } = await exec(conn, 'which vmstat; which iostat; echo ok');
+		const { stdout, code } = await exec(conn, 'which iostat; echo ok');
 		if (code !== 0) {
-			return { ok: false, error: 'Connected but could not verify vmstat/iostat availability' };
+			return { ok: false, error: 'Connected but could not verify iostat availability' };
 		}
 		const lines = stdout.trim().split('\n').filter(Boolean);
 		const tools = lines.filter((l) => l !== 'ok');

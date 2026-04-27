@@ -13,12 +13,10 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// collectionScript reads all proc files and vmstat in one SSH round trip.
+// collectionScript reads all proc files in one SSH round trip.
 // Sections are delimited by ===SECTION:<name>=== markers.
 // Per-PID sections use ===SECTION:pid_<type>:<pid>=== markers.
 const collectionScript = `
-echo '===SECTION:vmstat==='
-vmstat -n 1 2 2>/dev/null
 echo '===SECTION:loadavg==='
 cat /proc/loadavg 2>/dev/null
 echo '===SECTION:meminfo==='
@@ -238,11 +236,6 @@ func (c *HostMetricsCollector) collectOnce() {
 		}
 	}
 
-	if text, ok := sections["vmstat"]; ok {
-		if row := parseVmstat(text); row != nil {
-			addRow("host_snap_vmstat", row)
-		}
-	}
 	if text, ok := sections["loadavg"]; ok {
 		if row := parseLoadavg(text); row != nil {
 			addRow("host_snap_proc_loadavg", row)
@@ -378,48 +371,6 @@ func parseSections(output string) map[string]string {
 
 // --- Parsers ---
 
-func parseVmstat(text string) result.SnapshotRow {
-	var nonEmpty []string
-	for _, l := range strings.Split(text, "\n") {
-		if strings.TrimSpace(l) != "" {
-			nonEmpty = append(nonEmpty, l)
-		}
-	}
-	// Need at least: header-section-line, header-col-line, at least one data row
-	if len(nonEmpty) < 3 {
-		return nil
-	}
-	headers := strings.Fields(nonEmpty[1])
-	data := strings.Fields(nonEmpty[len(nonEmpty)-1])
-
-	// "in" is a SQL keyword — rename to "intr"
-	colMap := map[string]string{
-		"r": "r", "b": "b",
-		"swpd": "swpd", "free": "free", "buff": "buff", "cache": "cache",
-		"si": "si", "so": "so",
-		"bi": "bi", "bo": "bo",
-		"in": "intr", "cs": "cs",
-		"us": "us", "sy": "sy", "id": "id", "wa": "wa", "st": "st", "gu": "gu",
-	}
-
-	row := result.SnapshotRow{}
-	for i, h := range headers {
-		if i >= len(data) {
-			break
-		}
-		dbCol, ok := colMap[h]
-		if !ok {
-			continue
-		}
-		if v, err := strconv.ParseInt(data[i], 10, 64); err == nil {
-			row[dbCol] = v
-		}
-	}
-	if len(row) == 0 {
-		return nil
-	}
-	return row
-}
 
 func parseLoadavg(text string) result.SnapshotRow {
 	fields := strings.Fields(strings.TrimSpace(text))
@@ -527,6 +478,13 @@ func parseProcStat(text string) result.SnapshotRow {
 					if v, err := strconv.ParseInt(fields[i+1], 10, 64); err == nil {
 						row[col] = v
 					}
+				}
+			}
+		case "intr":
+			// First number after "intr" is the total interrupt count.
+			if len(fields) >= 2 {
+				if v, err := strconv.ParseInt(fields[1], 10, 64); err == nil {
+					row["intr"] = v
 				}
 			}
 		case "ctxt", "processes", "procs_running", "procs_blocked":
