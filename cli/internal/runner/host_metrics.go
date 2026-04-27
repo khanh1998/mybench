@@ -317,9 +317,7 @@ func (c *HostMetricsCollector) collectOnce() {
 			switch sectionType {
 			case "pid_stat":
 				if row := parsePidStat(text, pid); row != nil {
-					if cl, ok := cmdlineMap[pid]; ok {
-						row["cmdline"] = cl
-					}
+					row["cmdline"] = cmdlineMap[pid]
 					addRow("host_snap_proc_pid_stat", row)
 				}
 			case "pid_statm":

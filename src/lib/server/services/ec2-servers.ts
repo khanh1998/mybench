@@ -68,7 +68,10 @@ export function deleteEc2Server(ec2ServerId: number): { deleted: true; ec2_serve
 	const db = getDb();
 	const existing = db.prepare('SELECT id, name FROM ec2_servers WHERE id = ?').get(ec2ServerId) as { id: number; name: string } | undefined;
 	if (!existing) throw new Error(`EC2 server ${ec2ServerId} not found`);
-	db.prepare('DELETE FROM ec2_servers WHERE id = ?').run(ec2ServerId);
+	db.transaction(() => {
+		db.prepare('UPDATE benchmark_runs SET ec2_server_id = NULL WHERE ec2_server_id = ?').run(ec2ServerId);
+		db.prepare('DELETE FROM ec2_servers WHERE id = ?').run(ec2ServerId);
+	})();
 	return { deleted: true, ec2_server_id: ec2ServerId, name: existing.name };
 }
 

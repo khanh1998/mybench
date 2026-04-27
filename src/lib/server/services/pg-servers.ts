@@ -101,7 +101,10 @@ export function deletePgServer(serverId: number): { deleted: true; server_id: nu
 	const db = getDb();
 	const existing = db.prepare('SELECT id, name FROM pg_servers WHERE id = ?').get(serverId) as { id: number; name: string } | undefined;
 	if (!existing) throw new Error(`PostgreSQL connection ${serverId} not found`);
-	db.prepare('DELETE FROM pg_servers WHERE id = ?').run(serverId);
+	db.transaction(() => {
+		db.prepare('UPDATE designs SET server_id = NULL WHERE server_id = ?').run(serverId);
+		db.prepare('DELETE FROM pg_servers WHERE id = ?').run(serverId);
+	})();
 	return { deleted: true, server_id: serverId, name: existing.name };
 }
 
