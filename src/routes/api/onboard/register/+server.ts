@@ -23,6 +23,7 @@ export const POST: RequestHandler = async ({ request }) => {
 
 	const dbUser = pg_config.db_user ?? 'mybench';
 	const dbName = pg_config.db_name ?? 'mybench';
+	const vpc = client.vpc ?? '';
 
 	// Save EC2 (client droplet) — SSH via public IP
 	const { server: ec2Server } = saveEc2Server({
@@ -32,7 +33,8 @@ export const POST: RequestHandler = async ({ request }) => {
 		port: 22,
 		private_key: client.private_key,
 		remote_dir: '~/mybench-bench',
-		log_dir: '/tmp/mybench-logs'
+		log_dir: '/tmp/mybench-logs',
+		vpc
 	});
 
 	// Save PG server — connect via public IP (mybench runs locally, can't reach private VPC)
@@ -48,7 +50,9 @@ export const POST: RequestHandler = async ({ request }) => {
 		ssh_host: db.public_host,
 		ssh_port: 22,
 		ssh_user: db.user ?? 'root',
-		ssh_private_key: db.private_key
+		ssh_private_key: db.private_key,
+		private_host: db.private_ip,
+		vpc
 	});
 
 	// Test both

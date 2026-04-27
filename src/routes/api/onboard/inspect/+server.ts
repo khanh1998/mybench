@@ -55,6 +55,12 @@ export const POST: RequestHandler = async ({ request }) => {
 			tools['postgresql'] = pgRes.code !== 0
 				? { ok: false, error: 'not installed (psql not found on PATH)' }
 				: { ok: true, version: pgRes.stdout.trim() };
+
+			// perf (optional — needed for CPU profiling)
+			const perfRes = await exec(conn, 'perf --version 2>&1 || exit 1');
+			tools['perf'] = perfRes.code !== 0
+				? { ok: false, error: 'not installed' }
+				: { ok: true, version: perfRes.stdout.trim() };
 		}
 
 		return json({ ok: true, tools });

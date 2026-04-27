@@ -7,10 +7,30 @@ function buildConfigureCmd(
 	clientPrivateIp: string,
 	dbUser: string,
 	dbPass: string,
-	dbName: string
+	dbName: string,
+	tuneConfig: string | null
 ): string {
 	// Escape single quotes in password by ending quote, adding escaped quote, reopening
 	const escapedPass = dbPass.replace(/'/g, "'\\''");
+
+	const tuneBlock = tuneConfig
+		? `
+echo ""
+echo "==> Writing performance tuning config to conf.d/mybench-tune.conf..."
+PG_CONF_DIR=$(dirname "$PG_CONF")
+sudo mkdir -p "$PG_CONF_DIR/conf.d"
+# Enable include_dir in postgresql.conf if not already set
+grep -q "^include_dir" "$PG_CONF" || echo "include_dir = 'conf.d'" | sudo tee -a "$PG_CONF"
+sudo tee "$PG_CONF_DIR/conf.d/mybench-tune.conf" > /dev/null << 'TUNEEOF'
+${tuneConfig}
+TUNEEOF
+echo "Tuning config written. Delete $PG_CONF_DIR/conf.d/mybench-tune.conf to revert."
+`
+		: `
+echo ""
+echo "==> Skipping performance tuning (no config provided)."
+`;
+
 	return `
 set -e
 echo "==> Finding PostgreSQL config files..."
@@ -35,6 +55,7 @@ else
   echo "pg_stat_statements added to shared_preload_libraries."
 fi
 
+${tuneBlock}
 echo ""
 echo "==> Adding pg_hba.conf rules..."
 if grep -qF "${clientPrivateIp}/32" "$PG_HBA"; then
@@ -91,7 +112,7 @@ echo "==> Configuration complete!"
  */
 export const POST: RequestHandler = async ({ request }) => {
 	const body = await request.json();
-	const { host, user, private_key, db_private_ip, client_private_ip, db_user, db_pass, db_name } = body;
+	const { host, user, private_key, db_private_ip, client_private_ip, db_user, db_pass, db_name, tune_config } = body;
 	if (!host) throw error(400, 'host is required');
 	if (!private_key) throw error(400, 'private_key is required');
 	if (!db_private_ip) throw error(400, 'db_private_ip is required');
@@ -99,7 +120,7 @@ export const POST: RequestHandler = async ({ request }) => {
 	if (!db_pass) throw error(400, 'db_pass is required');
 
 	const server = { id: 0, name: '', host, user: user ?? 'root', port: 22, private_key, remote_dir: '~', log_dir: '/tmp', vpc: '' };
-	const cmd = buildConfigureCmd(db_private_ip, client_private_ip, db_user ?? 'mybench', db_pass, db_name ?? 'mybench');
+	const cmd = buildConfigureCmd(db_private_ip, client_private_ip, db_user ?? 'mybench', db_pass, db_name ?? 'mybench', tune_config ?? null);
 
 	const stream = new ReadableStream({
 		async start(controller) {

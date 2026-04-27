@@ -22,6 +22,18 @@
 		error?: string;
 	}
 
+	// ── Helpers ──────────────────────────────────────────────────────────────────
+	function randomPassword(len = 24): string {
+		const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$%^&*';
+		return Array.from(crypto.getRandomValues(new Uint8Array(len)))
+			.map(b => chars[b % chars.length]).join('');
+	}
+	function randomVpcTag(): string {
+		const hex = Array.from(crypto.getRandomValues(new Uint8Array(3)))
+			.map(b => b.toString(16).padStart(2, '0')).join('');
+		return `vpc-${hex}`;
+	}
+
 	// ── State ────────────────────────────────────────────────────────────────────
 	let currentStep = $state(1);
 
@@ -36,19 +48,22 @@
 	let connectingDb = $state(false);
 	let clientInfo = $state<ConnectResult | null>(null);
 	let dbInfo = $state<ConnectResult | null>(null);
+	let clientPrivateIp = $state('');
+	let dbPrivateIp = $state('');
+	let vpcTag = $state(randomVpcTag());
 
 	// Step 3
 	let clientInspect = $state<InspectResult | null>(null);
 	let dbInspect = $state<InspectResult | null>(null);
 	let inspecting = $state(false);
-	// Per-tool install state: key = "client:pgbench" | "db:postgresql"
-	let installing = $state<string | null>(null);
+	// Set of currently-running install keys ("client:pgbench", "db:postgresql", …)
+	let installing = $state(new Set<string>());
 	let installOutputs = $state<Record<string, string>>({});
 	let installResults = $state<Record<string, boolean>>({});
 
 	// Step 4
 	let pgUser = $state('mybench');
-	let pgPass = $state('');
+	let pgPass = $state(randomPassword());
 	let pgDb = $state('mybench');
 	let configuring = $state(false);
 	let configureOutput = $state('');
@@ -60,15 +75,22 @@
 	let registering = $state(false);
 	let registerResult = $state<RegisterResult | null>(null);
 
-	// ── Helpers ──────────────────────────────────────────────────────────────────
+	// ── Derived ──────────────────────────────────────────────────────────────────
 	const step1Done = $derived(sshKey.trim().length > 0);
-	const step2Done = $derived(!!(clientInfo?.ok && dbInfo?.ok && clientInfo.private_ip && dbInfo.private_ip));
+	const step2Done = $derived(!!(clientInfo?.ok && dbInfo?.ok && clientPrivateIp.trim() && dbPrivateIp.trim()));
+	// Two different public IPs = two different machines; allow parallel installs per host
+	const sameHost = $derived(clientHost.trim() !== '' && clientHost.trim() === dbHost.trim());
+	function isInstallBlocked(key: string): boolean {
+		if (sameHost) return installing.size > 0;
+		const prefix = key.split(':')[0];
+		return [...installing].some(k => k.startsWith(prefix + ':'));
+	}
 	const allInstallsDone = $derived(() => {
 		const ct = clientInspect?.tools;
 		const dt = dbInspect?.tools;
 		if (!ct || !dt) return false;
 		const clientTools = ['mybench-runner', 'pgbench', 'sysbench'];
-		const dbTools = ['postgresql'];
+		const dbTools = ['postgresql']; // perf is optional, not required
 		return (
 			clientTools.every(t => ct[t]?.ok || installResults[`client:${t}`] === true) &&
 			dbTools.every(t => dt[t]?.ok || installResults[`db:${t}`] === true)
@@ -114,8 +136,13 @@
 				body: JSON.stringify({ host, user: sshUser, private_key: sshKey })
 			});
 			const data: ConnectResult = await res.json();
-			if (role === 'client') clientInfo = data;
-			else dbInfo = data;
+			if (role === 'client') {
+				clientInfo = data;
+				if (data.ok && data.private_ip) clientPrivateIp = data.private_ip;
+			} else {
+				dbInfo = data;
+				if (data.ok && data.private_ip) dbPrivateIp = data.private_ip;
+			}
 		} finally {
 			if (role === 'client') connectingClient = false;
 			else connectingDb = false;
@@ -142,49 +169,65 @@
 
 	async function installClientTool(tool: 'mybench-runner' | 'pgbench' | 'sysbench') {
 		const key = `client:${tool}`;
-		installing = key;
+		installing = new Set([...installing, key]);
 		installOutputs[key] = '';
 		installResults[key] = false;
 		try {
 			const ok = await sseStream('/api/ec2/install', { host: clientHost, user: sshUser, private_key: sshKey, remote_dir: '~/mybench-bench', log_dir: '/tmp/mybench-logs', tool },
 				(line) => { installOutputs[key] += line + '\n'; });
 			installResults[key] = ok;
-			// Re-inspect client after install
 			const res = await fetch('/api/onboard/inspect', { method: 'POST', headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ host: clientHost, user: sshUser, private_key: sshKey, role: 'client' }) });
 			clientInspect = await res.json();
 		} finally {
-			installing = null;
+			installing = new Set([...installing].filter(k => k !== key));
 		}
 	}
 
 	async function installPostgres() {
 		const key = 'db:postgresql';
-		installing = key;
+		installing = new Set([...installing, key]);
 		installOutputs[key] = '';
 		installResults[key] = false;
 		try {
 			const ok = await sseStream('/api/onboard/install-pg', { host: dbHost, user: sshUser, private_key: sshKey },
 				(line) => { installOutputs[key] += line + '\n'; });
 			installResults[key] = ok;
-			// Re-inspect db after install
 			const res = await fetch('/api/onboard/inspect', { method: 'POST', headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ host: dbHost, user: sshUser, private_key: sshKey, role: 'db' }) });
 			dbInspect = await res.json();
 		} finally {
-			installing = null;
+			installing = new Set([...installing].filter(k => k !== key));
+		}
+	}
+
+	async function installPerf() {
+		const key = 'db:perf';
+		installing = new Set([...installing, key]);
+		installOutputs[key] = '';
+		installResults[key] = false;
+		try {
+			const ok = await sseStream('/api/onboard/install-perf', { host: dbHost, user: sshUser, private_key: sshKey },
+				(line) => { installOutputs[key] += line + '\n'; });
+			installResults[key] = ok;
+			const res = await fetch('/api/onboard/inspect', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ host: dbHost, user: sshUser, private_key: sshKey, role: 'db' }) });
+			dbInspect = await res.json();
+		} finally {
+			installing = new Set([...installing].filter(k => k !== key));
 		}
 	}
 
 	async function runConfigure() {
-		if (!clientInfo?.private_ip || !dbInfo?.private_ip || !pgPass.trim()) return;
+		if (!clientPrivateIp.trim() || !dbPrivateIp.trim() || !pgPass.trim()) return;
 		configuring = true; configureOutput = ''; configureOk = null; configureDone = false;
 		try {
 			const ok = await sseStream('/api/onboard/configure-pg', {
 				host: dbHost, user: sshUser, private_key: sshKey,
-				db_private_ip: dbInfo.private_ip,
-				client_private_ip: clientInfo.private_ip,
-				db_user: pgUser, db_pass: pgPass, db_name: pgDb
+				db_private_ip: dbPrivateIp.trim(),
+				client_private_ip: clientPrivateIp.trim(),
+				db_user: pgUser, db_pass: pgPass, db_name: pgDb,
+				tune_config: tuneConfig.trim() || null
 			}, (line) => { configureOutput += line + '\n'; });
 			configureOk = ok;
 			configureDone = true;
@@ -200,14 +243,34 @@
 				method: 'POST', headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
 					cluster_name: clusterName,
-					client: { host: clientHost, user: sshUser, private_key: sshKey },
-					db: { public_host: dbHost, private_ip: dbInfo?.private_ip, user: sshUser, private_key: sshKey },
+					client: { host: clientHost, user: sshUser, private_key: sshKey, private_ip: clientPrivateIp.trim(), vpc: vpcTag },
+					db: { public_host: dbHost, private_ip: dbPrivateIp.trim(), user: sshUser, private_key: sshKey, vpc: vpcTag },
 					pg_config: { db_user: pgUser, db_pass: pgPass, db_name: pgDb }
 				})
 			});
 			registerResult = await res.json();
 		} finally {
 			registering = false;
+		}
+	}
+
+	// Step 4 — auto-tune
+	let tuneConfig = $state('');
+	let detecting = $state(false);
+	let detectError = $state('');
+
+	async function detectTune() {
+		detecting = true; detectError = ''; tuneConfig = '';
+		try {
+			const res = await fetch('/api/onboard/detect-tune', {
+				method: 'POST', headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ host: dbHost, user: sshUser, private_key: sshKey })
+			});
+			const data = await res.json();
+			if (data.ok) tuneConfig = data.config;
+			else detectError = data.error ?? 'Detection failed';
+		} finally {
+			detecting = false;
 		}
 	}
 
@@ -275,7 +338,7 @@
 		</div>
 		{#if currentStep === 2}
 		<div class="step-body">
-			<p class="hint">Enter the public IPv4 of each droplet (visible in the DigitalOcean dashboard). mybench will SSH in and auto-detect the private IP used for internal VPC traffic.</p>
+			<p class="hint">Enter the public IPv4 of each droplet. mybench will SSH in and auto-detect the private IP — you can correct it if needed.</p>
 			<div class="droplet-grid">
 				<!-- Client -->
 				<div class="droplet-card">
@@ -292,11 +355,16 @@
 							<div class="connect-result ok">
 								<div>✓ Connected — <strong>{clientInfo.hostname}</strong></div>
 								<div>{clientInfo.os_release}</div>
-								<div>Private IP: <code>{clientInfo.private_ip ?? '(none detected)'}</code></div>
 							</div>
 						{:else}
 							<div class="connect-result fail">✗ {clientInfo.error}</div>
 						{/if}
+					{/if}
+					{#if clientInfo?.ok}
+						<div class="form-group" style="margin-top:10px">
+							<label for="client-private-ip">Private IP</label>
+							<input id="client-private-ip" bind:value={clientPrivateIp} placeholder="10.x.x.x" />
+						</div>
 					{/if}
 				</div>
 				<!-- DB -->
@@ -314,14 +382,26 @@
 							<div class="connect-result ok">
 								<div>✓ Connected — <strong>{dbInfo.hostname}</strong></div>
 								<div>{dbInfo.os_release}</div>
-								<div>Private IP: <code>{dbInfo.private_ip ?? '(none detected)'}</code></div>
 							</div>
 						{:else}
 							<div class="connect-result fail">✗ {dbInfo.error}</div>
 						{/if}
 					{/if}
+					{#if dbInfo?.ok}
+						<div class="form-group" style="margin-top:10px">
+							<label for="db-private-ip">Private IP</label>
+							<input id="db-private-ip" bind:value={dbPrivateIp} placeholder="10.x.x.x" />
+						</div>
+					{/if}
 				</div>
 			</div>
+			{#if clientInfo?.ok || dbInfo?.ok}
+				<div class="form-group" style="max-width:200px; margin-bottom:12px">
+					<label for="vpc-tag">VPC Network Tag <span style="color:#888; font-weight:400">(shared)</span></label>
+					<input id="vpc-tag" bind:value={vpcTag} placeholder="vpc-abc123" />
+					<span style="font-size:11px; color:#888">Both servers must share the same tag for runner→db private routing.</span>
+				</div>
+			{/if}
 			<button class="primary" disabled={!step2Done} onclick={async () => { currentStep = 3; await runInspect(); }}>
 				Next: Check Dependencies →
 			</button>
@@ -358,9 +438,9 @@
 										<span class="tool-version">{s?.version ?? 'installed'}</span>
 									{:else}
 										<button
-											disabled={installing !== null}
+											disabled={isInstallBlocked(key)}
 											onclick={() => installClientTool(tool as 'mybench-runner' | 'pgbench' | 'sysbench')}>
-											{installing === key ? 'Installing…' : 'Install'}
+											{installing.has(key) ? 'Installing…' : 'Install'}
 										</button>
 									{/if}
 								</div>
@@ -378,27 +458,41 @@
 					<div class="droplet-card">
 						<div class="droplet-label">DB Droplet</div>
 						{#if dbInspect?.ok}
-							{#each ['postgresql'] as tool}
-								{@const s = dbInspect.tools?.[tool]}
-								{@const key = `db:${tool}`}
-								{@const isInstalled = s?.ok || installResults[key]}
-								<div class="tool-row">
-									<span class="tool-icon {toolClass(s, key)}">{toolIcon(s, key)}</span>
-									<span class="tool-name">{tool}</span>
-									{#if isInstalled}
-										<span class="tool-version">{s?.version ?? 'installed'}</span>
-									{:else}
-										<button
-											disabled={installing !== null}
-											onclick={() => installPostgres()}>
-											{installing === key ? 'Installing…' : 'Install PG 18'}
-										</button>
-									{/if}
-								</div>
-								{#if installOutputs[key]}
-									<pre class="output install-out">{installOutputs[key]}</pre>
+							{@const pgKey = 'db:postgresql'}
+							{@const pgS = dbInspect.tools?.['postgresql']}
+							{@const pgInstalled = pgS?.ok || installResults[pgKey]}
+							<div class="tool-row">
+								<span class="tool-icon {toolClass(pgS, pgKey)}">{toolIcon(pgS, pgKey)}</span>
+								<span class="tool-name">postgresql</span>
+								{#if pgInstalled}
+									<span class="tool-version">{pgS?.version ?? 'installed'}</span>
+								{:else}
+									<button disabled={isInstallBlocked(pgKey)} onclick={() => installPostgres()}>
+										{installing.has(pgKey) ? 'Installing…' : 'Install PG 18'}
+									</button>
 								{/if}
-							{/each}
+							</div>
+							{#if installOutputs[pgKey]}
+								<pre class="output install-out">{installOutputs[pgKey]}</pre>
+							{/if}
+
+							{@const perfKey = 'db:perf'}
+							{@const perfS = dbInspect.tools?.['perf']}
+							{@const perfInstalled = perfS?.ok || installResults[perfKey]}
+							<div class="tool-row">
+								<span class="tool-icon {toolClass(perfS, perfKey)}">{toolIcon(perfS, perfKey)}</span>
+								<span class="tool-name">perf <span style="color:#888; font-size:11px">(optional)</span></span>
+								{#if perfInstalled}
+									<span class="tool-version">{perfS?.version ?? 'installed'}</span>
+								{:else}
+									<button disabled={isInstallBlocked(perfKey)} onclick={() => installPerf()}>
+										{installing.has(perfKey) ? 'Installing…' : 'Install'}
+									</button>
+								{/if}
+							</div>
+							{#if installOutputs[perfKey]}
+								<pre class="output install-out">{installOutputs[perfKey]}</pre>
+							{/if}
 						{:else if dbInspect && !dbInspect.ok}
 							<div class="error">{dbInspect.error}</div>
 						{:else}
@@ -428,10 +522,13 @@
 			<details class="transparency">
 				<summary>What this will do (click to expand)</summary>
 				<ul>
-					<li>Find <code>postgresql.conf</code> via <code>SHOW config_file</code> and set <code>listen_addresses = 'localhost,{dbInfo?.private_ip ?? '&lt;db-private-ip&gt;'}'</code></li>
-					<li>Find <code>pg_hba.conf</code> via <code>SHOW hba_file</code> and add: <code>host all all {clientInfo?.private_ip ?? '&lt;client-private-ip&gt;'}/32 scram-sha-256</code></li>
+					<li>Find <code>postgresql.conf</code> via <code>SHOW config_file</code> and set <code>listen_addresses = 'localhost,{dbPrivateIp || '&lt;db-private-ip&gt;'}'</code></li>
+					<li>Find <code>pg_hba.conf</code> via <code>SHOW hba_file</code> and add: <code>host all all {clientPrivateIp || '&lt;client-private-ip&gt;'}/32 scram-sha-256</code></li>
+					{#if tuneConfig.trim()}
+						<li>Write performance config to <code>conf.d/mybench-tune.conf</code> (deletable to revert)</li>
+					{/if}
 					<li>Run <code>sudo systemctl restart postgresql</code></li>
-					<li>Run <code>sudo ufw allow from {clientInfo?.private_ip ?? '&lt;client-private-ip&gt;'} to any port 5432</code> and enable UFW</li>
+					<li>Run <code>sudo ufw allow from {clientPrivateIp || '&lt;client-private-ip&gt;'} to any port 5432</code> and enable UFW</li>
 					<li>Create user <code>{pgUser}</code> (if not exists) with the password below</li>
 					<li>Create database <code>{pgDb}</code> owned by <code>{pgUser}</code> (if not exists)</li>
 				</ul>
@@ -445,12 +542,35 @@
 				</div>
 				<div class="form-group" style="flex:1">
 					<label for="pg-pass">Password <span style="color:#c00">*</span></label>
-					<input id="pg-pass" type="password" bind:value={pgPass} placeholder="strong password" />
+					<input id="pg-pass" type="text" bind:value={pgPass} placeholder="strong password" />
 				</div>
 				<div class="form-group" style="flex:1">
 					<label for="pg-db">Database Name</label>
 					<input id="pg-db" bind:value={pgDb} placeholder="mybench" />
 				</div>
+			</div>
+
+			<!-- Auto-tune section -->
+			<div class="tune-section">
+				<div class="tune-header">
+					<strong>PostgreSQL Performance Tuning</strong>
+					<span style="color:#666; font-size:12px">Auto-detects RAM, CPUs, storage type, and compiler flags</span>
+					<button onclick={detectTune} disabled={detecting} style="margin-left:auto">
+						{detecting ? 'Detecting…' : tuneConfig ? 'Re-detect' : 'Detect & Generate Config'}
+					</button>
+				</div>
+				{#if detectError}
+					<div style="color:#721c24; font-size:12px; margin-top:6px">{detectError}</div>
+				{/if}
+				{#if tuneConfig !== '' || detecting}
+					<textarea
+						class="code tune-editor"
+						rows="14"
+						bind:value={tuneConfig}
+						placeholder="Generated config will appear here — edit or clear to skip tuning"
+					></textarea>
+					<p style="font-size:11px; color:#888; margin:4px 0 0">Written to <code>conf.d/mybench-tune.conf</code>. Delete that file to revert. Clear the box above to skip.</p>
+				{/if}
 			</div>
 
 			{#if !configureDone}
@@ -648,4 +768,25 @@
 	}
 	.btn-link.primary { background: #0066cc; color: #fff; border-color: #0066cc; }
 	.btn-link:hover { opacity: 0.85; }
+
+	.tune-section {
+		margin-top: 16px;
+		border: 1px solid #e0e0e0;
+		border-radius: 6px;
+		padding: 12px 14px;
+		background: #fafafa;
+	}
+	.tune-header {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		flex-wrap: wrap;
+	}
+	.tune-editor {
+		width: 100%;
+		margin-top: 10px;
+		font-size: 12px;
+		line-height: 1.5;
+		box-sizing: border-box;
+	}
 </style>
