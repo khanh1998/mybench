@@ -1992,11 +1992,44 @@ function buildCheckpointerSection(rows: SnapshotRow[], runStartMs: number): Tele
 	};
 }
 
-// Fetch all rows from a host_snap_* table ordered by collection time.
-function fetchHostRows(db: Database.Database, tableName: string, runId: number): Record<string, unknown>[] {
+// Fetch rows from a host_snap_* table filtered by phase time ranges.
+// host_snap_* tables have no _phase column, so phases are resolved via timestamps.
+function fetchHostRows(
+	db: Database.Database,
+	tableName: string,
+	runId: number,
+	phases: TelemetryPhase[] = ALL_PHASES,
+	benchStartedAt: string | null = null,
+	postStartedAt: string | null = null
+): Record<string, unknown>[] {
 	if (!tableExists(db, tableName)) return [];
 	try {
-		return db.prepare(`SELECT * FROM ${tableName} WHERE _run_id = ? ORDER BY _collected_at`).all(runId) as Record<string, unknown>[];
+		const needsFilter = phases.length < ALL_PHASES.length && benchStartedAt !== null;
+		if (!needsFilter) {
+			return db.prepare(`SELECT * FROM ${tableName} WHERE _run_id = ? ORDER BY _collected_at`).all(runId) as Record<string, unknown>[];
+		}
+		const rangeClauses: string[] = [];
+		const rangeParams: unknown[] = [];
+		if (phases.includes('pre')) {
+			rangeClauses.push('_collected_at < ?');
+			rangeParams.push(benchStartedAt);
+		}
+		if (phases.includes('bench')) {
+			if (postStartedAt !== null) {
+				rangeClauses.push('(_collected_at >= ? AND _collected_at < ?)');
+				rangeParams.push(benchStartedAt, postStartedAt);
+			} else {
+				rangeClauses.push('_collected_at >= ?');
+				rangeParams.push(benchStartedAt);
+			}
+		}
+		if (phases.includes('post') && postStartedAt !== null) {
+			rangeClauses.push('_collected_at >= ?');
+			rangeParams.push(postStartedAt);
+		}
+		if (rangeClauses.length === 0) return [];
+		const sql = `SELECT * FROM ${tableName} WHERE _run_id = ? AND (${rangeClauses.join(' OR ')}) ORDER BY _collected_at`;
+		return db.prepare(sql).all(runId, ...rangeParams) as Record<string, unknown>[];
 	} catch {
 		return [];
 	}
@@ -2388,7 +2421,7 @@ const HOST_COL_DESCS: Record<string, string> = {
 	nvol_ctxt_sw: 'Involuntary context switches per second',
 };
 
-function buildHostSystemSection(db: Database.Database, runId: number, runStartMs: number): TelemetrySection {
+function buildHostSystemSection(db: Database.Database, runId: number, runStartMs: number, selectedPhases: TelemetryPhase[], benchStartedAt: string | null, postStartedAt: string | null): TelemetrySection {
 	const noData: TelemetrySection = {
 		key: 'host_system',
 		label: 'System',
@@ -2398,15 +2431,16 @@ function buildHostSystemSection(db: Database.Database, runId: number, runStartMs
 		tableTitle: '', tableColumns: [], tableRows: [], tableSnapshots: []
 	};
 
-	const loadavgRows    = fetchHostRows(db, 'host_snap_proc_loadavg', runId);
-	const meminfoRows    = fetchHostRows(db, 'host_snap_proc_meminfo', runId);
-	const statRows       = fetchHostRows(db, 'host_snap_proc_stat', runId);
-	const procVmstatRows = fetchHostRows(db, 'host_snap_proc_vmstat', runId);
-	const diskstatsRows  = fetchHostRows(db, 'host_snap_proc_diskstats', runId);
-	const netdevRows     = fetchHostRows(db, 'host_snap_proc_netdev', runId);
-	const schedstatRows  = fetchHostRows(db, 'host_snap_proc_schedstat', runId);
-	const psiRows        = fetchHostRows(db, 'host_snap_proc_psi', runId);
-	const fileNrRows     = fetchHostRows(db, 'host_snap_proc_sys_fs_file_nr', runId);
+	const fetchH = (t: string) => fetchHostRows(db, t, runId, selectedPhases, benchStartedAt, postStartedAt);
+	const loadavgRows    = fetchH('host_snap_proc_loadavg');
+	const meminfoRows    = fetchH('host_snap_proc_meminfo');
+	const statRows       = fetchH('host_snap_proc_stat');
+	const procVmstatRows = fetchH('host_snap_proc_vmstat');
+	const diskstatsRows  = fetchH('host_snap_proc_diskstats');
+	const netdevRows     = fetchH('host_snap_proc_netdev');
+	const schedstatRows  = fetchH('host_snap_proc_schedstat');
+	const psiRows        = fetchH('host_snap_proc_psi');
+	const fileNrRows     = fetchH('host_snap_proc_sys_fs_file_nr');
 	const hostConfigJson = tableHasColumn(db, 'benchmark_runs', 'host_config')
 		? (db.prepare(`SELECT host_config FROM benchmark_runs WHERE id = ?`).get(runId) as { host_config?: string | null } | undefined)?.host_config
 		: null;
@@ -2855,7 +2889,7 @@ function mergeRowsByCollectedAt(...rowSets: Record<string, unknown>[][]): Record
 	return [...byTime.values()].sort((a, b) => String(a._collected_at).localeCompare(String(b._collected_at)));
 }
 
-function buildHostProcessesSection(db: Database.Database, runId: number, runStartMs: number): TelemetrySection {
+function buildHostProcessesSection(db: Database.Database, runId: number, runStartMs: number, selectedPhases: TelemetryPhase[], benchStartedAt: string | null, postStartedAt: string | null): TelemetrySection {
 	const noData: TelemetrySection = {
 		key: 'host_processes',
 		label: 'Processes',
@@ -2865,13 +2899,14 @@ function buildHostProcessesSection(db: Database.Database, runId: number, runStar
 		tableTitle: '', tableColumns: [], tableRows: [], tableSnapshots: []
 	};
 
-	const pidStatRows      = fetchHostRows(db, 'host_snap_proc_pid_stat', runId);
-	const pidStatmRows     = fetchHostRows(db, 'host_snap_proc_pid_statm', runId);
-	const pidIoRows        = fetchHostRows(db, 'host_snap_proc_pid_io', runId);
-	const pidStatusRows    = fetchHostRows(db, 'host_snap_proc_pid_status', runId);
-	const pidSchedstatRows = fetchHostRows(db, 'host_snap_proc_pid_schedstat', runId);
-	const pidFdRows        = fetchHostRows(db, 'host_snap_proc_pid_fd_count', runId);
-	const pidWchanRows     = fetchHostRows(db, 'host_snap_proc_pid_wchan', runId);
+	const fetchH = (t: string) => fetchHostRows(db, t, runId, selectedPhases, benchStartedAt, postStartedAt);
+	const pidStatRows      = fetchH('host_snap_proc_pid_stat');
+	const pidStatmRows     = fetchH('host_snap_proc_pid_statm');
+	const pidIoRows        = fetchH('host_snap_proc_pid_io');
+	const pidStatusRows    = fetchH('host_snap_proc_pid_status');
+	const pidSchedstatRows = fetchH('host_snap_proc_pid_schedstat');
+	const pidFdRows        = fetchH('host_snap_proc_pid_fd_count');
+	const pidWchanRows     = fetchH('host_snap_proc_pid_wchan');
 
 	const allPids = [...new Set([
 		...pidStatRows.map(r => r.pid as number),
@@ -3351,8 +3386,8 @@ export function buildRunTelemetry(db: Database.Database, runId: number, phases?:
 		buildStatioUserTablesSection(statioUserTableRows, runStartMs),
 		buildStatioUserIndexesSection(statioUserIndexRows, runStartMs),
 		buildStatioUserSequencesSection(statioUserSequenceRows, runStartMs),
-		buildHostSystemSection(db, runId, runStartMs),
-		buildHostProcessesSection(db, runId, runStartMs),
+		buildHostSystemSection(db, runId, runStartMs, selectedPhases, run.bench_started_at, run.post_started_at),
+		buildHostProcessesSection(db, runId, runStartMs, selectedPhases, run.bench_started_at, run.post_started_at),
 		buildCloudWatchSection(db, runId, runStartMs, selectedPhases)
 	];
 

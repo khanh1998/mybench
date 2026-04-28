@@ -1,5 +1,6 @@
 <script lang="ts">
   import LineChart from '$lib/LineChart.svelte';
+  import BarChart from '$lib/BarChart.svelte';
   import { formatValue } from '$lib/telemetry/format';
   import TelemetryValueCard from '$lib/telemetry/TelemetryValueCard.svelte';
   import type { TelemetryChartMetric, TelemetryMarker, TelemetrySection, TelemetryTableSnapshot, TelemetryValueKind } from '$lib/telemetry/types';
@@ -26,7 +27,7 @@
   let tableExpanded = $state(false);
   let selectedTableTime = $state<number | null>(null);
   let lastSectionKey = $state('');
-  let selectedValueView = $state<'rate' | 'raw'>('rate');
+  let selectedValueView = $state<'rate' | 'raw' | 'avg'>('rate');
 
   const chartMetricGroups = $derived.by(() => {
     const groups: string[] = [];
@@ -76,7 +77,11 @@
     return visibleChartMetrics.find((metric) => metric.key === selected) ?? visibleChartMetrics[0];
   });
   const activeMetricHasRaw = $derived(!!activeChartMetric?.rawSeries?.length);
-  const activeValueView = $derived(activeMetricHasRaw ? selectedValueView : 'rate');
+  const activeValueView = $derived(
+    selectedValueView === 'avg' ? 'avg'
+    : activeMetricHasRaw ? selectedValueView
+    : 'rate'
+  );
   const activeChartSeries = $derived.by(() => {
     if (!activeChartMetric) return section.chartSeries;
     if (activeValueView === 'raw') return activeChartMetric.rawSeries ?? [];
@@ -84,6 +89,7 @@
   });
   const activeChartTitle = $derived.by(() => {
     const title = activeChartMetric?.title ?? section.chartTitle;
+    if (activeValueView === 'avg') return `${title} · Avg`;
     if (!activeMetricHasRaw) return title;
     return `${title} · ${activeValueView === 'raw' ? 'Raw delta' : 'Rate/s'}`;
   });
@@ -147,7 +153,7 @@
   });
 
   $effect(() => {
-    if (!activeMetricHasRaw && selectedValueView !== 'rate') selectedValueView = 'rate';
+    if (!activeMetricHasRaw && selectedValueView === 'raw') selectedValueView = 'rate';
   });
 
   function findNearestSnapshot(time: number): TelemetryTableSnapshot | null {
@@ -254,34 +260,46 @@
             >{metric.label}</button>
           {/each}
         </div>
-        {#if activeMetricHasRaw}
-          <div class="value-view-control" aria-label="Metric value view">
-            <span class="value-view-label">View</span>
-            <div class="value-view-toggle">
-              <button
-                type="button"
-                class:active={activeValueView === 'rate'}
-                onclick={() => selectedValueView = 'rate'}
-              >Rate/s</button>
+        <div class="value-view-control" aria-label="Metric value view">
+          <span class="value-view-label">View</span>
+          <div class="value-view-toggle">
+            <button
+              type="button"
+              class:active={activeValueView === 'rate'}
+              onclick={() => selectedValueView = 'rate'}
+            >Rate/s</button>
+            {#if activeMetricHasRaw}
               <button
                 type="button"
                 class:active={activeValueView === 'raw'}
                 onclick={() => selectedValueView = 'raw'}
               >Raw</button>
-            </div>
+            {/if}
+            <button
+              type="button"
+              class:active={activeValueView === 'avg'}
+              onclick={() => selectedValueView = 'avg'}
+            >Avg</button>
           </div>
-        {/if}
+        </div>
       </div>
     {/if}
 
-    <LineChart
-      title={activeChartTitle}
-      series={activeChartSeries}
-      {markers}
-      {originMs}
-      showAllSeriesByDefault={!!activeChartMetric}
-      onHoverTimeChange={handleChartHoverTime}
-    />
+    {#if activeValueView === 'avg'}
+      <BarChart
+        title={activeChartTitle}
+        series={activeChartSeries}
+      />
+    {:else}
+      <LineChart
+        title={activeChartTitle}
+        series={activeChartSeries}
+        {markers}
+        {originMs}
+        showAllSeriesByDefault={!!activeChartMetric}
+        onHoverTimeChange={handleChartHoverTime}
+      />
+    {/if}
 
     {#if displayedTableRows.length > 0}
       <div class="table-block">

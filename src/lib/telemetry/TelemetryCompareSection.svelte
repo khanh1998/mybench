@@ -1,5 +1,6 @@
 <script lang="ts">
   import LineChart from '$lib/LineChart.svelte';
+  import BarChart from '$lib/BarChart.svelte';
   import { formatValue } from '$lib/telemetry/format';
   import type { TelemetryChartMetric, TelemetrySection } from '$lib/telemetry/types';
 
@@ -23,7 +24,7 @@
   let selectedMetricGroup = $state<string | null>(null);
   let selectedMetricEntity = $state<string | null>(null);
   let selectedSeriesLabel = $state<string | null>(null);
-  let selectedValueView = $state<'rate' | 'raw'>('rate');
+  let selectedValueView = $state<'rate' | 'raw' | 'avg'>('rate');
 
   function alignSeriesToFirstPoint(points: { t: number; v: number }[]) {
     if (!points.length) return points;
@@ -83,11 +84,15 @@
   });
 
   const activeMetricHasRaw = $derived(!!activeMetric?.rawSeries?.length);
-  const activeValueView = $derived(activeMetricHasRaw ? selectedValueView : 'rate');
+  const activeValueView = $derived(
+    selectedValueView === 'avg' ? 'avg'
+    : activeMetricHasRaw ? selectedValueView
+    : 'rate'
+  );
 
-  function metricSeriesForView(metric: TelemetryChartMetric | null | undefined) {
+  function metricSeriesForView(metric: TelemetryChartMetric | null | undefined, forceRate = false) {
     if (!metric) return [];
-    if (activeValueView === 'raw') return metric.rawSeries ?? [];
+    if (!forceRate && activeValueView === 'raw') return metric.rawSeries ?? [];
     return metric.series;
   }
 
@@ -160,8 +165,10 @@
 
   const chartTitle = $derived.by(() => {
     const entity = activeMetric?.entity ? ` · ${activeMetric.entity}` : '';
-    const valueView = activeMetricHasRaw ? ` · ${activeValueView === 'raw' ? 'Raw' : 'Rate/s'}` : '';
-    if (activeMetric && selectedSeriesLabel) return `${label} — ${activeMetric.label}${entity}${valueView} · ${selectedSeriesLabel}`;
+    const viewSuffix = activeValueView === 'avg' ? ' · Avg'
+      : activeMetricHasRaw ? ` · ${activeValueView === 'raw' ? 'Raw' : 'Rate/s'}`
+      : '';
+    if (activeMetric && selectedSeriesLabel) return `${label} — ${activeMetric.label}${entity}${viewSuffix} · ${selectedSeriesLabel}`;
     if (selectedSeriesLabel) return `${label} — ${selectedSeriesLabel}`;
     return label;
   });
@@ -196,7 +203,7 @@
   });
 
   $effect(() => {
-    if (!activeMetricHasRaw && selectedValueView !== 'rate') selectedValueView = 'rate';
+    if (!activeMetricHasRaw && selectedValueView === 'raw') selectedValueView = 'rate';
   });
 
   $effect(() => {
@@ -277,23 +284,28 @@
         </label>
       {/if}
 
-      {#if activeMetricHasRaw}
-        <div class="value-view-control" aria-label="Metric value view">
-          <span class="value-view-label">View</span>
-          <div class="value-view-toggle">
-            <button
-              type="button"
-              class:active={activeValueView === 'rate'}
-              onclick={() => selectedValueView = 'rate'}
-            >Rate/s</button>
+      <div class="value-view-control" aria-label="Metric value view">
+        <span class="value-view-label">View</span>
+        <div class="value-view-toggle">
+          <button
+            type="button"
+            class:active={activeValueView === 'rate'}
+            onclick={() => selectedValueView = 'rate'}
+          >Rate/s</button>
+          {#if activeMetricHasRaw}
             <button
               type="button"
               class:active={activeValueView === 'raw'}
               onclick={() => selectedValueView = 'raw'}
             >Raw</button>
-          </div>
+          {/if}
+          <button
+            type="button"
+            class:active={activeValueView === 'avg'}
+            onclick={() => selectedValueView = 'avg'}
+          >Avg</button>
         </div>
-      {/if}
+      </div>
 
       {#if seriesOptions.length > 1}
         <label>
@@ -308,14 +320,20 @@
     </div>
   {/if}
 
-  <div class="alignment-note">Lines are aligned to each run&apos;s first selected telemetry sample.</div>
+  {#if activeValueView !== 'avg'}
+    <div class="alignment-note">Lines are aligned to each run&apos;s first selected telemetry sample.</div>
+  {/if}
 
   {#if mergedSeries.length > 0}
-    <LineChart
-      title={chartTitle}
-      series={mergedSeries}
-      showAllSeriesByDefault={true}
-    />
+    {#if activeValueView === 'avg'}
+      <BarChart title={chartTitle} series={mergedSeries} />
+    {:else}
+      <LineChart
+        title={chartTitle}
+        series={mergedSeries}
+        showAllSeriesByDefault={true}
+      />
+    {/if}
   {:else}
     <div class="chart-empty">No overlapping telemetry series available for the current selection.</div>
   {/if}
