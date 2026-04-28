@@ -62,10 +62,10 @@
     { key: 'transactions' as const, label: 'Transactions', decimals: 0, higherBetter: true }
   ];
 
-  let activeCompareTab = $state<'load' | 'telemetry' | 'cloudwatch' | 'perf' | 'host_metrics'>('load');
+  let activeCompareTab = $state<'summary' | 'load' | 'telemetry' | 'cloudwatch' | 'perf' | 'host_metrics'>('summary');
   let hostMetricsTab = $state<'system' | 'processes'>('system');
-  let showPercent = $state(true);
   let selectedPerfMetric = $state('');
+  let selectedSummaryMetricKey = $state('');
 
   function getRunForId(runId: number): CompareRunInfo | undefined {
     return allRuns.find((run) => run.id === runId);
@@ -371,21 +371,141 @@
     benchType() === 'sysbench' ? 'sysbench Summary' : 'pgbench Summary'
   );
 
+  const selectedSummaryMetric = $derived(
+    activeSummaryMetrics.find((m) => m.key === selectedSummaryMetricKey) ?? activeSummaryMetrics[0] ?? null
+  );
+
+  const summaryChartValues = $derived((): { runId: number; label: string; color: string; value: number | null }[] => {
+    const metric = selectedSummaryMetric;
+    if (!metric) return [];
+    return selectedRunIds.map((runId, index) => {
+      const run = getRunForId(runId);
+      const raw = run?.[metric.key] ?? null;
+      return {
+        runId,
+        label: getRunLabel(runId, true),
+        color: COLORS[index % COLORS.length],
+        value: raw !== null ? Number(raw) : null
+      };
+    });
+  });
+
   $effect(() => {
-    if (selectedRunIds.length < 2) activeCompareTab = 'load';
+    const metrics = activeSummaryMetrics;
+    if (!metrics.some((m) => m.key === selectedSummaryMetricKey)) {
+      selectedSummaryMetricKey = metrics[0]?.key ?? '';
+    }
+  });
+
+  $effect(() => {
+    if (selectedRunIds.length < 2) activeCompareTab = 'summary';
   });
 </script>
 
 {#if selectedRunIds.length >= 2}
-  <div class="compare-top-grid">
-    <div class="card">
+  <div class="run-tabs">
+    <button class="tab-btn" class:active={activeCompareTab === 'summary'} onclick={() => activeCompareTab = 'summary'}>
+      Summary &amp; Params
+    </button>
+    <button class="tab-btn" class:active={activeCompareTab === 'load'} onclick={() => activeCompareTab = 'load'}>
+      Load Analysis
+    </button>
+    <button
+      class="tab-btn"
+      class:active={activeCompareTab === 'telemetry'}
+      onclick={() => activeCompareTab = 'telemetry'}
+    >
+      Database Telemetry
+    </button>
+    <button
+      class="tab-btn"
+      class:active={activeCompareTab === 'cloudwatch'}
+      onclick={() => activeCompareTab = 'cloudwatch'}
+    >
+      CloudWatch
+    </button>
+    <button
+      class="tab-btn"
+      class:active={activeCompareTab === 'perf'}
+      onclick={() => activeCompareTab = 'perf'}
+    >
+      Perf
+    </button>
+    <button
+      class="tab-btn"
+      class:active={activeCompareTab === 'host_metrics'}
+      onclick={() => activeCompareTab = 'host_metrics'}
+    >
+      Host Metrics
+    </button>
+  </div>
+
+  {#if activeCompareTab === 'summary'}
+    {@const chartVals = summaryChartValues()}
+    {@const chartValid = chartVals.filter((d): d is typeof d & { value: number } => d.value !== null)}
+    {@const chartMax = chartValid.length ? Math.max(...chartValid.map((d) => d.value)) : 1}
+    {@const barWidth = 40}
+    {@const barGap = 24}
+    {@const chartPadL = 60}
+    {@const chartPadR = 20}
+    {@const chartPadT = 20}
+    {@const chartPadB = 48}
+    {@const chartH = 220}
+    {@const totalW = chartPadL + chartVals.length * (barWidth + barGap) - barGap + chartPadR}
+    {@const plotH = chartH - chartPadT - chartPadB}
+
+    <div class="card summary-tab-card">
       <div class="row section-header compact">
         <h3 style="margin:0">{summaryTitle}</h3>
-        <label class="percent-toggle">
-          <input type="checkbox" bind:checked={showPercent} />
-          Show % vs baseline
-        </label>
       </div>
+
+      <div class="summary-metric-pills">
+        {#each activeSummaryMetrics as metric}
+          <button
+            class="metric-pill"
+            class:active={selectedSummaryMetric?.key === metric.key}
+            onclick={() => selectedSummaryMetricKey = metric.key}
+          >{metric.label}</button>
+        {/each}
+      </div>
+
+      {#if chartValid.length > 0 && selectedSummaryMetric}
+        <div class="summary-chart-shell">
+          <svg
+            class="summary-bar-chart"
+            viewBox="0 0 {totalW} {chartH}"
+            width={totalW}
+            height={chartH}
+            role="img"
+            aria-label="Summary metric bar chart"
+          >
+            {#each [0, 0.25, 0.5, 0.75, 1] as tick}
+              {@const y = chartPadT + plotH - tick * plotH}
+              <line x1={chartPadL} y1={y} x2={totalW - chartPadR} y2={y} stroke={tick === 0 ? '#ccc' : '#f0f0f0'} stroke-width="1" />
+              <text x={chartPadL - 6} y={y + 4} text-anchor="end" font-size="10" fill="#999">
+                {(chartMax * tick).toLocaleString(undefined, { maximumFractionDigits: selectedSummaryMetric.decimals })}
+              </text>
+            {/each}
+            {#each chartVals as d, i}
+              {@const x = chartPadL + i * (barWidth + barGap)}
+              {@const barH = d.value !== null && chartMax > 0 ? (d.value / chartMax) * plotH : 0}
+              {@const barY = chartPadT + plotH - barH}
+              {#if d.value !== null}
+                <rect x={x} y={barY} width={barWidth} height={barH} fill={d.color} rx="3" opacity="0.85" />
+                <text x={x + barWidth / 2} y={barY - 5} text-anchor="middle" font-size="10" fill={d.color} font-weight="600">
+                  {d.value.toLocaleString(undefined, { maximumFractionDigits: selectedSummaryMetric.decimals })}
+                </text>
+              {:else}
+                <text x={x + barWidth / 2} y={chartPadT + plotH / 2} text-anchor="middle" font-size="10" fill="#bbb">—</text>
+              {/if}
+              <text x={x + barWidth / 2} y={chartH - chartPadB + 16} text-anchor="middle" font-size="10" fill={d.color} font-weight="600">
+                {d.label}
+              </text>
+            {/each}
+          </svg>
+        </div>
+      {/if}
+
       <div class="table-wrap">
         <table class="summary-table">
           <thead>
@@ -394,7 +514,6 @@
               {#each selectedRunIds as runId, index}
                 <th style="color:{COLORS[index % COLORS.length]}">{getRunLabel(runId, true)}</th>
               {/each}
-              <th>Best</th>
             </tr>
           </thead>
           <tbody>
@@ -406,41 +525,20 @@
               })}
               {@const valid = numVals.filter((value): value is number => value !== null)}
               {@const bestVal = valid.length === 0 ? null : metric.higherBetter ? Math.max(...valid) : Math.min(...valid)}
-              {@const baselineVal = numVals[0]}
               <tr>
                 <td class="metric-label">{metric.label}</td>
-                {#each numVals as value, index}
+                {#each numVals as value}
                   {@const isBest = value !== null && value === bestVal && valid.length >= 2}
                   <td class:winner-cell={isBest}>
                     {#if value !== null}
                       <span class:winner-value={isBest}>
                         {metric.decimals === 0 ? value.toFixed(0) : value.toFixed(metric.decimals)}
                       </span>
-                      {#if showPercent && index > 0 && baselineVal !== null && baselineVal !== 0}
-                        {@const delta = ((value - baselineVal) / Math.abs(baselineVal)) * 100}
-                        {@const isGood = metric.higherBetter ? delta > 0 : delta < 0}
-                        <span class="inline-delta" class:positive={isGood} class:negative={!isGood && delta !== 0}>
-                          {delta > 0 ? '+' : ''}{delta.toFixed(1)}%
-                        </span>
-                      {/if}
                     {:else}
                       <span class="missing-value">—</span>
                     {/if}
                   </td>
                 {/each}
-                <td>
-                  {#if bestVal !== null && valid.length >= 2}
-                    {@const bestIdx = numVals.findIndex((value) => value === bestVal)}
-                    {#if bestIdx >= 0}
-                      <span
-                        class="winner-badge"
-                        style="border-color:{COLORS[bestIdx % COLORS.length]};color:{COLORS[bestIdx % COLORS.length]}"
-                      >
-                        ▲ {getRunLabel(selectedRunIds[bestIdx], true)}
-                      </span>
-                    {/if}
-                  {/if}
-                </td>
               </tr>
             {/each}
           </tbody>
@@ -516,43 +614,7 @@
         </div>
       </div>
     {/if}
-  </div>
-
-  <div class="run-tabs">
-    <button class="tab-btn" class:active={activeCompareTab === 'load'} onclick={() => activeCompareTab = 'load'}>
-      Load Analysis
-    </button>
-    <button
-      class="tab-btn"
-      class:active={activeCompareTab === 'telemetry'}
-      onclick={() => activeCompareTab = 'telemetry'}
-    >
-      Database Telemetry
-    </button>
-    <button
-      class="tab-btn"
-      class:active={activeCompareTab === 'cloudwatch'}
-      onclick={() => activeCompareTab = 'cloudwatch'}
-    >
-      CloudWatch
-    </button>
-    <button
-      class="tab-btn"
-      class:active={activeCompareTab === 'perf'}
-      onclick={() => activeCompareTab = 'perf'}
-    >
-      Perf
-    </button>
-    <button
-      class="tab-btn"
-      class:active={activeCompareTab === 'host_metrics'}
-      onclick={() => activeCompareTab = 'host_metrics'}
-    >
-      Host Metrics
-    </button>
-  </div>
-
-  {#if activeCompareTab === 'load'}
+  {:else if activeCompareTab === 'load'}
     <div class="card">
       <LoadAnalysis runs={selectedRuns} showPhaseFilter={true} />
     </div>
@@ -760,12 +822,50 @@
     color: #fff;
   }
 
-  .compare-top-grid {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    margin-top: 12px;
+  .summary-tab-card {
     margin-bottom: 12px;
+  }
+
+  .summary-metric-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 14px;
+  }
+
+  .metric-pill {
+    padding: 4px 12px;
+    border-radius: 999px;
+    border: 1.5px solid #c8d8f5;
+    background: #f0f4ff;
+    color: #3355aa;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s;
+  }
+
+  .metric-pill:hover {
+    background: #dce8ff;
+    border-color: #aabfe8;
+  }
+
+  .metric-pill.active {
+    background: #0066cc;
+    border-color: #0055bb;
+    color: #fff;
+  }
+
+  .summary-chart-shell {
+    overflow-x: auto;
+    border: 1px solid #eee;
+    border-radius: 6px;
+    background: #fafafa;
+    margin-bottom: 16px;
+  }
+
+  .summary-bar-chart {
+    display: block;
   }
 
   .summary-table,
@@ -814,20 +914,6 @@
     color: #00774f;
   }
 
-  .inline-delta {
-    font-size: 11px;
-    font-weight: 600;
-    margin-left: 5px;
-  }
-
-  .inline-delta.positive {
-    color: #00996b;
-  }
-
-  .inline-delta.negative {
-    color: #cc3333;
-  }
-
   .winner-badge {
     font-size: 11px;
     font-weight: 700;
@@ -869,23 +955,10 @@
     color: #bbb;
   }
 
-  .percent-toggle {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    font-size: 12px;
-    color: #666;
-    cursor: pointer;
-    user-select: none;
-  }
-
-  .percent-toggle input {
-    cursor: pointer;
-  }
-
   .run-tabs {
     display: flex;
     gap: 2px;
+    margin-top: 12px;
     margin-bottom: 16px;
     border-bottom: 2px solid #e8e8e8;
   }

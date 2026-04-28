@@ -106,12 +106,6 @@
           <span class="run-chip-id" style={selected ? `color:${color};font-weight:700` : ''}>
             {run.name || '#' + run.id}
           </span>
-          {#if run.profile_name}
-            <span class="run-chip-profile">{run.profile_name}</span>
-          {/if}
-          {#if run.tps !== null}
-            <span class="run-chip-tps">{run.tps.toFixed(1)} TPS</span>
-          {/if}
           <span class="run-chip-date">{fmtTs(run.started_at)}</span>
         </label>
       {/each}
