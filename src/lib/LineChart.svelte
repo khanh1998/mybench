@@ -158,9 +158,10 @@
   const crosshairX = $derived(hoveredTime !== null ? tx(hoveredTime) : null);
 
   const tooltipRows = $derived.by(() => {
-    if (hoveredTime === null) return [];
+    const time = hoveredTime;
+    if (time === null) return [];
     return visibleSeries
-      .map(sr => ({ color: sr.color, label: sr.label, description: sr.description, v: nearestPoint(sr.points, hoveredTime)?.v ?? null }))
+      .map(sr => ({ color: sr.color, label: sr.label, description: sr.description, v: nearestPoint(sr.points, time)?.v ?? null }))
       .filter(r => r.v !== null)
       .sort((a, b) => (b.v ?? 0) - (a.v ?? 0)) as { color: string; label: string; description?: string; v: number }[];
   });

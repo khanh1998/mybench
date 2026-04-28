@@ -36,6 +36,7 @@ export interface TelemetryChartMetric {
 	kind: TelemetryValueKind;
 	title: string;
 	series: TelemetrySeries[];
+	rawSeries?: TelemetrySeries[];
 	group?: string;
 	entity?: string;
 }
@@ -2048,9 +2049,22 @@ function buildRateGroup(
 	colDescriptions?: Record<string, string>
 ): TelemetryChartMetric | null {
 	const series: TelemetrySeries[] = [];
+	const rawSeries: TelemetrySeries[] = [];
 	let colorIdx = 0;
 	for (const col of cols) {
 		const points: TelemetrySeriesPoint[] = [];
+		const rawPoints: TelemetrySeriesPoint[] = [];
+		const color = COLORS[colorIdx % COLORS.length];
+		let rawBaseline: number | null = null;
+		for (const row of rows) {
+			const t = toMs(row._collected_at as string | null);
+			if (t === null) continue;
+			const value = Number(row[col]);
+			if (!Number.isFinite(value)) continue;
+			if (rawBaseline === null) rawBaseline = value;
+			if (value < rawBaseline) continue;
+			rawPoints.push({ t: t - runStartMs, v: (value - rawBaseline) * scale });
+		}
 		for (let i = 1; i < rows.length; i++) {
 			const t1 = toMs(rows[i]._collected_at as string | null);
 			const t0 = toMs(rows[i - 1]._collected_at as string | null);
@@ -2066,13 +2080,43 @@ function buildRateGroup(
 			series.push({
 				label: colLabels?.[col] ?? col,
 				description: colDescriptions?.[col],
-				color: COLORS[colorIdx++ % COLORS.length],
+				color,
 				points
 			});
+			if (rawPoints.length > 0) {
+				rawSeries.push({
+					label: rawCounterLabel(colLabels?.[col] ?? col),
+					description: rawCounterDescription(colDescriptions?.[col], colLabels?.[col] ?? col),
+					color,
+					points: rawPoints
+				});
+			}
+			colorIdx++;
 		}
 	}
 	if (series.length === 0) return null;
-	return { key, label, kind, title, series };
+	return { key, label, kind, title, series, rawSeries };
+}
+
+function rawCounterLabel(label: string): string {
+	return label
+		.replace(/KB\/s/g, 'KB')
+		.replace(/pkts\/s/g, 'pkts')
+		.replace(/sectors\/s/g, 'sectors')
+		.replace(/ms\/s/g, 'ms')
+		.replace(/ns\/s/g, 'ns')
+		.replace(/\/s\b/g, '')
+		.trim();
+}
+
+function rawCounterDescription(description: string | undefined, label: string): string {
+	const base = description
+		? description
+		.replace(/per second/gi, 'as a raw counter')
+		.replace(/rate\/s/gi, 'raw counter')
+			.replace(/→ converted to raw counter/gi, 'raw counter')
+		: label;
+	return `${base}; normalized to zero at the first sample`;
 }
 
 function buildHostDerivedRateGroup(

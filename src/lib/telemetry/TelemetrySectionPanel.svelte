@@ -26,6 +26,7 @@
   let tableExpanded = $state(false);
   let selectedTableTime = $state<number | null>(null);
   let lastSectionKey = $state('');
+  let selectedValueView = $state<'rate' | 'raw'>('rate');
 
   const chartMetricGroups = $derived.by(() => {
     const groups: string[] = [];
@@ -73,6 +74,18 @@
     const selected =
       selectedChartMetricKey ?? section.defaultChartMetricKey ?? visibleChartMetrics[0].key;
     return visibleChartMetrics.find((metric) => metric.key === selected) ?? visibleChartMetrics[0];
+  });
+  const activeMetricHasRaw = $derived(!!activeChartMetric?.rawSeries?.length);
+  const activeValueView = $derived(activeMetricHasRaw ? selectedValueView : 'rate');
+  const activeChartSeries = $derived.by(() => {
+    if (!activeChartMetric) return section.chartSeries;
+    if (activeValueView === 'raw') return activeChartMetric.rawSeries ?? [];
+    return activeChartMetric.series;
+  });
+  const activeChartTitle = $derived.by(() => {
+    const title = activeChartMetric?.title ?? section.chartTitle;
+    if (!activeMetricHasRaw) return title;
+    return `${title} · ${activeValueView === 'raw' ? 'Raw delta' : 'Rate/s'}`;
   });
 
   const tableSnapshots = $derived(section.tableSnapshots ?? []);
@@ -131,6 +144,10 @@
     }
     if (selectedTableTime !== null && tableSnapshots.some((snapshot) => snapshot.t === selectedTableTime)) return;
     selectedTableTime = latestTableSnapshot?.t ?? null;
+  });
+
+  $effect(() => {
+    if (!activeMetricHasRaw && selectedValueView !== 'rate') selectedValueView = 'rate';
   });
 
   function findNearestSnapshot(time: number): TelemetryTableSnapshot | null {
@@ -237,12 +254,29 @@
             >{metric.label}</button>
           {/each}
         </div>
+        {#if activeMetricHasRaw}
+          <div class="value-view-control" aria-label="Metric value view">
+            <span class="value-view-label">View</span>
+            <div class="value-view-toggle">
+              <button
+                type="button"
+                class:active={activeValueView === 'rate'}
+                onclick={() => selectedValueView = 'rate'}
+              >Rate/s</button>
+              <button
+                type="button"
+                class:active={activeValueView === 'raw'}
+                onclick={() => selectedValueView = 'raw'}
+              >Raw</button>
+            </div>
+          </div>
+        {/if}
       </div>
     {/if}
 
     <LineChart
-      title={activeChartMetric?.title ?? section.chartTitle}
-      series={activeChartMetric?.series ?? section.chartSeries}
+      title={activeChartTitle}
+      series={activeChartSeries}
       {markers}
       {originMs}
       showAllSeriesByDefault={!!activeChartMetric}
@@ -474,6 +508,53 @@
     background: var(--accent);
     border-color: var(--accent);
     color: #fff;
+  }
+
+  .value-view-control {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: 4px;
+  }
+
+  .value-view-label {
+    color: #64748b;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0;
+    text-transform: uppercase;
+  }
+
+  .value-view-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    border: 1px solid #d7dee8;
+    border-radius: 8px;
+    background: #f1f5f9;
+    padding: 2px;
+  }
+
+  .value-view-toggle button {
+    min-width: 58px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: #64748b;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 700;
+    padding: 5px 10px;
+  }
+
+  .value-view-toggle button:hover {
+    color: var(--accent);
+  }
+
+  .value-view-toggle button.active {
+    background: #fff;
+    color: var(--accent);
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12);
   }
 
   .table-block {

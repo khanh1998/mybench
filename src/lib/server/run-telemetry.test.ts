@@ -622,5 +622,14 @@ describe('buildRunTelemetry', () => {
 			'Write KB/s',
 			'Cancelled write KB/s'
 		]);
+		expect(processes?.chartMetrics?.find((metric) => metric.key === 'pid_123_io_bytes')?.rawSeries?.map((series) => series.label)).toEqual([
+			'Read KB',
+			'Write KB',
+			'Cancelled write KB'
+		]);
+		expect(processes?.chartMetrics?.find((metric) => metric.key === 'pid_123_io_bytes')?.rawSeries?.find((series) => series.label === 'Read KB')?.points).toEqual([
+			{ t: 29000, v: 0 },
+			{ t: 39000, v: 16 }
+		]);
 	});
 });

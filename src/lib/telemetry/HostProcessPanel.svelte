@@ -62,6 +62,7 @@
   let selectedPid  = $state<number | null>(null);
   let selectedType = $state<MetricTypeKey>('cpu');
   let tableExpanded = $state(false);
+  let selectedValueView = $state<'rate' | 'raw'>('rate');
 
   // Auto-select first process on load
   $effect(() => {
@@ -89,6 +90,18 @@
   }
 
   const activeMetric = $derived(getMetric(selectedPid, selectedType));
+  const activeMetricHasRaw = $derived(!!activeMetric?.rawSeries?.length);
+  const activeValueView = $derived(activeMetricHasRaw ? selectedValueView : 'rate');
+  const activeMetricSeries = $derived.by(() => {
+    if (!activeMetric) return [];
+    if (activeValueView === 'raw') return activeMetric.rawSeries ?? [];
+    return activeMetric.series;
+  });
+  const activeMetricTitle = $derived.by(() => {
+    if (!activeMetric) return '';
+    if (!activeMetricHasRaw) return activeMetric.title;
+    return `${activeMetric.title} · ${activeValueView === 'raw' ? 'Raw delta' : 'Rate/s'}`;
+  });
   const selectedProcess = $derived(processes.find(p => p.pid === selectedPid) ?? null);
   const detailColumns = $derived(section.tableColumns.filter((column) => column.key !== 'cmdline'));
   const selectedSummaryItems = $derived.by(() => {
@@ -136,6 +149,10 @@
       })
       .filter((item): item is WaitChannelSample => item !== null);
   }
+
+  $effect(() => {
+    if (!activeMetricHasRaw && selectedValueView !== 'rate') selectedValueView = 'rate';
+  });
 </script>
 
 <div class="host-process-panel">
@@ -167,6 +184,24 @@
           >{t.label}</button>
         {/each}
       </div>
+
+      {#if activeMetricHasRaw}
+        <div class="value-view-control" aria-label="Metric value view">
+          <span class="value-view-label">View</span>
+          <div class="value-view-toggle">
+            <button
+              type="button"
+              class:active={activeValueView === 'rate'}
+              onclick={() => selectedValueView = 'rate'}
+            >Rate/s</button>
+            <button
+              type="button"
+              class:active={activeValueView === 'raw'}
+              onclick={() => selectedValueView = 'raw'}
+            >Raw</button>
+          </div>
+        </div>
+      {/if}
     </div>
 
     <!-- Full cmdline as a subtle hint below the toolbar -->
@@ -206,8 +241,8 @@
     <!-- Chart -->
     {#if activeMetric}
       <LineChart
-        title={activeMetric.title}
-        series={activeMetric.series}
+        title={activeMetricTitle}
+        series={activeMetricSeries}
         {markers}
         {originMs}
         showAllSeriesByDefault={true}
@@ -316,6 +351,53 @@
   .pill:hover:not(:disabled) { background: #f0f4ff; border-color: #aabfe8; color: #0044bb; }
   .pill.active { background: #0066cc; border-color: #0055bb; color: #fff; }
   .pill:disabled { opacity: 0.35; cursor: not-allowed; }
+
+  .value-view-control {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+  }
+
+  .value-view-label {
+    color: #64748b;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0;
+    text-transform: uppercase;
+  }
+
+  .value-view-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    border: 1px solid #d7dee8;
+    border-radius: 8px;
+    background: #f1f5f9;
+    padding: 2px;
+  }
+
+  .value-view-toggle button {
+    min-width: 58px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: #64748b;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 700;
+    padding: 5px 10px;
+  }
+
+  .value-view-toggle button:hover {
+    color: #0066cc;
+  }
+
+  .value-view-toggle button.active {
+    background: #fff;
+    color: #0066cc;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12);
+  }
 
   .cmdline-hint {
     font-size: 11px;

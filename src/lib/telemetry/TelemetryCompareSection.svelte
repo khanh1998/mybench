@@ -23,6 +23,7 @@
   let selectedMetricGroup = $state<string | null>(null);
   let selectedMetricEntity = $state<string | null>(null);
   let selectedSeriesLabel = $state<string | null>(null);
+  let selectedValueView = $state<'rate' | 'raw'>('rate');
 
   function alignSeriesToFirstPoint(points: { t: number; v: number }[]) {
     if (!points.length) return points;
@@ -81,6 +82,15 @@
     return metricOptions.find((metric) => metric.key === key) ?? metricOptions[0];
   });
 
+  const activeMetricHasRaw = $derived(!!activeMetric?.rawSeries?.length);
+  const activeValueView = $derived(activeMetricHasRaw ? selectedValueView : 'rate');
+
+  function metricSeriesForView(metric: TelemetryChartMetric | null | undefined) {
+    if (!metric) return [];
+    if (activeValueView === 'raw') return metric.rawSeries ?? [];
+    return metric.series;
+  }
+
   function findComparableMetric(section: TelemetrySection, reference: TelemetryChartMetric | null): TelemetryChartMetric | null {
     const metrics = section.chartMetrics ?? [];
     if (!reference) return metrics[0] ?? null;
@@ -102,7 +112,7 @@
 
       if (activeMetric) {
         const runMetric = findComparableMetric(section, activeMetric);
-        for (const series of runMetric?.series ?? []) labels.add(series.label);
+        for (const series of metricSeriesForView(runMetric)) labels.add(series.label);
       } else {
         for (const series of section.chartSeries) labels.add(series.label);
       }
@@ -135,7 +145,7 @@
         if (!section || section.status !== 'ok') return null;
 
         const sourceSeries = activeMetric
-          ? findComparableMetric(section, activeMetric)?.series.find((series) => series.label === selectedSeriesLabel)
+          ? metricSeriesForView(findComparableMetric(section, activeMetric)).find((series) => series.label === selectedSeriesLabel)
           : section.chartSeries.find((series) => series.label === selectedSeriesLabel);
 
         if (!sourceSeries) return null;
@@ -150,7 +160,8 @@
 
   const chartTitle = $derived.by(() => {
     const entity = activeMetric?.entity ? ` · ${activeMetric.entity}` : '';
-    if (activeMetric && selectedSeriesLabel) return `${label} — ${activeMetric.label}${entity} · ${selectedSeriesLabel}`;
+    const valueView = activeMetricHasRaw ? ` · ${activeValueView === 'raw' ? 'Raw' : 'Rate/s'}` : '';
+    if (activeMetric && selectedSeriesLabel) return `${label} — ${activeMetric.label}${entity}${valueView} · ${selectedSeriesLabel}`;
     if (selectedSeriesLabel) return `${label} — ${selectedSeriesLabel}`;
     return label;
   });
@@ -182,6 +193,10 @@
     selectedMetricKey = metricOptions.some((metric) => metric.key === firstSection?.defaultChartMetricKey)
       ? (firstSection?.defaultChartMetricKey ?? metricOptions[0].key)
       : metricOptions[0].key;
+  });
+
+  $effect(() => {
+    if (!activeMetricHasRaw && selectedValueView !== 'rate') selectedValueView = 'rate';
   });
 
   $effect(() => {
@@ -260,6 +275,24 @@
             {/each}
           </select>
         </label>
+      {/if}
+
+      {#if activeMetricHasRaw}
+        <div class="value-view-control" aria-label="Metric value view">
+          <span class="value-view-label">View</span>
+          <div class="value-view-toggle">
+            <button
+              type="button"
+              class:active={activeValueView === 'rate'}
+              onclick={() => selectedValueView = 'rate'}
+            >Rate/s</button>
+            <button
+              type="button"
+              class:active={activeValueView === 'raw'}
+              onclick={() => selectedValueView = 'raw'}
+            >Raw</button>
+          </div>
+        </div>
       {/if}
 
       {#if seriesOptions.length > 1}
@@ -398,6 +431,52 @@
   .chart-controls select {
     min-width: 180px;
     max-width: 320px;
+  }
+
+  .value-view-control {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .value-view-label {
+    color: #64748b;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0;
+    text-transform: uppercase;
+  }
+
+  .value-view-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    border: 1px solid #d7dee8;
+    border-radius: 8px;
+    background: #f1f5f9;
+    padding: 2px;
+  }
+
+  .value-view-toggle button {
+    min-width: 58px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: #64748b;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 700;
+    padding: 5px 10px;
+  }
+
+  .value-view-toggle button:hover {
+    color: #0066cc;
+  }
+
+  .value-view-toggle button.active {
+    background: #fff;
+    color: #0066cc;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12);
   }
 
   .chart-empty {
