@@ -3,6 +3,7 @@
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import BenchmarkCompareContent from '$lib/BenchmarkCompareContent.svelte';
+  import { RUN_COMPARE_COLORS } from '$lib/compare/colors';
   import type { CompareRunInfo } from '$lib/compare/types';
   import { fmtTs } from '$lib/utils';
   import type { PageData } from './$types';
@@ -93,15 +94,16 @@
       {#each visibleRuns as run}
         {@const colorIdx = selectedRunIds.indexOf(run.id)}
         {@const selected = colorIdx >= 0}
+        {@const color = RUN_COMPARE_COLORS[colorIdx % RUN_COMPARE_COLORS.length]}
         {@const disabled = false}
         <label
           class="run-chip"
           class:selected
           class:disabled
-          style={selected ? `border-color:${['#0066cc', '#e6531d', '#00996b', '#9b36b7', '#cc8800'][colorIdx % 5]};background:${['#0066cc', '#e6531d', '#00996b', '#9b36b7', '#cc8800'][colorIdx % 5]}18` : ''}
+          style={selected ? `border-color:${color};background:${color}18` : ''}
         >
           <input type="checkbox" checked={selected} {disabled} onchange={() => toggleRun(run.id)} />
-          <span class="run-chip-id" style={selected ? `color:${['#0066cc', '#e6531d', '#00996b', '#9b36b7', '#cc8800'][colorIdx % 5]};font-weight:700` : ''}>
+          <span class="run-chip-id" style={selected ? `color:${color};font-weight:700` : ''}>
             {run.name || '#' + run.id}
           </span>
           {#if run.profile_name}

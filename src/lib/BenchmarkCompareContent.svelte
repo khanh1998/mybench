@@ -1,6 +1,7 @@
 <script lang="ts">
   import LoadAnalysis from '$lib/LoadAnalysis.svelte';
   import DatabaseTelemetryCompare from '$lib/DatabaseTelemetryCompare.svelte';
+  import { RUN_COMPARE_COLORS } from '$lib/compare/colors';
   import type { CompareRunInfo, CompareStepPerf } from '$lib/compare/types';
 
   interface RunParam {
@@ -46,7 +47,7 @@
     selectionPrompt?: string;
   } = $props();
 
-  const COLORS = ['#0066cc', '#e6531d', '#00996b', '#9b36b7', '#cc8800'];
+  const COLORS = RUN_COMPARE_COLORS;
   const PGBENCH_SUMMARY_METRICS = [
     { key: 'tps' as const, label: 'TPS', decimals: 2, higherBetter: true },
     { key: 'latency_avg_ms' as const, label: 'Avg Latency (ms)', decimals: 3, higherBetter: false },
