@@ -84,6 +84,7 @@ export async function uploadFile(
 	const sftp = await getSftp(conn);
 	return new Promise((resolve, reject) => {
 		sftp.fastPut(localPath, remotePath, (err) => {
+			sftp.end();
 			if (err) return reject(err);
 			resolve();
 		});
@@ -98,6 +99,7 @@ export async function downloadFile(
 	const sftp = await getSftp(conn);
 	return new Promise((resolve, reject) => {
 		sftp.fastGet(remotePath, localPath, (err) => {
+			sftp.end();
 			if (err) return reject(err);
 			resolve();
 		});

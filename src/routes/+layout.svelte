@@ -6,6 +6,7 @@
 <nav class="navbar">
   <a href="/" class="brand">mybench</a>
   <a href="/decisions" class:active={$page.url.pathname.startsWith('/decisions')}>Decisions</a>
+  <a href="/runs" class:active={$page.url.pathname.startsWith('/runs')}>Runs</a>
   <a href="/metrics" class:active={$page.url.pathname.startsWith('/metrics')}>Metrics</a>
   <a href="/onboard" class:active={$page.url.pathname.startsWith('/onboard')}>Onboard</a>
   <a href="/settings" class:active={$page.url.pathname.startsWith('/settings')}>Settings</a>

@@ -28,6 +28,7 @@ export interface StartSeriesOptions {
 	database?: string;
 	snapshot_interval_seconds?: number;
 	use_private_ip?: boolean;
+	suite_id?: number;           // optional — set when series is part of a decision suite
 }
 
 export interface SeriesEmitter extends EventEmitter {
@@ -65,9 +66,9 @@ export function startSeries(opts: StartSeriesOptions): number {
 	const resolvedDatabase = opts.database ?? design.database;
 
 	const seriesResult = db.prepare(`
-		INSERT INTO benchmark_series (design_id, name, delay_seconds, status, created_at)
-		VALUES (?, ?, ?, 'running', ?)
-	`).run(opts.design_id, seriesName, delaySeconds, new Date().toISOString());
+		INSERT INTO benchmark_series (design_id, name, delay_seconds, status, created_at, suite_id)
+		VALUES (?, ?, ?, 'running', ?, ?)
+	`).run(opts.design_id, seriesName, delaySeconds, new Date().toISOString(), opts.suite_id ?? null);
 	const seriesId = seriesResult.lastInsertRowid as number;
 
 	const emitter = new EventEmitter() as SeriesEmitter;

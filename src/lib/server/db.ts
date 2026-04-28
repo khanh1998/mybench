@@ -1310,6 +1310,23 @@ FROM snap_pg_stat_bgwriter WHERE _run_id = ? ORDER BY _collected_at DESC LIMIT 1
 	if (!runCols2.includes('series_id')) {
 		db.exec(`ALTER TABLE benchmark_runs ADD COLUMN series_id INTEGER REFERENCES benchmark_series(id)`);
 	}
+
+	// decision_suites table + suite_id on benchmark_series
+	db.exec(`
+    CREATE TABLE IF NOT EXISTS decision_suites (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      decision_id    INTEGER NOT NULL REFERENCES decisions(id) ON DELETE CASCADE,
+      name           TEXT    NOT NULL DEFAULT '',
+      status         TEXT    NOT NULL DEFAULT 'running',
+      ec2_run_token  TEXT,
+      created_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+      finished_at    TEXT
+    );
+  `);
+	const seriesCols = (db.prepare(`PRAGMA table_info(benchmark_series)`).all() as { name: string }[]).map(c => c.name);
+	if (!seriesCols.includes('suite_id')) {
+		db.exec(`ALTER TABLE benchmark_series ADD COLUMN suite_id INTEGER REFERENCES decision_suites(id)`);
+	}
 }
 
 export default getDb;
