@@ -625,7 +625,9 @@ function migrate(db: Database.Database) {
       unit TEXT NOT NULL DEFAULT '',
       runtime_secs REAL,
       percent_running REAL,
-      per_transaction REAL
+      per_transaction REAL,
+      derived_value REAL,
+      derived_unit TEXT NOT NULL DEFAULT ''
     );
 
     CREATE TABLE IF NOT EXISTS saved_queries (
@@ -713,9 +715,15 @@ function migrate(db: Database.Database) {
       unit TEXT NOT NULL DEFAULT '',
       runtime_secs REAL,
       percent_running REAL,
-      per_transaction REAL
+      per_transaction REAL,
+      derived_value REAL,
+      derived_unit TEXT NOT NULL DEFAULT ''
     );
   `);
+
+  const perfEventCols = (db.prepare(`PRAGMA table_info(run_step_perf_events)`).all() as { name: string }[]).map(c => c.name);
+  if (!perfEventCols.includes('derived_value')) db.exec(`ALTER TABLE run_step_perf_events ADD COLUMN derived_value REAL`);
+  if (!perfEventCols.includes('derived_unit')) db.exec(`ALTER TABLE run_step_perf_events ADD COLUMN derived_unit TEXT NOT NULL DEFAULT ''`);
 
   // Add cmdline column to host_snap_proc_pid_stat (idempotent)
   const pidStatCols = (db.prepare(`PRAGMA table_info(host_snap_proc_pid_stat)`).all() as { name: string }[]).map(c => c.name);

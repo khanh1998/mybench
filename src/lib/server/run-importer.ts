@@ -85,6 +85,8 @@ export interface RunnerPerfEvent {
 	runtime_secs?: number | null;
 	percent_running?: number | null;
 	per_transaction?: number | null;
+	derived_value?: number | null;
+	derived_unit?: string;
 }
 
 export interface RunnerPerfResult {
@@ -199,9 +201,10 @@ export function importResultIntoRun(runId: number, result: RunnerResult): void {
 		`);
 		const insPerfEvent = db.prepare(`
 			INSERT INTO run_step_perf_events (
-				run_id, step_id, event_name, counter_value, unit, runtime_secs, percent_running, per_transaction
+				run_id, step_id, event_name, counter_value, unit, runtime_secs, percent_running, per_transaction,
+				derived_value, derived_unit
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`);
 		db.transaction(() => {
 			for (const s of steps) {
@@ -244,7 +247,9 @@ export function importResultIntoRun(runId: number, result: RunnerResult): void {
 							ev.unit ?? '',
 							ev.runtime_secs ?? null,
 							ev.percent_running ?? null,
-							ev.per_transaction ?? null
+							ev.per_transaction ?? null,
+							ev.derived_value ?? null,
+							ev.derived_unit ?? ''
 						);
 					}
 				}

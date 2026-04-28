@@ -93,7 +93,9 @@ function createTestDb() {
       unit TEXT NOT NULL DEFAULT '',
       runtime_secs REAL,
       percent_running REAL,
-      per_transaction REAL
+      per_transaction REAL,
+      derived_value REAL,
+      derived_unit TEXT NOT NULL DEFAULT ''
     );
   `);
 	return db;
@@ -163,6 +165,8 @@ interface ImportResult {
 				runtime_secs?: number | null;
 				percent_running?: number | null;
 				per_transaction?: number | null;
+				derived_value?: number | null;
+				derived_unit?: string;
 			}>;
 		};
 		started_at: string;
@@ -241,8 +245,8 @@ function importRun(
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`);
 		const insPerfEvent = db.prepare(`
-			INSERT INTO run_step_perf_events (run_id, step_id, event_name, counter_value, unit, runtime_secs, percent_running, per_transaction)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			INSERT INTO run_step_perf_events (run_id, step_id, event_name, counter_value, unit, runtime_secs, percent_running, per_transaction, derived_value, derived_unit)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`);
 
 		db.transaction(() => {
@@ -265,7 +269,7 @@ function importRun(
 				if (step.perf) {
 					insPerf.run(runId, step.step_id, step.perf.status, step.perf.scope, step.perf.cgroup ?? '', step.perf.command ?? '', step.perf.raw_output ?? '', step.perf.raw_error ?? '', step.perf.warnings ? JSON.stringify(step.perf.warnings) : '', step.perf.started_at ?? null, step.perf.finished_at ?? null);
 					for (const event of step.perf.events ?? []) {
-						insPerfEvent.run(runId, step.step_id, event.event_name, event.counter_value ?? null, event.unit ?? '', event.runtime_secs ?? null, event.percent_running ?? null, event.per_transaction ?? null);
+						insPerfEvent.run(runId, step.step_id, event.event_name, event.counter_value ?? null, event.unit ?? '', event.runtime_secs ?? null, event.percent_running ?? null, event.per_transaction ?? null, event.derived_value ?? null, event.derived_unit ?? '');
 					}
 				}
 			}
@@ -658,7 +662,7 @@ describe('Import endpoint logic', () => {
 						cgroup: '/system.slice/postgresql.service',
 						command: 'sudo perf stat ...',
 						events: [
-							{ event_name: 'cycles', counter_value: 1000, per_transaction: 10 },
+							{ event_name: 'cycles', counter_value: 1000, per_transaction: 10, derived_value: 100, derived_unit: '/sec' },
 							{ event_name: 'instructions', counter_value: 2000, per_transaction: 20 }
 						]
 					}
@@ -674,9 +678,9 @@ describe('Import endpoint logic', () => {
 			expect(perf.cgroup).toBe('/system.slice/postgresql.service');
 			expect(perf.command).toContain('perf stat');
 
-			const events = db.prepare('SELECT event_name, counter_value, per_transaction FROM run_step_perf_events WHERE run_id = ? ORDER BY event_name').all(result.run_id) as { event_name: string; counter_value: number; per_transaction: number }[];
+			const events = db.prepare('SELECT event_name, counter_value, per_transaction, derived_value, derived_unit FROM run_step_perf_events WHERE run_id = ? ORDER BY event_name').all(result.run_id) as { event_name: string; counter_value: number; per_transaction: number; derived_value: number | null; derived_unit: string }[];
 			expect(events).toHaveLength(2);
-			expect(events[0]).toMatchObject({ event_name: 'cycles', counter_value: 1000, per_transaction: 10 });
+			expect(events[0]).toMatchObject({ event_name: 'cycles', counter_value: 1000, per_transaction: 10, derived_value: 100, derived_unit: '/sec' });
 		}
 	});
 });

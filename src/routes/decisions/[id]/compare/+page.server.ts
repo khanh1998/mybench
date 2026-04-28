@@ -31,7 +31,9 @@ function loadPerfByRun(db: ReturnType<typeof getDb>, runIds: number[]): Map<numb
       unit: event.unit,
       runtime_secs: event.runtime_secs,
       percent_running: event.percent_running,
-      per_transaction: event.per_transaction
+      per_transaction: event.per_transaction,
+      derived_value: event.derived_value,
+      derived_unit: event.derived_unit
     });
     eventsByStep.set(key, list);
   }

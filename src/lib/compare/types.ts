@@ -44,6 +44,8 @@ export interface ComparePerfEvent {
   runtime_secs: number | null;
   percent_running: number | null;
   per_transaction: number | null;
+  derived_value: number | null;
+  derived_unit: string;
 }
 
 export interface CompareStepPerf {

@@ -257,12 +257,21 @@ func parsePerfStatOutput(output string, transactions int64) ([]result.PerfEvent,
 		}
 		if len(parts) > runtimeIdx {
 			if v, ok := parsePerfFloat(parts[runtimeIdx]); ok {
-				ev.RuntimeSecs = &v
+				runtimeSecs := v / 1_000_000_000
+				ev.RuntimeSecs = &runtimeSecs
 			}
 		}
 		if len(parts) > runtimeIdx+1 {
 			if v, ok := parsePerfFloat(strings.TrimSuffix(parts[runtimeIdx+1], "%")); ok {
 				ev.PercentRunning = &v
+			}
+		}
+		if len(parts) > runtimeIdx+2 {
+			if v, ok := parsePerfFloat(parts[runtimeIdx+2]); ok {
+				ev.DerivedValue = &v
+				if len(parts) > runtimeIdx+3 {
+					ev.DerivedUnit = strings.TrimSpace(strings.Join(parts[runtimeIdx+3:], " "))
+				}
 			}
 		}
 		events = append(events, ev)

@@ -64,6 +64,8 @@ type PerfEvent struct {
 	RuntimeSecs    *float64 `json:"runtime_secs,omitempty"`
 	PercentRunning *float64 `json:"percent_running,omitempty"`
 	PerTransaction *float64 `json:"per_transaction,omitempty"`
+	DerivedValue   *float64 `json:"derived_value,omitempty"`
+	DerivedUnit    string   `json:"derived_unit,omitempty"`
 }
 
 // SysbenchSummary holds parsed metrics from sysbench stdout.

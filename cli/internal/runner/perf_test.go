@@ -7,7 +7,7 @@ import (
 )
 
 func TestParsePerfStatOutput(t *testing.T) {
-	out := "1000\t\tcycles\t1.000000\t100.00\n2000\t\tinstructions\t1.000000\t100.00\n<not supported>\t\tcache-misses\t0.000000\t0.00\n# comment\n"
+	out := "1000\t\tcycles\t1000000000\t100.00\n2000\t\tinstructions\t1000000000\t100.00\n<not supported>\t\tcache-misses\t0\t0.00\n# comment\n"
 	events, warnings := parsePerfStatOutput(out, 10)
 	if len(events) != 3 {
 		t.Fatalf("expected 3 events, got %d", len(events))
@@ -36,7 +36,7 @@ func TestParsePerfFloat(t *testing.T) {
 }
 
 func TestParsePerfStatOutputWithCgroupColumn(t *testing.T) {
-	out := "1000\t\tcycles\t/system.slice/postgresql.service\t1.000000\t100.00\n"
+	out := "1000\t\tcycles\t/system.slice/postgresql.service\t1000000000\t100.00\t33.300\t/sec\n"
 	events, warnings := parsePerfStatOutput(out, 10)
 	if len(warnings) != 0 {
 		t.Fatalf("unexpected warnings: %v", warnings)
@@ -49,6 +49,32 @@ func TestParsePerfStatOutputWithCgroupColumn(t *testing.T) {
 	}
 	if events[0].PercentRunning == nil || *events[0].PercentRunning != 100 {
 		t.Fatalf("expected running percent from cgroup output, got %+v", events[0].PercentRunning)
+	}
+	if events[0].DerivedValue == nil || *events[0].DerivedValue != 33.3 {
+		t.Fatalf("expected derived value from cgroup output, got %+v", events[0].DerivedValue)
+	}
+	if events[0].DerivedUnit != "/sec" {
+		t.Fatalf("expected derived unit from cgroup output, got %q", events[0].DerivedUnit)
+	}
+}
+
+func TestParsePerfStatOutputCpuUtilization(t *testing.T) {
+	out := "302860.42\tmsec\ttask-clock\t/system.slice/postgresql.service\t302864094660\t100.00\t1.683\tCPUs utilized\n"
+	events, warnings := parsePerfStatOutput(out, 4387)
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %v", warnings)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if events[0].RuntimeSecs == nil || *events[0].RuntimeSecs != 302.86409466 {
+		t.Fatalf("expected runtime seconds, got %+v", events[0].RuntimeSecs)
+	}
+	if events[0].DerivedValue == nil || *events[0].DerivedValue != 1.683 {
+		t.Fatalf("expected CPUs utilized derived value, got %+v", events[0].DerivedValue)
+	}
+	if events[0].DerivedUnit != "CPUs utilized" {
+		t.Fatalf("expected CPUs utilized derived unit, got %q", events[0].DerivedUnit)
 	}
 }
 

@@ -31,6 +31,8 @@
     runtime_secs: number | null;
     percent_running: number | null;
     per_transaction: number | null;
+    derived_value: number | null;
+    derived_unit: string;
   }
   interface StepPerf {
     status: string;
@@ -307,14 +309,6 @@
     expandedStep = expandedStep === stepId ? null : stepId;
   }
 
-  function perfEvent(step: StepResult, name: string): StepPerfEvent | null {
-    return step.perf?.events.find((event) => event.event_name === name) ?? null;
-  }
-
-  function eventPerTxn(step: StepResult, name: string): number | null {
-    return perfEvent(step, name)?.per_transaction ?? null;
-  }
-
   function perfWarnings(step: StepResult): string[] {
     return parseJson<string[]>(step.perf?.warnings_json) ?? [];
   }
@@ -322,6 +316,62 @@
   function fmtMetric(value: number | null | undefined, digits = 2): string {
     if (value === null || value === undefined || Number.isNaN(value)) return '—';
     return value.toLocaleString(undefined, { maximumFractionDigits: digits });
+  }
+
+  function parsePerfNumber(value: string | undefined): number | null {
+    const clean = value?.trim().replaceAll(',', '') ?? '';
+    if (!clean || clean.startsWith('<')) return null;
+    const parsed = Number.parseFloat(clean);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function normalizePerfRuntime(value: number | null | undefined): number | null {
+    if (value === null || value === undefined || Number.isNaN(value)) return null;
+    return value > 1_000_000 ? value / 1_000_000_000 : value;
+  }
+
+  function rawPerfEvent(step: StepResult, name: string): Partial<StepPerfEvent> | null {
+    const raw = step.perf?.raw_error;
+    if (!raw) return null;
+    for (const line of raw.split('\n')) {
+      const parts = line.trim().split('\t');
+      if (parts.length < 3 || parts[2]?.trim() !== name) continue;
+      let runtimeIdx = 3;
+      if (parts[3]?.trim().startsWith('/')) runtimeIdx = 4;
+      const runtimeRaw = parsePerfNumber(parts[runtimeIdx] ?? '');
+      const percentRaw = parsePerfNumber((parts[runtimeIdx + 1] ?? '').replace('%', ''));
+      const derivedValue = parsePerfNumber(parts[runtimeIdx + 2] ?? '');
+      return {
+        runtime_secs: runtimeRaw === null ? null : runtimeRaw / 1_000_000_000,
+        percent_running: percentRaw,
+        derived_value: derivedValue,
+        derived_unit: derivedValue === null ? '' : parts.slice(runtimeIdx + 3).join(' ').trim()
+      };
+    }
+    return null;
+  }
+
+  function displayPerfEvent(step: StepResult, event: StepPerfEvent): StepPerfEvent {
+    const raw = rawPerfEvent(step, event.event_name);
+    return {
+      ...event,
+      runtime_secs: raw?.runtime_secs ?? normalizePerfRuntime(event.runtime_secs),
+      percent_running: event.percent_running ?? raw?.percent_running ?? null,
+      derived_value: event.derived_value ?? raw?.derived_value ?? null,
+      derived_unit: event.derived_unit || raw?.derived_unit || ''
+    };
+  }
+
+  function fmtDurationSecs(value: number | null | undefined): string {
+    if (value === null || value === undefined || Number.isNaN(value)) return '—';
+    if (value < 1) return `${fmtMetric(value * 1000, 2)} ms`;
+    return `${fmtMetric(value, 3)} s`;
+  }
+
+  function fmtDerivedMetric(event: StepPerfEvent): string {
+    if (event.derived_value === null || event.derived_value === undefined || Number.isNaN(event.derived_value)) return '—';
+    const unit = event.derived_unit ? ` ${event.derived_unit}` : '';
+    return `${fmtMetric(event.derived_value, 3)}${unit}`;
   }
 
   function scopeLabel(scope: StepPerf['scope']): string {
@@ -724,8 +774,6 @@
   {#if perfSteps.length > 0}
     <div class="perf-grid">
       {#each perfSteps as s}
-        {@const taskClock = eventPerTxn(s, 'task-clock')}
-        {@const cpuClock = eventPerTxn(s, 'cpu-clock')}
         {@const warnings = perfWarnings(s)}
         <div class="perf-card">
           <div class="perf-card-head">
@@ -733,15 +781,6 @@
             <span class="badge badge-{s.perf?.status ?? 'pending'}">{s.perf?.status}</span>
           </div>
           <div class="perf-scope">{scopeLabel(s.perf?.scope ?? 'disabled')}{#if s.perf?.cgroup} · {s.perf.cgroup}{/if}</div>
-          <div class="perf-metrics">
-            <div><span>task clock/tx</span><strong>{fmtMetric(taskClock, 3)}</strong></div>
-            <div><span>cpu clock/tx</span><strong>{fmtMetric(cpuClock, 3)}</strong></div>
-            <div><span>ctx switches/tx</span><strong>{fmtMetric(eventPerTxn(s, 'context-switches'), 3)}</strong></div>
-            <div><span>migrations/tx</span><strong>{fmtMetric(eventPerTxn(s, 'cpu-migrations'), 3)}</strong></div>
-            <div><span>page faults/tx</span><strong>{fmtMetric(eventPerTxn(s, 'page-faults'), 3)}</strong></div>
-            <div><span>minor faults/tx</span><strong>{fmtMetric(eventPerTxn(s, 'minor-faults'), 3)}</strong></div>
-            <div><span>major faults/tx</span><strong>{fmtMetric(eventPerTxn(s, 'major-faults'), 3)}</strong></div>
-          </div>
           {#if warnings.length > 0}
             <div class="perf-warnings">
               {#each warnings as warning}
@@ -756,15 +795,17 @@
           {#if s.perf?.events.length}
             <div class="detail-label" style="margin-top:10px">Perf events</div>
             <table class="perf-events-table">
-              <thead><tr><th>Event</th><th>Value</th><th>/ tx</th><th>Runtime</th><th>Running %</th></tr></thead>
+              <thead><tr><th>Event</th><th>Total</th><th>/ tx</th><th>Rate / Metric</th><th>Active Time</th><th>Running %</th></tr></thead>
               <tbody>
                 {#each s.perf.events as event}
+                  {@const displayEvent = displayPerfEvent(s, event)}
                   <tr>
                     <td>{event.event_name}</td>
                     <td>{fmtMetric(event.counter_value, 3)} {event.unit}</td>
                     <td>{fmtMetric(event.per_transaction, 3)}</td>
-                    <td>{fmtMetric(event.runtime_secs, 3)}</td>
-                    <td>{fmtMetric(event.percent_running, 2)}</td>
+                    <td>{fmtDerivedMetric(displayEvent)}</td>
+                    <td>{fmtDurationSecs(displayEvent.runtime_secs)}</td>
+                    <td>{fmtMetric(displayEvent.percent_running, 2)}</td>
                   </tr>
                 {/each}
               </tbody>
@@ -826,10 +867,6 @@
   .perf-card { border: 1px solid #eee; border-radius: 6px; padding: 10px; background: #fafafa; }
   .perf-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
   .perf-scope { font-size: 11px; color: #666; margin-bottom: 8px; }
-  .perf-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; }
-  .perf-metrics div { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; }
-  .perf-metrics span { color: #666; }
-  .perf-metrics strong { color: #222; }
   .perf-warnings {
     margin-top: 10px;
     padding: 8px;
