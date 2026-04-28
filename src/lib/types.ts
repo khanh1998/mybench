@@ -24,6 +24,11 @@ export interface PgServer {
 	ssh_private_key: string | null;
 	private_host: string; // optional private/VPC IP for runner→PG communication
 	vpc: string;          // VPC name tag; matched against Ec2Server.vpc to auto-enable private_host
+	perf_enabled: number; // 0 or 1
+	perf_scope: 'postgres_cgroup' | 'system' | 'disabled';
+	perf_cgroup: string;
+	perf_events: string;
+	perf_status_json: string;
 }
 
 export interface PgStatTableSelection {
@@ -103,6 +108,8 @@ export interface DesignStep {
 	pgbench_options: string;
 	duration_secs: number;
 	no_transaction: number; // 0 or 1 — SQL steps only: omit --single-transaction
+	collect_perf: number; // 0 or 1 — pgbench/sysbench steps only
+	perf_duration: string; // seconds expression; supports {{PARAM}} placeholders
 	enabled: number; // 0 or 1
 	pgbench_scripts?: PgbenchScript[];
 }
@@ -166,6 +173,35 @@ export interface RunStepResult {
 	processed_script: string;
 	pgbench_summary_json: string;
 	pgbench_scripts_json: string;
+	sysbench_summary_json: string;
+}
+
+export interface RunStepPerfEvent {
+	id: number;
+	run_id: number;
+	step_id: number;
+	event_name: string;
+	counter_value: number | null;
+	unit: string;
+	runtime_secs: number | null;
+	percent_running: number | null;
+	per_transaction: number | null;
+}
+
+export interface RunStepPerf {
+	id: number;
+	run_id: number;
+	step_id: number;
+	status: string;
+	scope: 'postgres_cgroup' | 'system' | 'disabled';
+	cgroup: string;
+	command: string;
+	raw_output: string;
+	raw_error: string;
+	warnings_json: string;
+	started_at: string | null;
+	finished_at: string | null;
+	events: RunStepPerfEvent[];
 }
 
 export interface Ec2Server {

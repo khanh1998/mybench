@@ -73,8 +73,31 @@ export interface RunnerResultStep {
 		reconnects?: number;
 		rows_per_sec?: number | null;
 	};
+	perf?: RunnerPerfResult;
 	started_at: string;
 	finished_at: string;
+}
+
+export interface RunnerPerfEvent {
+	event_name: string;
+	counter_value?: number | null;
+	unit?: string;
+	runtime_secs?: number | null;
+	percent_running?: number | null;
+	per_transaction?: number | null;
+}
+
+export interface RunnerPerfResult {
+	status: string;
+	scope: string;
+	cgroup?: string;
+	command?: string;
+	raw_output?: string;
+	raw_error?: string;
+	warnings?: string[];
+	started_at?: string;
+	finished_at?: string;
+	events?: RunnerPerfEvent[];
 }
 
 export interface RunnerResult {
@@ -154,6 +177,8 @@ export function importResultIntoRun(runId: number, result: RunnerResult): void {
 
 	// Replace step results: delete placeholder(s), insert real ones
 	db.prepare('DELETE FROM run_step_results WHERE run_id = ?').run(runId);
+	db.prepare('DELETE FROM run_step_perf WHERE run_id = ?').run(runId);
+	db.prepare('DELETE FROM run_step_perf_events WHERE run_id = ?').run(runId);
 
 	const steps = result.steps;
 	if (steps?.length) {
@@ -164,6 +189,19 @@ export function importResultIntoRun(runId: number, result: RunnerResult): void {
 				sysbench_summary_json, started_at, finished_at
 			)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`);
+		const insPerf = db.prepare(`
+			INSERT INTO run_step_perf (
+				run_id, step_id, status, scope, cgroup, command, raw_output, raw_error,
+				warnings_json, started_at, finished_at
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`);
+		const insPerfEvent = db.prepare(`
+			INSERT INTO run_step_perf_events (
+				run_id, step_id, event_name, counter_value, unit, runtime_secs, percent_running, per_transaction
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		`);
 		db.transaction(() => {
 			for (const s of steps) {
@@ -183,6 +221,33 @@ export function importResultIntoRun(runId: number, result: RunnerResult): void {
 					s.started_at,
 					s.finished_at
 				);
+				if (s.perf) {
+					insPerf.run(
+						runId,
+						s.step_id,
+						s.perf.status ?? '',
+						s.perf.scope ?? 'disabled',
+						s.perf.cgroup ?? '',
+						s.perf.command ?? '',
+						s.perf.raw_output ?? '',
+						s.perf.raw_error ?? '',
+						s.perf.warnings ? JSON.stringify(s.perf.warnings) : '',
+						s.perf.started_at ?? null,
+						s.perf.finished_at ?? null
+					);
+					for (const ev of s.perf.events ?? []) {
+						insPerfEvent.run(
+							runId,
+							s.step_id,
+							ev.event_name,
+							ev.counter_value ?? null,
+							ev.unit ?? '',
+							ev.runtime_secs ?? null,
+							ev.percent_running ?? null,
+							ev.per_transaction ?? null
+						);
+					}
+				}
 			}
 		})();
 	}

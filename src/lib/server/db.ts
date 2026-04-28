@@ -7,6 +7,10 @@ const DATA_DIR = process.env.DATA_DIR ?? join(process.cwd(), 'data');
 if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
 
 const DB_PATH = join(DATA_DIR, 'mybench.db');
+const OLD_DEFAULT_PERF_EVENTS =
+	'cycles,instructions,cache-references,cache-misses,branches,branch-misses,context-switches,page-faults';
+const DEFAULT_PERF_EVENTS =
+	'task-clock,cpu-clock,context-switches,cpu-migrations,page-faults,minor-faults,major-faults';
 
 let _db: Database.Database | null = null;
 
@@ -512,7 +516,12 @@ function migrate(db: Database.Database) {
       port INTEGER NOT NULL DEFAULT 5432,
       username TEXT NOT NULL DEFAULT 'postgres',
       password TEXT NOT NULL DEFAULT '',
-      ssl INTEGER NOT NULL DEFAULT 0
+      ssl INTEGER NOT NULL DEFAULT 0,
+      perf_enabled INTEGER NOT NULL DEFAULT 0,
+      perf_scope TEXT NOT NULL DEFAULT 'disabled',
+      perf_cgroup TEXT NOT NULL DEFAULT '',
+      perf_events TEXT NOT NULL DEFAULT 'task-clock,cpu-clock,context-switches,cpu-migrations,page-faults,minor-faults,major-faults',
+      perf_status_json TEXT NOT NULL DEFAULT ''
     );
 
     CREATE TABLE IF NOT EXISTS pg_stat_table_selections (
@@ -550,7 +559,9 @@ function migrate(db: Database.Database) {
       pgbench_options TEXT NOT NULL DEFAULT '',
       enabled INTEGER NOT NULL DEFAULT 1,
       duration_secs INTEGER NOT NULL DEFAULT 0,
-      no_transaction INTEGER NOT NULL DEFAULT 0
+      no_transaction INTEGER NOT NULL DEFAULT 0,
+      collect_perf INTEGER NOT NULL DEFAULT 0,
+      perf_duration TEXT NOT NULL DEFAULT ''
     );
 
     CREATE TABLE IF NOT EXISTS benchmark_runs (
@@ -588,6 +599,33 @@ function migrate(db: Database.Database) {
       pgbench_scripts_json TEXT NOT NULL DEFAULT '',
       started_at TEXT,
       finished_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS run_step_perf (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      step_id INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT '',
+      scope TEXT NOT NULL DEFAULT 'disabled',
+      cgroup TEXT NOT NULL DEFAULT '',
+      command TEXT NOT NULL DEFAULT '',
+      raw_output TEXT NOT NULL DEFAULT '',
+      raw_error TEXT NOT NULL DEFAULT '',
+      warnings_json TEXT NOT NULL DEFAULT '',
+      started_at TEXT,
+      finished_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS run_step_perf_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      step_id INTEGER NOT NULL,
+      event_name TEXT NOT NULL,
+      counter_value REAL,
+      unit TEXT NOT NULL DEFAULT '',
+      runtime_secs REAL,
+      percent_running REAL,
+      per_transaction REAL
     );
 
     CREATE TABLE IF NOT EXISTS saved_queries (
@@ -651,6 +689,34 @@ function migrate(db: Database.Database) {
   if (!stepResultCols.includes('pgbench_scripts_json')) db.exec(`ALTER TABLE run_step_results ADD COLUMN pgbench_scripts_json TEXT NOT NULL DEFAULT ''`);
   if (!stepResultCols.includes('sysbench_summary_json')) db.exec(`ALTER TABLE run_step_results ADD COLUMN sysbench_summary_json TEXT NOT NULL DEFAULT ''`);
 
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS run_step_perf (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      step_id INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT '',
+      scope TEXT NOT NULL DEFAULT 'disabled',
+      cgroup TEXT NOT NULL DEFAULT '',
+      command TEXT NOT NULL DEFAULT '',
+      raw_output TEXT NOT NULL DEFAULT '',
+      raw_error TEXT NOT NULL DEFAULT '',
+      warnings_json TEXT NOT NULL DEFAULT '',
+      started_at TEXT,
+      finished_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS run_step_perf_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      step_id INTEGER NOT NULL,
+      event_name TEXT NOT NULL,
+      counter_value REAL,
+      unit TEXT NOT NULL DEFAULT '',
+      runtime_secs REAL,
+      percent_running REAL,
+      per_transaction REAL
+    );
+  `);
+
   // Add cmdline column to host_snap_proc_pid_stat (idempotent)
   const pidStatCols = (db.prepare(`PRAGMA table_info(host_snap_proc_pid_stat)`).all() as { name: string }[]).map(c => c.name);
   if (pidStatCols.length > 0 && !pidStatCols.includes('cmdline')) {
@@ -661,6 +727,12 @@ function migrate(db: Database.Database) {
   const pgServerCols2 = (db.prepare(`PRAGMA table_info(pg_servers)`).all() as { name: string }[]).map(c => c.name);
   if (!pgServerCols2.includes('private_host')) db.exec(`ALTER TABLE pg_servers ADD COLUMN private_host TEXT NOT NULL DEFAULT ''`);
   if (!pgServerCols2.includes('vpc')) db.exec(`ALTER TABLE pg_servers ADD COLUMN vpc TEXT NOT NULL DEFAULT ''`);
+  if (!pgServerCols2.includes('perf_enabled')) db.exec(`ALTER TABLE pg_servers ADD COLUMN perf_enabled INTEGER NOT NULL DEFAULT 0`);
+  if (!pgServerCols2.includes('perf_scope')) db.exec(`ALTER TABLE pg_servers ADD COLUMN perf_scope TEXT NOT NULL DEFAULT 'disabled'`);
+  if (!pgServerCols2.includes('perf_cgroup')) db.exec(`ALTER TABLE pg_servers ADD COLUMN perf_cgroup TEXT NOT NULL DEFAULT ''`);
+  if (!pgServerCols2.includes('perf_events')) db.exec(`ALTER TABLE pg_servers ADD COLUMN perf_events TEXT NOT NULL DEFAULT 'task-clock,cpu-clock,context-switches,cpu-migrations,page-faults,minor-faults,major-faults'`);
+  if (!pgServerCols2.includes('perf_status_json')) db.exec(`ALTER TABLE pg_servers ADD COLUMN perf_status_json TEXT NOT NULL DEFAULT ''`);
+  db.prepare(`UPDATE pg_servers SET perf_events = ? WHERE perf_events = '' OR perf_events = ?`).run(DEFAULT_PERF_EVENTS, OLD_DEFAULT_PERF_EVENTS);
 
   const ec2ServerCols = (db.prepare(`PRAGMA table_info(ec2_servers)`).all() as { name: string }[]).map(c => c.name);
   if (!ec2ServerCols.includes('vpc')) db.exec(`ALTER TABLE ec2_servers ADD COLUMN vpc TEXT NOT NULL DEFAULT ''`);
@@ -756,6 +828,8 @@ function migrate(db: Database.Database) {
 	const stepCols = (db.prepare(`PRAGMA table_info(design_steps)`).all() as { name: string }[]).map(c => c.name);
 	if (!stepCols.includes('duration_secs')) db.exec(`ALTER TABLE design_steps ADD COLUMN duration_secs INTEGER NOT NULL DEFAULT 0`);
 	if (!stepCols.includes('no_transaction')) db.exec(`ALTER TABLE design_steps ADD COLUMN no_transaction INTEGER NOT NULL DEFAULT 0`);
+	if (!stepCols.includes('collect_perf')) db.exec(`ALTER TABLE design_steps ADD COLUMN collect_perf INTEGER NOT NULL DEFAULT 0`);
+	if (!stepCols.includes('perf_duration')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_duration TEXT NOT NULL DEFAULT ''`);
 
 	db.exec(createSnapPgStatStatementsTableSql().replace('CREATE TABLE ', 'CREATE TABLE IF NOT EXISTS '));
 	const pgStatStatementsMigrated = db.prepare(`SELECT id FROM schema_migrations WHERE id = 'snap_pg_stat_statements_v2'`).get();

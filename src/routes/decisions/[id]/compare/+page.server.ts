@@ -1,7 +1,61 @@
 import getDb from '$lib/server/db';
 import { resolvePgbenchSummary } from '$lib/pgbench-summary';
 import { resolveSysbenchSummary } from '$lib/sysbench-summary';
+import type { ComparePerfEvent, CompareStepPerf } from '$lib/compare/types';
 import type { PageServerLoad } from './$types';
+
+function loadPerfByRun(db: ReturnType<typeof getDb>, runIds: number[]): Map<number, CompareStepPerf[]> {
+  const perfByRun = new Map<number, CompareStepPerf[]>();
+  if (runIds.length === 0) return perfByRun;
+  const placeholders = runIds.map(() => '?').join(',');
+  const perfRows = db.prepare(`
+    SELECT p.*, rs.name AS step_name, rs.type AS step_type, rs.position AS step_position
+    FROM run_step_perf p
+    LEFT JOIN run_step_results rs ON rs.run_id = p.run_id AND rs.step_id = p.step_id
+    WHERE p.run_id IN (${placeholders})
+    ORDER BY p.run_id, rs.position, p.step_id
+  `).all(...runIds) as (CompareStepPerf & { run_id: number; step_position: number | null })[];
+  const events = db.prepare(`
+    SELECT *
+    FROM run_step_perf_events
+    WHERE run_id IN (${placeholders})
+    ORDER BY event_name
+  `).all(...runIds) as (ComparePerfEvent & { run_id: number; step_id: number })[];
+  const eventsByStep = new Map<string, ComparePerfEvent[]>();
+  for (const event of events) {
+    const key = `${event.run_id}:${event.step_id}`;
+    const list = eventsByStep.get(key) ?? [];
+    list.push({
+      event_name: event.event_name,
+      counter_value: event.counter_value,
+      unit: event.unit,
+      runtime_secs: event.runtime_secs,
+      percent_running: event.percent_running,
+      per_transaction: event.per_transaction
+    });
+    eventsByStep.set(key, list);
+  }
+  for (const row of perfRows) {
+    const list = perfByRun.get(row.run_id) ?? [];
+    list.push({
+      step_id: row.step_id,
+      step_name: row.step_name,
+      step_type: row.step_type,
+      status: row.status,
+      scope: row.scope,
+      cgroup: row.cgroup,
+      command: row.command,
+      raw_output: row.raw_output,
+      raw_error: row.raw_error,
+      warnings_json: row.warnings_json,
+      started_at: row.started_at,
+      finished_at: row.finished_at,
+      events: eventsByStep.get(`${row.run_id}:${row.step_id}`) ?? []
+    });
+    perfByRun.set(row.run_id, list);
+  }
+  return perfByRun;
+}
 
 export const load: PageServerLoad = ({ params }) => {
   const db = getDb();
@@ -65,6 +119,7 @@ export const load: PageServerLoad = ({ params }) => {
         ORDER BY d.id ASC, br.id DESC`
     )
     .all(id) as CompareRunRow[];
+  const perfByRun = loadPerfByRun(db, rawRuns.map((run) => run.id));
 
   const runs = rawRuns.map((run) => {
     const isSysbench = run.bench_step_type === 'sysbench';
@@ -77,6 +132,7 @@ export const load: PageServerLoad = ({ params }) => {
       });
       return {
         ...run,
+        perf: perfByRun.get(run.id) ?? [],
         bench_type: 'sysbench' as const,
         tps: summary?.tps ?? run.tps,
         latency_avg_ms: summary?.latency_avg_ms ?? run.latency_avg_ms,
@@ -107,6 +163,7 @@ export const load: PageServerLoad = ({ params }) => {
     });
     return {
       ...run,
+      perf: perfByRun.get(run.id) ?? [],
       bench_type: 'pgbench' as const,
       tps: summary?.tps ?? run.tps,
       latency_avg_ms: summary?.latency_avg_ms ?? run.latency_avg_ms,

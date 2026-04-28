@@ -55,6 +55,7 @@ type pgbenchResult struct {
 	ProcessedScript         string
 	PgbenchSummary          *result.PgbenchSummary
 	PgbenchScripts          []result.PgbenchScriptResult
+	Perf                    *result.PerfResult
 }
 
 // parsePgbenchOutput scans pgbench stdout lines and extracts metrics.
@@ -318,9 +319,14 @@ func runPgbenchStep(
 	// Start snapshot ticker.
 	ticker := NewSnapshotTicker(pool, opts.Plan.EnabledSnapTables, snapshots, intervalSecs, "bench")
 	ticker.Start(ctx)
+	perf, perfRes := maybeStartPerf(server, step, opts.Plan.Params, parseDurationFromArgs(args, "-T"))
+	res.Perf = perfRes
 
 	if err := cmd.Start(); err != nil {
 		ticker.Stop()
+		if perf != nil {
+			res.Perf = perf.Stop(0)
+		}
 		return res, fmt.Errorf("starting pgbench: %w", err)
 	}
 
@@ -370,6 +376,9 @@ func runPgbenchStep(
 		res.LatencyStddevMs = summary.LatencyStddevMs
 		res.Transactions = summary.Transactions
 		res.FailedTransactions = summary.FailedTransactions
+	}
+	if perf != nil {
+		res.Perf = perf.Stop(res.Transactions)
 	}
 
 	// Stop ticker and take final snapshot.

@@ -8,9 +8,26 @@
 		error?: string;
 	}
 	interface ToolStatus { ok: boolean; version?: string; error?: string }
+	interface PerfInspect {
+		ok: boolean;
+		perf_installed: boolean;
+		perf_version: string;
+		sudo_perf_ok: boolean;
+		cgroup_version: string;
+		postgres_service: string;
+		postgres_cgroup: string;
+		cgroup_perf_ok: boolean;
+		scope: 'postgres_cgroup' | 'system' | 'disabled';
+		perf_cgroup: string;
+		perf_events: string;
+		needs_custom_slice: boolean;
+		warning: string;
+		error: string;
+	}
 	interface InspectResult {
 		ok: boolean;
 		tools?: Record<string, ToolStatus>;
+		perf?: PerfInspect;
 		error?: string;
 	}
 	interface RegisterResult {
@@ -218,6 +235,23 @@
 		}
 	}
 
+	async function configurePerfScope() {
+		const key = 'db:perf-scope';
+		installing = new Set([...installing, key]);
+		installOutputs[key] = '';
+		installResults[key] = false;
+		try {
+			const ok = await sseStream('/api/onboard/configure-perf-scope', { host: dbHost, user: sshUser, private_key: sshKey },
+				(line) => { installOutputs[key] += line + '\n'; });
+			installResults[key] = ok;
+			const res = await fetch('/api/onboard/inspect', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ host: dbHost, user: sshUser, private_key: sshKey, role: 'db' }) });
+			dbInspect = await res.json();
+		} finally {
+			installing = new Set([...installing].filter(k => k !== key));
+		}
+	}
+
 	async function runConfigure() {
 		if (!clientPrivateIp.trim() || !dbPrivateIp.trim() || !pgPass.trim()) return;
 		configuring = true; configureOutput = ''; configureOk = null; configureDone = false;
@@ -245,7 +279,8 @@
 					cluster_name: clusterName,
 					client: { host: clientHost, user: sshUser, private_key: sshKey, private_ip: clientPrivateIp.trim(), vpc: vpcTag },
 					db: { public_host: dbHost, private_ip: dbPrivateIp.trim(), user: sshUser, private_key: sshKey, vpc: vpcTag },
-					pg_config: { db_user: pgUser, db_pass: pgPass, db_name: pgDb }
+					pg_config: { db_user: pgUser, db_pass: pgPass, db_name: pgDb },
+					perf: dbInspect?.perf ?? null
 				})
 			});
 			registerResult = await res.json();
@@ -493,6 +528,44 @@
 							{#if installOutputs[perfKey]}
 								<pre class="output install-out">{installOutputs[perfKey]}</pre>
 							{/if}
+							{#if dbInspect.perf}
+								{@const perf = dbInspect.perf}
+								{@const scopeKey = 'db:perf-scope'}
+								<div class="perf-capability">
+									<div class="perf-capability-row">
+										<span>sudo perf</span>
+										<strong class:ok={perf.sudo_perf_ok} class:fail={!perf.sudo_perf_ok}>{perf.sudo_perf_ok ? 'usable' : 'unavailable'}</strong>
+									</div>
+									<div class="perf-capability-row">
+										<span>cgroup</span>
+										<strong>{perf.cgroup_version}</strong>
+									</div>
+									<div class="perf-capability-row">
+										<span>PostgreSQL service</span>
+										<strong>{perf.postgres_service || 'not found'}</strong>
+									</div>
+									<div class="perf-capability-row">
+										<span>perf scope</span>
+										<strong class:ok={perf.scope !== 'disabled'} class:fail={perf.scope === 'disabled'}>
+											{perf.scope === 'postgres_cgroup' ? 'PostgreSQL service cgroup' : perf.scope === 'system' ? 'System-wide' : 'Unavailable'}
+										</strong>
+									</div>
+									{#if perf.postgres_cgroup}
+										<div class="perf-cgroup">{perf.postgres_cgroup}</div>
+									{/if}
+									{#if perf.warning}
+										<div class="warn-text">{perf.warning}</div>
+									{/if}
+									{#if perf.needs_custom_slice}
+										<button disabled={isInstallBlocked(scopeKey)} onclick={configurePerfScope}>
+											{installing.has(scopeKey) ? 'Creating scope…' : 'Enable Postgres perf scope'}
+										</button>
+									{/if}
+									{#if installOutputs[scopeKey]}
+										<pre class="output install-out">{installOutputs[scopeKey]}</pre>
+									{/if}
+								</div>
+							{/if}
 						{:else if dbInspect && !dbInspect.ok}
 							<div class="error">{dbInspect.error}</div>
 						{:else}
@@ -731,6 +804,30 @@
 	.tool-version { font-size: 11px; color: #666; font-family: monospace; }
 
 	.install-out { max-height: 200px; font-size: 11px; margin: 6px 0 0; }
+	.perf-capability {
+		margin-top: 8px;
+		padding: 8px;
+		border: 1px solid #eee;
+		border-radius: 4px;
+		background: #fafafa;
+		font-size: 12px;
+	}
+	.perf-capability-row {
+		display: flex;
+		justify-content: space-between;
+		gap: 10px;
+		margin-bottom: 4px;
+	}
+	.perf-capability strong.ok { color: #155724; }
+	.perf-capability strong.fail { color: #721c24; }
+	.perf-cgroup {
+		font-family: monospace;
+		font-size: 11px;
+		color: #666;
+		word-break: break-all;
+		margin: 6px 0;
+	}
+	.warn-text { color: #856404; margin: 6px 0; }
 
 	.transparency {
 		background: #f8f9fa;

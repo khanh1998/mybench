@@ -162,6 +162,9 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 			if len(pbRes.PgbenchScripts) > 0 {
 				stepRes.PgbenchScripts = pbRes.PgbenchScripts
 			}
+			if pbRes.Perf != nil {
+				stepRes.Perf = pbRes.Perf
+			}
 
 			// Capture metrics even on error (partial results).
 			res.Run.TPS = pbRes.TPS
@@ -193,6 +196,9 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 			stepRes.ProcessedScript = sbRes.ProcessedScript
 			if sbRes.SysbenchSummary != nil {
 				stepRes.SysbenchSummary = sbRes.SysbenchSummary
+			}
+			if sbRes.Perf != nil {
+				stepRes.Perf = sbRes.Perf
 			}
 
 			// Capture top-level metrics even on error (partial results).

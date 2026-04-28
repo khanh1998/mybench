@@ -37,6 +37,8 @@
     pgbench_options: string;
     duration_secs: number;
     no_transaction: number;
+    collect_perf: number;
+    perf_duration: string;
     enabled: number;
     pgbench_scripts?: PgbenchScript[];
   }
@@ -402,6 +404,8 @@
       pgbench_options: '',
       duration_secs: 0,
       no_transaction: 0,
+      collect_perf: 0,
+      perf_duration: '',
       enabled: 1,
       pgbench_scripts: []
     };
@@ -1064,6 +1068,29 @@
           </label>
         {/if}
       </div>
+      {#if selectedStep.type === 'pgbench' || selectedStep.type === 'sysbench'}
+        <div class="bench-options-row">
+          <label class="perf-toggle" title="Run perf stat on the DB host for exactly this benchmark interval">
+            <input
+              type="checkbox"
+              checked={!!selectedStep.collect_perf}
+              onchange={(e) => { selectedStep.collect_perf = (e.currentTarget as HTMLInputElement).checked ? 1 : 0; }}
+            />
+            Collect DB perf during this benchmark step
+          </label>
+          {#if selectedStep.collect_perf}
+            <label class="perf-duration-label" title={'Seconds perf should run on the DB host; enter a number or a param like {{DURATION_SECS}}'}>
+              Perf duration
+              <input
+                bind:value={selectedStep.perf_duration}
+                placeholder={'180 or {{DURATION_SECS}}'}
+                spellcheck="false"
+              />
+              <span>s</span>
+            </label>
+          {/if}
+        </div>
+      {/if}
       {#if selectedStep.type === 'collect'}
         <div class="collect-info">
           <div class="collect-icon">📊</div>
@@ -1367,6 +1394,40 @@
     color: #666;
     font-weight: 600;
     white-space: nowrap;
+  }
+
+  .bench-options-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
+    flex-shrink: 0;
+    padding: 8px 12px;
+    background: #252526;
+    border-bottom: 1px solid #333;
+  }
+  .perf-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: #ddd;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .perf-toggle input { width: auto; }
+  .perf-duration-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: #ddd;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .perf-duration-label input {
+    width: 140px;
+    font-family: monospace;
+    font-size: 12px;
   }
 
   button.active { background: #e8f0fe; border-color: #0066cc; color: #0066cc; }

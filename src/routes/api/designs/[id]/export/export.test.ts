@@ -16,7 +16,12 @@ function createTestDb() {
       port INTEGER NOT NULL DEFAULT 5432,
       username TEXT NOT NULL DEFAULT 'postgres',
       password TEXT NOT NULL DEFAULT '',
-      ssl INTEGER NOT NULL DEFAULT 0
+      ssl INTEGER NOT NULL DEFAULT 0,
+      perf_enabled INTEGER NOT NULL DEFAULT 0,
+      perf_scope TEXT NOT NULL DEFAULT 'disabled',
+      perf_cgroup TEXT NOT NULL DEFAULT '',
+      perf_events TEXT NOT NULL DEFAULT '',
+      perf_status_json TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE pg_stat_table_selections (
       server_id INTEGER NOT NULL REFERENCES pg_servers(id) ON DELETE CASCADE,
@@ -50,7 +55,9 @@ function createTestDb() {
       pgbench_options TEXT NOT NULL DEFAULT '',
       enabled INTEGER NOT NULL DEFAULT 1,
       duration_secs INTEGER NOT NULL DEFAULT 0,
-      no_transaction INTEGER NOT NULL DEFAULT 0
+      no_transaction INTEGER NOT NULL DEFAULT 0,
+      collect_perf INTEGER NOT NULL DEFAULT 0,
+      perf_duration TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE pgbench_scripts (
       id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -153,7 +160,7 @@ function exportPlan(db: Database.Database, designId: number) {
 
 	const steps = db.prepare(
 		'SELECT * FROM design_steps WHERE design_id = ? AND enabled = 1 ORDER BY position'
-	).all(designId) as { id: number; type: string; position: number; name: string; script: string; no_transaction: number; duration_secs: number; pgbench_options: string; enabled: number }[];
+	).all(designId) as { id: number; type: string; position: number; name: string; script: string; no_transaction: number; duration_secs: number; collect_perf: number; perf_duration: string; pgbench_options: string; enabled: number }[];
 
 	const pgbenchScripts = db.prepare(
 		'SELECT * FROM pgbench_scripts WHERE step_id IN (SELECT id FROM design_steps WHERE design_id = ? AND enabled = 1) ORDER BY step_id, position'
@@ -175,6 +182,8 @@ function exportPlan(db: Database.Database, designId: number) {
 		script: s.script,
 		no_transaction: !!s.no_transaction,
 		duration_secs: s.duration_secs,
+		collect_perf: !!s.collect_perf,
+		perf_duration: s.perf_duration ?? '',
 		pgbench_options: s.pgbench_options,
 		pgbench_scripts: s.type === 'pgbench' ? (scriptsByStep.get(s.id) ?? []).map(ps => ({
 			id: ps.id, name: ps.name, weight: ps.weight, script: ps.script
@@ -185,13 +194,13 @@ function exportPlan(db: Database.Database, designId: number) {
 		'SELECT * FROM design_params WHERE design_id = ? ORDER BY position'
 	).all(designId) as { name: string; value: string }[];
 
-	let serverInfo = { host: '', port: 5432, username: '', password: '', database: design.database, ssl: false };
+	let serverInfo = { host: '', port: 5432, username: '', password: '', database: design.database, ssl: false, perf_enabled: false, perf_scope: 'disabled', perf_cgroup: '', perf_events: '' };
 	if (design.server_id) {
 		const server = db.prepare('SELECT * FROM pg_servers WHERE id = ?').get(design.server_id) as {
-			host: string; port: number; username: string; password: string; ssl: number;
+			host: string; port: number; username: string; password: string; ssl: number; perf_enabled: number; perf_scope: string; perf_cgroup: string; perf_events: string;
 		} | undefined;
 		if (server) {
-			serverInfo = { host: server.host, port: server.port, username: server.username, password: server.password, database: design.database, ssl: !!server.ssl };
+			serverInfo = { host: server.host, port: server.port, username: server.username, password: server.password, database: design.database, ssl: !!server.ssl, perf_enabled: !!server.perf_enabled, perf_scope: server.perf_scope, perf_cgroup: server.perf_cgroup, perf_events: server.perf_events };
 		}
 	}
 
@@ -253,11 +262,11 @@ function exportPlan(db: Database.Database, designId: number) {
 
 function seedDb(db: Database.Database) {
 	db.prepare(`INSERT INTO decisions (id, name) VALUES (1, 'Test Decision')`).run();
-	db.prepare(`INSERT INTO pg_servers (id, name, host, port, username, password, ssl) VALUES (1, 'local', 'localhost', 5432, 'pg', 'secret', 0)`).run();
+	db.prepare(`INSERT INTO pg_servers (id, name, host, port, username, password, ssl, perf_enabled, perf_scope, perf_cgroup, perf_events) VALUES (1, 'local', 'localhost', 5432, 'pg', 'secret', 0, 1, 'postgres_cgroup', '/system.slice/postgresql.service', 'cycles,instructions')`).run();
 	db.prepare(`INSERT INTO designs (id, decision_id, name, description, server_id, database, pre_collect_secs, post_collect_secs, snapshot_interval_seconds) VALUES (1, 1, 'My Design', '', 1, 'mydb', 10, 60, 15)`).run();
 	db.prepare(`INSERT INTO design_steps (id, design_id, position, name, type, script, pgbench_options, enabled, duration_secs, no_transaction) VALUES (1, 1, 0, 'Setup', 'sql', 'CREATE TABLE t (id int);', '', 1, 0, 0)`).run();
 	db.prepare(`INSERT INTO design_steps (id, design_id, position, name, type, script, pgbench_options, enabled, duration_secs, no_transaction) VALUES (2, 1, 1, 'Disabled', 'sql', 'DROP TABLE t;', '', 0, 0, 0)`).run();
-	db.prepare(`INSERT INTO design_steps (id, design_id, position, name, type, script, pgbench_options, enabled, duration_secs, no_transaction) VALUES (3, 1, 2, 'Bench', 'pgbench', '', '-c 10 -T 30', 1, 0, 0)`).run();
+	db.prepare(`INSERT INTO design_steps (id, design_id, position, name, type, script, pgbench_options, enabled, duration_secs, no_transaction, collect_perf, perf_duration) VALUES (3, 1, 2, 'Bench', 'pgbench', '', '-c 10 -T 30', 1, 0, 0, 1, '{{DURATION_SECS}}')`).run();
 	db.prepare(`INSERT INTO design_steps (id, design_id, position, name, type, script, pgbench_options, enabled, duration_secs, no_transaction) VALUES (4, 1, 3, 'Collect statements', 'pg_stat_statements_collect', '', '', 1, 0, 0)`).run();
 	db.prepare(`INSERT INTO pgbench_scripts (id, step_id, position, name, weight, script) VALUES (1, 3, 0, 'main', 100, 'SELECT 1;')`).run();
 	db.prepare(`INSERT INTO design_params (id, design_id, position, name, value) VALUES (1, 1, 0, 'scale', '10')`).run();
@@ -290,6 +299,10 @@ describe('Export endpoint logic', () => {
 		expect(plan!.server.username).toBe('pg');
 		expect(plan!.server.password).toBe('secret');
 		expect(plan!.server.ssl).toBe(false);
+		expect(plan!.server.perf_enabled).toBe(true);
+		expect(plan!.server.perf_scope).toBe('postgres_cgroup');
+		expect(plan!.server.perf_cgroup).toBe('/system.slice/postgresql.service');
+		expect(plan!.server.perf_events).toBe('cycles,instructions');
 		expect(plan!.run_settings.snapshot_interval_seconds).toBe(15);
 		expect(plan!.run_settings.pre_collect_secs).toBe(10);
 		expect(plan!.run_settings.post_collect_secs).toBe(60);
@@ -308,6 +321,8 @@ describe('Export endpoint logic', () => {
 		const plan = exportPlan(db, 1);
 		const benchStep = plan!.steps.find(s => s.type === 'pgbench');
 		expect(benchStep).toBeDefined();
+		expect(benchStep!.collect_perf).toBe(true);
+		expect(benchStep!.perf_duration).toBe('{{DURATION_SECS}}');
 		expect(benchStep!.pgbench_scripts).toHaveLength(1);
 		expect(benchStep!.pgbench_scripts![0].name).toBe('main');
 		expect(benchStep!.pgbench_scripts![0].weight).toBe(100);

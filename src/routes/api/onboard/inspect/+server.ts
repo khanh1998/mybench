@@ -1,5 +1,6 @@
 import { error, json } from '@sveltejs/kit';
 import { connectSsh, exec } from '$lib/server/ec2-runner';
+import { buildPerfInspectCommand, parsePerfInspectOutput } from '$lib/server/perf-inspect';
 import type { RequestHandler } from './$types';
 
 /**
@@ -56,11 +57,12 @@ export const POST: RequestHandler = async ({ request }) => {
 				? { ok: false, error: 'not installed (psql not found on PATH)' }
 				: { ok: true, version: pgRes.stdout.trim() };
 
-			// perf (optional — needed for CPU profiling)
-			const perfRes = await exec(conn, 'perf --version 2>&1 || exit 1');
-			tools['perf'] = perfRes.code !== 0
-				? { ok: false, error: 'not installed' }
-				: { ok: true, version: perfRes.stdout.trim() };
+			const perfRes = await exec(conn, buildPerfInspectCommand());
+			const perf = parsePerfInspectOutput(`${perfRes.stdout}\n${perfRes.stderr}`);
+			tools['perf'] = perf.perf_installed
+				? { ok: true, version: perf.perf_version }
+				: { ok: false, error: perf.error || 'not installed' };
+			return json({ ok: true, tools, perf });
 		}
 
 		return json({ ok: true, tools });

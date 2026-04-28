@@ -1021,10 +1021,10 @@ Use this after validating the plan with run_design.`,
 			}
 			const profiles = profileRows.map(p => ({ name: p.name, values: profileValuesById.get(p.id) ?? [] }));
 
-			let serverInfo = { host: '', port: 5432, username: '', password: '', database: design.database, ssl: false };
+			let serverInfo = { host: '', port: 5432, username: '', password: '', database: design.database, ssl: false, perf_enabled: false, perf_scope: 'disabled', perf_cgroup: '', perf_events: '' };
 			if (design.server_id) {
 				const srv = db.prepare('SELECT * FROM pg_servers WHERE id = ?').get(design.server_id) as PgServer | undefined;
-				if (srv) serverInfo = { host: srv.host, port: srv.port, username: srv.username, password: srv.password, database: design.database, ssl: !!srv.ssl };
+				if (srv) serverInfo = { host: srv.host, port: srv.port, username: srv.username, password: srv.password, database: design.database, ssl: !!srv.ssl, perf_enabled: !!srv.perf_enabled, perf_scope: srv.perf_scope, perf_cgroup: srv.perf_cgroup, perf_events: srv.perf_events };
 			}
 
 			const enabledSnapTables: { pg_view_name: string; snap_table_name: string; columns: string[] }[] = [];
@@ -1065,7 +1065,7 @@ Use this after validating the plan with run_design.`,
 				profiles,
 				steps: steps.map(s => ({
 					id: s.id, position: s.position, name: s.name, type: s.type, enabled: !!s.enabled,
-					script: s.script, no_transaction: !!s.no_transaction, duration_secs: s.duration_secs,
+					script: s.script, no_transaction: !!s.no_transaction, duration_secs: s.duration_secs, collect_perf: !!s.collect_perf, perf_duration: s.perf_duration ?? '',
 					pgbench_options: s.pgbench_options,
 					pgbench_scripts: s.type === 'pgbench' ? (scriptsByStep.get(s.id) ?? []).map(ps => ({ id: ps.id, name: ps.name, weight: ps.weight, script: ps.script })) : []
 				})),

@@ -34,4 +34,30 @@ export interface CompareRunInfo {
   design_name?: string | null;
   compare_label?: string;
   compare_short_label?: string;
+  perf?: CompareStepPerf[];
+}
+
+export interface ComparePerfEvent {
+  event_name: string;
+  counter_value: number | null;
+  unit: string;
+  runtime_secs: number | null;
+  percent_running: number | null;
+  per_transaction: number | null;
+}
+
+export interface CompareStepPerf {
+  step_id: number;
+  step_name: string | null;
+  step_type: string | null;
+  status: string;
+  scope: 'postgres_cgroup' | 'system' | 'disabled';
+  cgroup: string;
+  command: string;
+  raw_output: string;
+  raw_error: string;
+  warnings_json: string;
+  started_at: string | null;
+  finished_at: string | null;
+  events: ComparePerfEvent[];
 }

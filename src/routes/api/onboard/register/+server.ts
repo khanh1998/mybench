@@ -1,6 +1,7 @@
 import { error, json } from '@sveltejs/kit';
 import { savePgServer, testPgServer } from '$lib/server/services/pg-servers';
 import { saveEc2Server, testEc2Server } from '$lib/server/services/ec2-servers';
+import { DEFAULT_PERF_EVENTS } from '$lib/server/perf-inspect';
 import type { RequestHandler } from './$types';
 
 /**
@@ -15,7 +16,7 @@ import type { RequestHandler } from './$types';
  */
 export const POST: RequestHandler = async ({ request }) => {
 	const body = await request.json();
-	const { cluster_name, client, db, pg_config } = body;
+	const { cluster_name, client, db, pg_config, perf } = body;
 	if (!cluster_name?.trim()) throw error(400, 'cluster_name is required');
 	if (!client?.host || !client?.private_key) throw error(400, 'client host and private_key are required');
 	if (!db?.public_host || !db?.private_ip || !db?.private_key) throw error(400, 'db host, private_ip, and private_key are required');
@@ -52,7 +53,12 @@ export const POST: RequestHandler = async ({ request }) => {
 		ssh_user: db.user ?? 'root',
 		ssh_private_key: db.private_key,
 		private_host: db.private_ip,
-		vpc
+		vpc,
+		perf_enabled: perf?.scope === 'postgres_cgroup' || perf?.scope === 'system',
+		perf_scope: perf?.scope ?? 'disabled',
+		perf_cgroup: perf?.perf_cgroup ?? '',
+		perf_events: perf?.perf_events ?? DEFAULT_PERF_EVENTS,
+		perf_status_json: perf ? JSON.stringify(perf) : ''
 	});
 
 	// Test both

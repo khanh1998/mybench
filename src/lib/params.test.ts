@@ -48,6 +48,16 @@ describe('pgbench script weight helpers', () => {
 			]
 		});
 
-		expect(errors).toEqual([{ step: 'Bench', totalWeight: 110 }]);
+		expect(errors).toEqual([{ step: 'Bench', totalWeight: 110, hasUnresolved: false }]);
+	});
+
+	it('accepts numeric perf duration and validates perf duration params', () => {
+		expect(validateDesignParams({
+			params: [{ name: 'DURATION_SECS' }],
+			steps: [
+				{ name: 'Numeric perf', type: 'pgbench', script: '', perf_duration: '180' },
+				{ name: 'Param perf', type: 'sysbench', script: '', perf_duration: '{{DURATION_SECS}}' }
+			]
+		})).toEqual([]);
 	});
 });

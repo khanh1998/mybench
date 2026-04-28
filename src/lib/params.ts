@@ -23,6 +23,7 @@ export interface DesignLike {
 		type: string;
 		script: string;
 		pgbench_options?: string;
+		perf_duration?: string;
 		pgbench_scripts?: { name: string; weight?: number; weight_expr?: string | null; script: string }[];
 	}[];
 }
@@ -90,6 +91,11 @@ export function validateDesignParams(design: DesignLike): ValidationError[] {
 		if (step.pgbench_options) {
 			for (const ph of findPlaceholders(step.pgbench_options)) {
 				if (!defined.has(ph)) errors.push({ step: step.name, script: 'options', placeholder: ph });
+			}
+		}
+		if (step.perf_duration) {
+			for (const ph of findPlaceholders(step.perf_duration)) {
+				if (!defined.has(ph)) errors.push({ step: step.name, script: 'perf duration', placeholder: ph });
 			}
 		}
 		// Also validate placeholders in weight expressions

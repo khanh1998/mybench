@@ -51,12 +51,13 @@ export const PUT: RequestHandler = async ({ params: routeParams, request }) => {
 
 	if (body.steps) {
 		const upsert = db.prepare(
-			`INSERT INTO design_steps (id, design_id, position, name, type, script, pgbench_options, enabled, duration_secs, no_transaction)
-       VALUES (@id, @design_id, @position, @name, @type, @script, @pgbench_options, @enabled, @duration_secs, @no_transaction)
+			`INSERT INTO design_steps (id, design_id, position, name, type, script, pgbench_options, enabled, duration_secs, no_transaction, collect_perf, perf_duration)
+       VALUES (@id, @design_id, @position, @name, @type, @script, @pgbench_options, @enabled, @duration_secs, @no_transaction, @collect_perf, @perf_duration)
        ON CONFLICT(id) DO UPDATE SET
          position=excluded.position, name=excluded.name, type=excluded.type,
          script=excluded.script, pgbench_options=excluded.pgbench_options, enabled=excluded.enabled,
-         duration_secs=excluded.duration_secs, no_transaction=excluded.no_transaction`
+         duration_secs=excluded.duration_secs, no_transaction=excluded.no_transaction,
+         collect_perf=excluded.collect_perf, perf_duration=excluded.perf_duration`
 		);
 		const submittedStepIds = body.steps.map((s: { id: number }) => s.id);
 		const deleteRemovedSteps =
@@ -69,7 +70,7 @@ export const PUT: RequestHandler = async ({ params: routeParams, request }) => {
 		const doUpsert = db.transaction(() => {
 			deleteRemovedSteps.run(designId, ...submittedStepIds);
 			for (const s of body.steps) {
-				upsert.run({ ...s, design_id: designId, duration_secs: s.duration_secs ?? 0, no_transaction: s.no_transaction ?? 0 });
+				upsert.run({ ...s, design_id: designId, duration_secs: s.duration_secs ?? 0, no_transaction: s.no_transaction ?? 0, collect_perf: s.collect_perf ?? 0, perf_duration: s.perf_duration ?? '' });
 				deleteScripts.run(s.id);
 				if (s.type === 'pgbench') {
 					for (const ps of s.pgbench_scripts ?? []) {

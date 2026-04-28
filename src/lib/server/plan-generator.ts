@@ -54,6 +54,8 @@ export function generatePlan(designId: number, overrides: PlanRunSettingsOverrid
 		script: s.script,
 		no_transaction: !!s.no_transaction,
 		duration_secs: s.duration_secs,
+		collect_perf: !!s.collect_perf,
+		perf_duration: s.perf_duration ?? '',
 		pgbench_options: s.pgbench_options,
 		pgbench_scripts: s.type === 'pgbench' ? (scriptsByStep.get(s.id) ?? []).map(ps => ({
 			id: ps.id,
@@ -101,7 +103,11 @@ export function generatePlan(designId: number, overrides: PlanRunSettingsOverrid
 		ssh_host: '',
 		ssh_port: 22,
 		ssh_user: '',
-		ssh_private_key: ''
+		ssh_private_key: '',
+		perf_enabled: false,
+		perf_scope: 'disabled',
+		perf_cgroup: '',
+		perf_events: ''
 	};
 	if (resolvedServerId) {
 		const server = db.prepare('SELECT * FROM pg_servers WHERE id = ?').get(resolvedServerId) as PgServer | undefined;
@@ -121,7 +127,11 @@ export function generatePlan(designId: number, overrides: PlanRunSettingsOverrid
 				ssh_host: server.ssh_host ?? '',
 				ssh_port: server.ssh_port ?? 22,
 				ssh_user: server.ssh_user ?? '',
-				ssh_private_key: server.ssh_private_key ?? ''
+				ssh_private_key: server.ssh_private_key ?? '',
+				perf_enabled: !!server.perf_enabled,
+				perf_scope: server.perf_scope ?? 'disabled',
+				perf_cgroup: server.perf_cgroup ?? '',
+				perf_events: server.perf_events ?? ''
 			};
 		}
 	}

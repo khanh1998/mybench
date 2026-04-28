@@ -40,10 +40,14 @@ type ServerConfig struct {
 	EnhancedMonitoring bool   `json:"enhanced_monitoring"`
 	// SSH config for OS metrics collection on EC2/VPS database hosts.
 	SSHEnabled    bool   `json:"ssh_enabled"`
-	SSHHost       string `json:"ssh_host"`        // empty = use Host
+	SSHHost       string `json:"ssh_host"` // empty = use Host
 	SSHPort       int    `json:"ssh_port"`
 	SSHUser       string `json:"ssh_user"`
 	SSHPrivateKey string `json:"ssh_private_key"` // PEM content
+	PerfEnabled   bool   `json:"perf_enabled"`
+	PerfScope     string `json:"perf_scope"` // "postgres_cgroup", "system", "disabled"
+	PerfCgroup    string `json:"perf_cgroup"`
+	PerfEvents    string `json:"perf_events"`
 }
 
 // RunSettings holds timing configuration for snapshot collection.
@@ -61,16 +65,18 @@ type Param struct {
 
 // Step represents one step in the benchmark plan.
 type Step struct {
-	ID              int             `json:"id"`
-	Position        int             `json:"position"`
-	Name            string          `json:"name"`
-	Type            string          `json:"type"` // "sql", "pgbench", "collect", "pg_stat_statements_reset", "pg_stat_statements_collect"
-	Enabled         bool            `json:"enabled"`
-	Script          string          `json:"script,omitempty"`
-	NoTransaction   bool            `json:"no_transaction,omitempty"`
-	DurationSecs    int             `json:"duration_secs,omitempty"`
-	PgbenchOptions  string          `json:"pgbench_options,omitempty"`
-	PgbenchScripts  []PgbenchScript `json:"pgbench_scripts,omitempty"`
+	ID             int             `json:"id"`
+	Position       int             `json:"position"`
+	Name           string          `json:"name"`
+	Type           string          `json:"type"` // "sql", "pgbench", "collect", "pg_stat_statements_reset", "pg_stat_statements_collect"
+	Enabled        bool            `json:"enabled"`
+	Script         string          `json:"script,omitempty"`
+	NoTransaction  bool            `json:"no_transaction,omitempty"`
+	DurationSecs   int             `json:"duration_secs,omitempty"`
+	CollectPerf    bool            `json:"collect_perf,omitempty"`
+	PerfDuration   string          `json:"perf_duration,omitempty"`
+	PgbenchOptions string          `json:"pgbench_options,omitempty"`
+	PgbenchScripts []PgbenchScript `json:"pgbench_scripts,omitempty"`
 }
 
 // PgbenchScript is a named pgbench custom script with a weight.

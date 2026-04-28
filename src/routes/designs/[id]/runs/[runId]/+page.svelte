@@ -22,6 +22,25 @@
     command: string; processed_script: string;
     pgbench_summary_json: string; pgbench_scripts_json: string;
     sysbench_summary_json: string;
+    perf: StepPerf | null;
+  }
+  interface StepPerfEvent {
+    event_name: string;
+    counter_value: number | null;
+    unit: string;
+    runtime_secs: number | null;
+    percent_running: number | null;
+    per_transaction: number | null;
+  }
+  interface StepPerf {
+    status: string;
+    scope: 'postgres_cgroup' | 'system' | 'disabled';
+    cgroup: string;
+    command: string;
+    raw_output: string;
+    raw_error: string;
+    warnings_json: string;
+    events: StepPerfEvent[];
   }
   interface Run {
     id: number; status: string; tps: number|null; latency_avg_ms: number|null;
@@ -65,7 +84,7 @@
   let expandedStep = $state<number | null>(null);
   let scrollPending = false;
   let phases: PhaseState[] = $state([]);
-  let activeTab = $state<'overview' | 'load' | 'telemetry' | 'cloudwatch' | 'host_metrics'>('overview');
+  let activeTab = $state<'overview' | 'load' | 'telemetry' | 'cloudwatch' | 'host_metrics' | 'perf'>('overview');
   let hostSubTab = $state<'system' | 'processes'>('system');
   let nameInput = $state<HTMLInputElement | null>(null);
   let ec2StatusLoading = $state(false);
@@ -89,6 +108,7 @@
 
   const pgbenchSteps = $derived(run?.steps.filter(s => s.type === 'pgbench') ?? []);
   const sysbenchSteps = $derived(run?.steps.filter(s => s.type === 'sysbench') ?? []);
+  const perfSteps = $derived(run?.steps.filter(s => s.perf) ?? []);
 
   $effect(() => {
     const nextRun = (data.run as Run | null) ?? null;
@@ -287,6 +307,29 @@
     expandedStep = expandedStep === stepId ? null : stepId;
   }
 
+  function perfEvent(step: StepResult, name: string): StepPerfEvent | null {
+    return step.perf?.events.find((event) => event.event_name === name) ?? null;
+  }
+
+  function eventPerTxn(step: StepResult, name: string): number | null {
+    return perfEvent(step, name)?.per_transaction ?? null;
+  }
+
+  function perfWarnings(step: StepResult): string[] {
+    return parseJson<string[]>(step.perf?.warnings_json) ?? [];
+  }
+
+  function fmtMetric(value: number | null | undefined, digits = 2): string {
+    if (value === null || value === undefined || Number.isNaN(value)) return '—';
+    return value.toLocaleString(undefined, { maximumFractionDigits: digits });
+  }
+
+  function scopeLabel(scope: StepPerf['scope']): string {
+    if (scope === 'postgres_cgroup') return 'PostgreSQL service cgroup';
+    if (scope === 'system') return 'System-wide';
+    return 'Unavailable';
+  }
+
   async function startEditingName() {
     nameEdit = run?.name ?? '';
     editingName = true;
@@ -420,6 +463,10 @@
     disabled={!done}
     title={!done ? 'Available after run completes' : ''}
     onclick={() => activeTab = 'cloudwatch'}>CloudWatch</button>
+  <button class="tab-btn" class:active={activeTab === 'perf'}
+    disabled={!done}
+    title={!done ? 'Available after run completes' : ''}
+    onclick={() => activeTab = 'perf'}>Perf</button>
   <button class="tab-btn" class:active={activeTab === 'host_metrics'}
     disabled={!done}
     title={!done ? 'Available after run completes' : ''}
@@ -673,6 +720,69 @@
     includeSectionKeys={['cloudwatch']}
     showHeroCards={false}
   />
+{:else if activeTab === 'perf'}
+  {#if perfSteps.length > 0}
+    <div class="perf-grid">
+      {#each perfSteps as s}
+        {@const taskClock = eventPerTxn(s, 'task-clock')}
+        {@const cpuClock = eventPerTxn(s, 'cpu-clock')}
+        {@const warnings = perfWarnings(s)}
+        <div class="perf-card">
+          <div class="perf-card-head">
+            <strong>{s.name}</strong>
+            <span class="badge badge-{s.perf?.status ?? 'pending'}">{s.perf?.status}</span>
+          </div>
+          <div class="perf-scope">{scopeLabel(s.perf?.scope ?? 'disabled')}{#if s.perf?.cgroup} · {s.perf.cgroup}{/if}</div>
+          <div class="perf-metrics">
+            <div><span>task clock/tx</span><strong>{fmtMetric(taskClock, 3)}</strong></div>
+            <div><span>cpu clock/tx</span><strong>{fmtMetric(cpuClock, 3)}</strong></div>
+            <div><span>ctx switches/tx</span><strong>{fmtMetric(eventPerTxn(s, 'context-switches'), 3)}</strong></div>
+            <div><span>migrations/tx</span><strong>{fmtMetric(eventPerTxn(s, 'cpu-migrations'), 3)}</strong></div>
+            <div><span>page faults/tx</span><strong>{fmtMetric(eventPerTxn(s, 'page-faults'), 3)}</strong></div>
+            <div><span>minor faults/tx</span><strong>{fmtMetric(eventPerTxn(s, 'minor-faults'), 3)}</strong></div>
+            <div><span>major faults/tx</span><strong>{fmtMetric(eventPerTxn(s, 'major-faults'), 3)}</strong></div>
+          </div>
+          {#if warnings.length > 0}
+            <div class="perf-warnings">
+              {#each warnings as warning}
+                <div>{warning}</div>
+              {/each}
+            </div>
+          {/if}
+          {#if s.perf?.command}
+            <div class="detail-label" style="margin-top:10px">Perf command</div>
+            <pre class="detail-pre">{s.perf.command}</pre>
+          {/if}
+          {#if s.perf?.events.length}
+            <div class="detail-label" style="margin-top:10px">Perf events</div>
+            <table class="perf-events-table">
+              <thead><tr><th>Event</th><th>Value</th><th>/ tx</th><th>Runtime</th><th>Running %</th></tr></thead>
+              <tbody>
+                {#each s.perf.events as event}
+                  <tr>
+                    <td>{event.event_name}</td>
+                    <td>{fmtMetric(event.counter_value, 3)} {event.unit}</td>
+                    <td>{fmtMetric(event.per_transaction, 3)}</td>
+                    <td>{fmtMetric(event.runtime_secs, 3)}</td>
+                    <td>{fmtMetric(event.percent_running, 2)}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          {/if}
+          {#if s.perf?.raw_error}
+            <div class="detail-label" style="margin-top:10px">Perf raw output</div>
+            <pre class="detail-pre">{s.perf.raw_error}</pre>
+          {/if}
+        </div>
+      {/each}
+    </div>
+  {:else}
+    <div class="card">
+      <h3>Perf</h3>
+      <p style="color:#666;font-size:13px;margin:0">No perf data was collected for this run.</p>
+    </div>
+  {/if}
 {:else if activeTab === 'host_metrics'}
   <div class="host-sub-tabs">
     <button
@@ -712,6 +822,25 @@
   .detail-block { padding: 8px 12px; background: #f8f8f8; border-top: 1px solid #eee; }
   .detail-label { font-size: 10px; font-weight: 700; color: #888; text-transform: uppercase; margin-bottom: 4px; }
   .detail-pre { margin: 0; font-size: 12px; white-space: pre-wrap; word-break: break-all; background: #1e1e1e; color: #d4d4d4; padding: 8px; border-radius: 4px; max-height: 200px; overflow-y: auto; }
+  .perf-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; }
+  .perf-card { border: 1px solid #eee; border-radius: 6px; padding: 10px; background: #fafafa; }
+  .perf-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+  .perf-scope { font-size: 11px; color: #666; margin-bottom: 8px; }
+  .perf-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; }
+  .perf-metrics div { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; }
+  .perf-metrics span { color: #666; }
+  .perf-metrics strong { color: #222; }
+  .perf-warnings {
+    margin-top: 10px;
+    padding: 8px;
+    background: #fff8e8;
+    border: 1px solid #f3dfaa;
+    border-radius: 4px;
+    color: #7a4f00;
+    font-size: 12px;
+  }
+  .perf-events-table { width: 100%; font-size: 12px; border-collapse: collapse; background: #fff; }
+  .perf-events-table th, .perf-events-table td { padding: 4px 6px; border-bottom: 1px solid #eee; text-align: left; }
   .cursor { animation: blink 1s step-end infinite; }
   @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
 

@@ -70,6 +70,31 @@ function createTestDb() {
       started_at TEXT,
       finished_at TEXT
     );
+    CREATE TABLE run_step_perf (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      step_id INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT '',
+      scope TEXT NOT NULL DEFAULT 'disabled',
+      cgroup TEXT NOT NULL DEFAULT '',
+      command TEXT NOT NULL DEFAULT '',
+      raw_output TEXT NOT NULL DEFAULT '',
+      raw_error TEXT NOT NULL DEFAULT '',
+      warnings_json TEXT NOT NULL DEFAULT '',
+      started_at TEXT,
+      finished_at TEXT
+    );
+    CREATE TABLE run_step_perf_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      step_id INTEGER NOT NULL,
+      event_name TEXT NOT NULL,
+      counter_value REAL,
+      unit TEXT NOT NULL DEFAULT '',
+      runtime_secs REAL,
+      percent_running REAL,
+      per_transaction REAL
+    );
   `);
 	return db;
 }
@@ -121,6 +146,25 @@ interface ImportResult {
 			transactions?: number;
 			failed_transactions?: number;
 		}>;
+		perf?: {
+			status: string;
+			scope: string;
+			cgroup?: string;
+			command?: string;
+			raw_output?: string;
+			raw_error?: string;
+			warnings?: string[];
+			started_at?: string;
+			finished_at?: string;
+			events?: Array<{
+				event_name: string;
+				counter_value?: number | null;
+				unit?: string;
+				runtime_secs?: number | null;
+				percent_running?: number | null;
+				per_transaction?: number | null;
+			}>;
+		};
 		started_at: string;
 		finished_at: string;
 	}>;
@@ -192,6 +236,14 @@ function importRun(
 			)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`);
+		const insPerf = db.prepare(`
+			INSERT INTO run_step_perf (run_id, step_id, status, scope, cgroup, command, raw_output, raw_error, warnings_json, started_at, finished_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`);
+		const insPerfEvent = db.prepare(`
+			INSERT INTO run_step_perf_events (run_id, step_id, event_name, counter_value, unit, runtime_secs, percent_running, per_transaction)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`);
 
 		db.transaction(() => {
 			for (const step of result.steps ?? []) {
@@ -210,6 +262,12 @@ function importRun(
 					step.started_at,
 					step.finished_at
 				);
+				if (step.perf) {
+					insPerf.run(runId, step.step_id, step.perf.status, step.perf.scope, step.perf.cgroup ?? '', step.perf.command ?? '', step.perf.raw_output ?? '', step.perf.raw_error ?? '', step.perf.warnings ? JSON.stringify(step.perf.warnings) : '', step.perf.started_at ?? null, step.perf.finished_at ?? null);
+					for (const event of step.perf.events ?? []) {
+						insPerfEvent.run(runId, step.step_id, event.event_name, event.counter_value ?? null, event.unit ?? '', event.runtime_secs ?? null, event.percent_running ?? null, event.per_transaction ?? null);
+					}
+				}
 			}
 		})();
 	}
@@ -579,6 +637,46 @@ describe('Import endpoint logic', () => {
 					transactions: 1993
 				})
 			]);
+		}
+	});
+
+	it('imports perf metadata and counters for step results', () => {
+		const importWithPerf: ImportResult = {
+			run: { status: 'completed', started_at: '2025-01-01T00:00:00Z', finished_at: '2025-01-01T00:01:00Z' },
+			steps: [
+				{
+					step_id: 47,
+					position: 3,
+					name: 'Mixed workload',
+					type: 'pgbench',
+					status: 'completed',
+					started_at: '2025-01-01T00:00:10Z',
+					finished_at: '2025-01-01T00:01:00Z',
+					perf: {
+						status: 'completed',
+						scope: 'postgres_cgroup',
+						cgroup: '/system.slice/postgresql.service',
+						command: 'sudo perf stat ...',
+						events: [
+							{ event_name: 'cycles', counter_value: 1000, per_transaction: 10 },
+							{ event_name: 'instructions', counter_value: 2000, per_transaction: 20 }
+						]
+					}
+				}
+			]
+		};
+
+		const result = importRun(db, 1, importWithPerf);
+		expect('run_id' in result).toBe(true);
+		if ('run_id' in result) {
+			const perf = db.prepare('SELECT * FROM run_step_perf WHERE run_id = ? AND step_id = 47').get(result.run_id) as { scope: string; cgroup: string; command: string };
+			expect(perf.scope).toBe('postgres_cgroup');
+			expect(perf.cgroup).toBe('/system.slice/postgresql.service');
+			expect(perf.command).toContain('perf stat');
+
+			const events = db.prepare('SELECT event_name, counter_value, per_transaction FROM run_step_perf_events WHERE run_id = ? ORDER BY event_name').all(result.run_id) as { event_name: string; counter_value: number; per_transaction: number }[];
+			expect(events).toHaveLength(2);
+			expect(events[0]).toMatchObject({ event_name: 'cycles', counter_value: 1000, per_transaction: 10 });
 		}
 	});
 });
