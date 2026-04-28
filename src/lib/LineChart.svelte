@@ -117,6 +117,12 @@
     return uniqueTimes.reduce((n, x) => Math.abs(x - t) < Math.abs(n - t) ? x : n);
   }
 
+  function nearestPoint(points: ChartPoint[], t: number): ChartPoint | null {
+    if (!points.length) return null;
+    const pt = points.reduce((n, p) => Math.abs(p.t - t) < Math.abs(n.t - t) ? p : n);
+    return Math.abs(pt.t - t) < 500 ? pt : null;
+  }
+
   function onMouseMove(e: MouseEvent) {
     if (!svgEl || !wrapperEl) return;
     const svgRect = svgEl.getBoundingClientRect();
@@ -135,7 +141,7 @@
     if (hoveredTime !== null) {
       let minDist = 22, nearest: string | null = null;
       for (const sr of visibleSeries) {
-        const pt = sr.points.find(p => p.t === hoveredTime);
+        const pt = nearestPoint(sr.points, hoveredTime);
         if (!pt) continue;
         const dist = Math.abs(ty(pt.v) - chartY);
         if (dist < minDist) { minDist = dist; nearest = sr.label; }
@@ -154,7 +160,7 @@
   const tooltipRows = $derived.by(() => {
     if (hoveredTime === null) return [];
     return visibleSeries
-      .map(sr => ({ color: sr.color, label: sr.label, description: sr.description, v: sr.points.find(p => p.t === hoveredTime)?.v ?? null }))
+      .map(sr => ({ color: sr.color, label: sr.label, description: sr.description, v: nearestPoint(sr.points, hoveredTime)?.v ?? null }))
       .filter(r => r.v !== null)
       .sort((a, b) => (b.v ?? 0) - (a.v ?? 0)) as { color: string; label: string; description?: string; v: number }[];
   });
@@ -256,7 +262,7 @@
               <circle cx={tx(p.t)} cy={ty(p.v)} r="2.5" fill={s.color} />
             {/each}
           {:else}
-            {@const pt = s.points.find(p => p.t === hoveredTime)}
+            {@const pt = nearestPoint(s.points, hoveredTime)}
             {#if pt}
               <circle cx={tx(pt.t)} cy={ty(pt.v)}
                       r={isHighlighted ? 4.5 : 3}
