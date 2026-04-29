@@ -1,5 +1,6 @@
 <script lang="ts">
   import StackedAreaChart from '$lib/StackedAreaChart.svelte';
+  import StackedBarChart from '$lib/StackedBarChart.svelte';
   import LineChart from '$lib/LineChart.svelte';
   import { buildLockTree, MAX_LOCK_DEPTH, type LockPairRow, type LockWaitInfo, type LockNode } from '$lib/lock-tree';
 
@@ -50,7 +51,6 @@
     total_waited: number; blocking_pairs: number; distinct_pids: number; waiting_pids: number; blocking_pids: number; snapshot_count: number;
   }
   interface LockTimeRow { _collected_at: string; waiting_pids: number; blocking_pids: number; }
-  interface TotalAasRow { _collected_at: string; total_active: number; }
 
   // ── Hue-rotation color system ──────────────────────────────────────────────
   // Same type family = same hue arc; each unique event gets a hash-derived step.
@@ -89,8 +89,8 @@
     'fastpath function call': '#9b36b7',
     unknown: '#aaaaaa',
   };
+  const STATE_ORDER = ['active', 'idle', 'idle in transaction', 'idle in transaction (aborted)', 'fastpath function call', 'unknown'];
   const WAIT_ORDER = ['CPU', 'IO', 'Lock', 'LWLock', 'Client', 'IPC', 'Extension', 'Timeout', 'Activity', 'BufferPin', 'Other'];
-  const RUN_COLORS = ['#0066cc', '#e6531d', '#00996b', '#9b36b7', '#cc8800'];
   const PGSS_COUNTER_KEYS = [
     'plans',
     'total_plan_time',
@@ -273,12 +273,12 @@
   let phaseSourceSignature = '';
 
   let aasData    = $state<Record<number, AasRow[]>>({});
-  let totalAas   = $state<Record<number, TotalAasRow[]>>({});
   let sessionData= $state<Record<number, SessionRow[]>>({});
   let waitsData  = $state<Record<number, WaitRow[]>>({});
   let sqlData    = $state<Record<number, SqlRow[]>>({});
   let locksData  = $state<Record<number, LockPairRow[]>>({});
   let hasSql     = $state<Record<number, boolean>>({});
+  let hiddenSessionStates = $state<string[]>([]);
 
   let sqlSort    = $state<{ col: keyof SqlRow; asc: boolean }>({ col: 'delta_exec_time', asc: false });
   let sqlMode    = $state<'total' | 'persec'>('total');
@@ -302,6 +302,12 @@
     const next = new Set(expandedLockNodes);
     if (next.has(key)) next.delete(key); else next.add(key);
     expandedLockNodes = next;
+  }
+
+  function toggleSessionState(state: string) {
+    hiddenSessionStates = hiddenSessionStates.includes(state)
+      ? hiddenSessionStates.filter(s => s !== state)
+      : [...hiddenSessionStates, state];
   }
 
   function nodeHeat(n: LockNode): number {
@@ -538,16 +544,6 @@
         [rid, ...pParams]
       );
       aasData = { ...aasData, [rid]: aasRes.error ? [] : (aasRes.rows as unknown as AasRow[]) };
-
-      // Total AAS (for compare overlay)
-      const totalRes = await queryApi(
-        `SELECT _collected_at, COUNT(*) as total_active
-         FROM snap_pg_stat_activity
-         WHERE _run_id = ? AND ${clause} AND state = 'active'
-         GROUP BY _collected_at ORDER BY _collected_at`,
-        [rid, ...pParams]
-      );
-      totalAas = { ...totalAas, [rid]: totalRes.error ? [] : (totalRes.rows as unknown as TotalAasRow[]) };
 
       // Session states
       const sessRes = await queryApi(
@@ -887,9 +883,8 @@
       if (!byState.has(s)) byState.set(s, []);
       byState.get(s)!.push({ t, v: Number(row.n) });
     }
-    const stateOrder = ['active', 'idle', 'idle in transaction', 'idle in transaction (aborted)', 'fastpath function call', 'unknown'];
     const states = [...byState.keys()].sort((a, b) => {
-      const ai = stateOrder.indexOf(a), bi = stateOrder.indexOf(b);
+      const ai = STATE_ORDER.indexOf(a), bi = STATE_ORDER.indexOf(b);
       return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
     });
     return states.map(s => ({
@@ -911,14 +906,71 @@
     }));
   }
 
-  function buildTotalAasSeries() {
-    return runs.map((run, i) => {
-      const rows = totalAas[run.id] ?? [];
-      const org = origin(run);
+  function sortSessionStates(states: string[]) {
+    return [...states].sort((a, b) => {
+      const ai = STATE_ORDER.indexOf(a), bi = STATE_ORDER.indexOf(b);
+      const ao = ai === -1 ? 99 : ai;
+      const bo = bi === -1 ? 99 : bi;
+      return ao === bo ? a.localeCompare(b) : ao - bo;
+    });
+  }
+
+  function averageSessionCountsByState(rows: SessionRow[]): Map<string, number> {
+    const snapshots = new Map<number, Map<string, number>>();
+    const states = new Set<string>();
+    for (const row of rows) {
+      const t = new Date(row._collected_at).getTime();
+      const state = row.state ?? 'unknown';
+      const value = Number(row.n);
+      states.add(state);
+      if (!snapshots.has(t)) snapshots.set(t, new Map());
+      snapshots.get(t)!.set(state, value);
+    }
+
+    const times = [...snapshots.keys()].sort((a, b) => a - b);
+    const averages = new Map<string, number>();
+    if (times.length === 0) return averages;
+
+    if (times.length === 1 || times[times.length - 1] <= times[0]) {
+      for (const state of states) {
+        const sum = times.reduce((total, t) => total + (snapshots.get(t)?.get(state) ?? 0), 0);
+        averages.set(state, sum / times.length);
+      }
+      return averages;
+    }
+
+    const durationMs = times[times.length - 1] - times[0];
+    const weighted = new Map<string, number>();
+    for (let i = 0; i < times.length - 1; i++) {
+      const t = times[i];
+      const dt = times[i + 1] - t;
+      const snapshot = snapshots.get(t);
+      for (const state of states) {
+        const value = snapshot?.get(state) ?? 0;
+        weighted.set(state, (weighted.get(state) ?? 0) + value * dt);
+      }
+    }
+    for (const state of states) averages.set(state, (weighted.get(state) ?? 0) / durationMs);
+    return averages;
+  }
+
+  function buildSessionAverageGroups() {
+    const stateSet = new Set<string>();
+    for (const run of runs) {
+      for (const row of sessionData[run.id] ?? []) stateSet.add(row.state ?? 'unknown');
+    }
+    const states = sortSessionStates([...stateSet]);
+    if (states.length === 0) return [];
+
+    return runs.map(run => {
+      const averages = averageSessionCountsByState(sessionData[run.id] ?? []);
       return {
         label: run.label,
-        color: run.color || RUN_COLORS[i % RUN_COLORS.length],
-        points: rows.map(r => ({ t: toMs(r._collected_at, org), v: Number(r.total_active) }))
+        segments: states.map(state => ({
+          label: state,
+          color: STATE_COLORS[state] ?? STATE_COLORS.unknown,
+          value: averages.get(state) ?? 0
+        }))
       };
     });
   }
@@ -1341,10 +1393,6 @@
   <p class="section-desc">Active sessions at each snapshot, stacked by wait event type. Higher = more database load.</p>
 
   {#if isCompare}
-    <!-- Compare: total AAS overlay -->
-    <div style="margin-bottom:12px">
-      <LineChart series={buildTotalAasSeries()} title="Total Active Sessions — all runs" originMs={runs[0] ? origin(runs[0]) : null} />
-    </div>
     <!-- Per-run stacked breakdown -->
     <div class="chart-grid">
       {#each runs as run}
@@ -1375,10 +1423,31 @@
       {@const rawRows = buildSessionRawRows(run)}
       <div>
         {#if isCompare}<div class="run-label" style="color:{run.color}">{run.label}</div>{/if}
-        <StackedAreaChart {series} {rawRows} title="Session states" markers={buildMarkers(run)} originMs={origin(run)} showDetailToggle={false} />
+        <StackedAreaChart
+          {series}
+          {rawRows}
+          title="Session states"
+          markers={buildMarkers(run)}
+          originMs={origin(run)}
+          showDetailToggle={false}
+          granularity="broad"
+          valueLabel="sessions"
+          hiddenLabels={hiddenSessionStates}
+          onToggleLabel={toggleSessionState}
+        />
       </div>
     {/each}
   </div>
+  {#if isCompare}
+    <div class="session-summary-chart">
+      <StackedBarChart
+        groups={buildSessionAverageGroups()}
+        title="Average Sessions by State"
+        hiddenLabels={hiddenSessionStates}
+        onToggleLabel={toggleSessionState}
+      />
+    </div>
+  {/if}
 </div>
 
 <!-- ── Section 3: Top Wait Events ───────────────────────────────────────── -->
@@ -1873,6 +1942,7 @@
   .run-label { font-size: 12px; font-weight: 600; margin-bottom: 4px; }
 
   .chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
+  .session-summary-chart { margin-top: 12px; }
   .waits-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 480px), 1fr)); gap: 16px; }
   @media (min-width: 1000px) { .waits-grid { grid-template-columns: repeat(2, 1fr); } }
   .sql-panels { display: flex; flex-direction: column; gap: 16px; }

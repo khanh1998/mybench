@@ -3,6 +3,7 @@
   interface Marker { t: number; label: string; color?: string; }
   interface ReferenceLine { value: number; label: string; color?: string; }
   interface RawRow { t: number; typeKey: string; eventKey: string; color: string; v: number; }
+  interface LegendItem { label: string; color: string; }
 
   let {
     series,
@@ -13,6 +14,9 @@
     originMs = null,
     showDetailToggle = true,
     granularity = undefined,
+    valueLabel = 'active sessions',
+    hiddenLabels = [],
+    onToggleLabel = null,
   }: {
     series: ChartSeries[];
     rawRows?: RawRow[];
@@ -22,6 +26,9 @@
     originMs?: number | null;
     showDetailToggle?: boolean;
     granularity?: 'detail' | 'broad';
+    valueLabel?: string;
+    hiddenLabels?: string[];
+    onToggleLabel?: ((label: string) => void) | null;
   } = $props();
 
   // Map typeKey → series color so broad-mode tooltip matches chart polygons
@@ -55,6 +62,23 @@
   const activeSeries = $derived(
     effectiveGranularity === 'detail' && rawRows.length > 0 ? detailSeries : series
   );
+  const legendItems = $derived.by((): LegendItem[] => {
+    const seen = new Set<string>();
+    const items: LegendItem[] = [];
+    for (const s of activeSeries) {
+      if (seen.has(s.label)) continue;
+      seen.add(s.label);
+      items.push({ label: s.label, color: s.color });
+    }
+    return items;
+  });
+  function isLabelVisible(label: string) {
+    return !hiddenLabels.includes(label);
+  }
+  function rawRowLabel(row: RawRow) {
+    return row.typeKey === row.eventKey ? row.typeKey : `${row.typeKey}:${row.eventKey}`;
+  }
+  const visibleSeries = $derived(activeSeries.filter(s => isLabelVisible(s.label)));
 
   const ML = 60, MR = 20, MT = 8, MB = 28;
   const W = 520, H = 190;
@@ -63,7 +87,7 @@
 
   const allTimes = $derived.by(() => {
     const s = new Set<number>();
-    for (const sr of activeSeries) for (const p of sr.points) s.add(p.t);
+    for (const sr of visibleSeries) for (const p of sr.points) s.add(p.t);
     for (const m of markers) if (!isNaN(m.t)) s.add(m.t);
     return [...s].sort((a, b) => a - b);
   });
@@ -73,12 +97,12 @@
   const tRange = $derived(tMax - tMin || 1);
 
   const stacked = $derived.by(() => {
-    if (!activeSeries.length || !allTimes.length) return { bottoms: [] as number[][], tops: [] as number[][], vMax: 1 };
-    const maps = activeSeries.map(s => new Map(s.points.map(p => [p.t, p.v])));
+    if (!visibleSeries.length || !allTimes.length) return { bottoms: [] as number[][], tops: [] as number[][], vMax: 1 };
+    const maps = visibleSeries.map(s => new Map(s.points.map(p => [p.t, p.v])));
     const n = allTimes.length;
     const bottoms: number[][] = [], tops: number[][] = [];
     const run = new Array<number>(n).fill(0);
-    for (let i = 0; i < activeSeries.length; i++) {
+    for (let i = 0; i < visibleSeries.length; i++) {
       bottoms.push([...run]);
       for (let j = 0; j < n; j++) run[j] += maps[i].get(allTimes[j]) ?? 0;
       tops.push([...run]);
@@ -87,7 +111,7 @@
     return { bottoms, tops, vMax: Math.max(...run, lineMax, 1) };
   });
 
-  const hasData = $derived(activeSeries.some(s => s.points.length > 0));
+  const hasData = $derived(visibleSeries.some(s => s.points.length > 0));
 
   function tx(t: number) { return ((t - tMin) / tRange) * IW; }
   function ty(v: number) { return IH - (v / stacked.vMax) * IH; }
@@ -148,14 +172,14 @@
   const tooltipRows = $derived.by(() => {
     if (hoveredTime === null) return [];
     if (rawRows.length > 0) {
-      const atTime = rawRows.filter(r => r.t === hoveredTime);
+      const atTime = rawRows.filter(r => r.t === hoveredTime && isLabelVisible(rawRowLabel(r)));
       const total = atTime.reduce((s, r) => s + r.v, 0);
-      if (tooltipGranularity === 'detail') {
+      if (effectiveGranularity === 'detail') {
         // When typeKey === eventKey (e.g. session state chart), just show typeKey
         return atTime
           .map(r => ({
             color: r.color,
-            label: r.typeKey === r.eventKey ? r.typeKey : `${r.typeKey}:${r.eventKey}`,
+            label: rawRowLabel(r),
             v: r.v,
             pct: total > 0 ? Math.round(r.v / total * 100) : 0
           }))
@@ -173,9 +197,9 @@
           .sort((a, b) => b.v - a.v);
       }
     } else {
-      // Fallback: use activeSeries directly
-      const total = activeSeries.reduce((s, sr) => s + (sr.points.find(p => p.t === hoveredTime)?.v ?? 0), 0);
-      return activeSeries.map(sr => {
+      // Fallback: use visibleSeries directly
+      const total = visibleSeries.reduce((s, sr) => s + (sr.points.find(p => p.t === hoveredTime)?.v ?? 0), 0);
+      return visibleSeries.map(sr => {
         const v = sr.points.find(p => p.t === hoveredTime)?.v ?? 0;
         return { color: sr.color, label: sr.label, v, pct: total > 0 ? Math.round(v / total * 100) : 0 };
       }).sort((a, b) => b.v - a.v);
@@ -189,8 +213,20 @@
   <div class="chart-header">
     <span class="chart-title">{title}</span>
     <span class="chart-legend">
-      {#each activeSeries as s}
-        <span class="leg-item"><span class="leg-dot" style="background:{s.color}"></span>{s.label}</span>
+      {#each legendItems as s}
+        {#if onToggleLabel}
+          <button
+            type="button"
+            class="leg-item leg-button"
+            class:leg-off={!isLabelVisible(s.label)}
+            aria-pressed={isLabelVisible(s.label)}
+            onclick={() => onToggleLabel?.(s.label)}
+          >
+            <span class="leg-dot" style="background:{s.color}"></span>{s.label}
+          </button>
+        {:else}
+          <span class="leg-item"><span class="leg-dot" style="background:{s.color}"></span>{s.label}</span>
+        {/if}
       {/each}
     </span>
     {#if rawRows.length > 0 && showDetailToggle && granularity === undefined}
@@ -221,7 +257,7 @@
           <text x={f * IW} y={IH + 14} text-anchor="middle" font-size="10" fill="#999">{fmtRelTime(f * tRange)}</text>
         {/each}
         <!-- Stacked polygons -->
-        {#each activeSeries as s, i}
+        {#each visibleSeries as s, i}
           {#if stacked.bottoms.length && stacked.tops.length}
             <polygon
               points={polyPts(stacked.tops[i], stacked.bottoms[i])}
@@ -253,7 +289,7 @@
           {#if stacked.tops.length}
             {@const j = allTimes.indexOf(hoveredTime!)}
             {#if j >= 0}
-              {#each activeSeries as s, i}
+              {#each visibleSeries as s, i}
                 <circle cx={crosshairX} cy={ty(stacked.tops[i][j])} r="3.5"
                         fill={s.color} stroke="#fff" stroke-width="1.5" pointer-events="none" />
               {/each}
@@ -267,7 +303,7 @@
     {#if hoveredTime !== null && tooltipRows.length > 0}
       <div class="tooltip" style="left:{tooltipX}px;top:{tooltipY}px">
         <div class="tt-time">{fmtTimestamp(hoveredTime)}</div>
-        <div class="tt-total">Total: <strong>{hoveredTotal}</strong> active sessions</div>
+        <div class="tt-total">Total: <strong>{hoveredTotal}</strong> {valueLabel}</div>
         <div class="tt-divider"></div>
         {#each tooltipRows as row}
           <div class="tt-row" class:tt-zero={row.v === 0}>
@@ -290,6 +326,10 @@
   .chart-title { font-size: 12px; font-weight: 700; color: #333; font-family: monospace; }
   .chart-legend { display: flex; gap: 10px; flex-wrap: wrap; }
   .leg-item { display: flex; align-items: center; gap: 4px; font-size: 11px; color: #555; }
+  .leg-button { border: none; background: transparent; padding: 0; cursor: pointer; font: inherit; }
+  .leg-button:hover { color: #111; }
+  .leg-button.leg-off { color: #aaa; text-decoration: line-through; }
+  .leg-button.leg-off .leg-dot { opacity: 0.28; }
   .leg-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .no-data { font-size: 12px; color: #aaa; padding: 20px 0; text-align: center; }
 
