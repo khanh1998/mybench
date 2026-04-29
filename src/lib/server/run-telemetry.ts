@@ -2952,8 +2952,7 @@ function buildHostProcessesSection(db: Database.Database, runId: number, runStar
 		.sort((a, b) => {
 			const byScore = pidScore(b) - pidScore(a);
 			return byScore !== 0 ? byScore : a - b;
-		})
-		.slice(0, 12);
+		});
 
 	const L = HOST_COL_LABELS;
 	const D = HOST_COL_DESCS;

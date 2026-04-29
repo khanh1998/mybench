@@ -1,7 +1,7 @@
 <script lang="ts">
   import LineChart from '$lib/LineChart.svelte';
   import { formatValue } from '$lib/telemetry/format';
-  import type { TelemetrySection, TelemetryMarker, TelemetryChartMetric, TelemetryTableColumn } from '$lib/telemetry/types';
+  import type { TelemetrySection, TelemetryMarker, TelemetryChartMetric, TelemetrySeries, TelemetryTableColumn } from '$lib/telemetry/types';
 
   let {
     section,
@@ -19,6 +19,13 @@
     processName: string;
     cmdline: string;
     row: Record<string, unknown>;
+  }
+
+  interface ProcessGroup {
+    key: string;
+    label: string;
+    pids: number[];
+    type: 'all' | 'client' | 'internal';
   }
 
   interface WaitChannelSample {
@@ -59,37 +66,127 @@
   ] as const;
   type MetricTypeKey = typeof METRIC_TYPES[number]['key'];
 
-  let selectedPid  = $state<number | null>(null);
+  let selectedKey = $state<string | null>(null);
   let selectedType = $state<MetricTypeKey>('cpu');
   let tableExpanded = $state(false);
   let selectedValueView = $state<'rate' | 'raw'>('rate');
 
-  // Auto-select first process on load
+  const groups = $derived.by((): ProcessGroup[] => {
+    const clientMap = new Map<string, number[]>();
+    const internalPids: number[] = [];
+
+    for (const p of processes) {
+      if (p.processName.includes('/')) {
+        const key = p.processName.replace(/\s*\(.*\)$/, '').trim();
+        if (!clientMap.has(key)) clientMap.set(key, []);
+        clientMap.get(key)!.push(p.pid);
+      } else {
+        internalPids.push(p.pid);
+      }
+    }
+
+    const result: ProcessGroup[] = [];
+    for (const [key, pids] of clientMap) {
+      const n = pids.length;
+      result.push({
+        key,
+        label: `${key} (${n} connection${n > 1 ? 's' : ''})`,
+        pids,
+        type: 'client',
+      });
+    }
+    if (internalPids.length > 0) {
+      result.push({
+        key: '__internals__',
+        label: `Postgres internals (${internalPids.length})`,
+        pids: internalPids,
+        type: 'internal',
+      });
+    }
+    return result;
+  });
+
+  const allProcessGroup = $derived.by((): ProcessGroup | null => {
+    if (processes.length <= 1) return null;
+    return {
+      key: '__all__',
+      label: `All processes (${processes.length})`,
+      pids: processes.map(p => p.pid),
+      type: 'all',
+    };
+  });
+
+  // Auto-select first process or group on load.
   $effect(() => {
-    if (selectedPid === null && processes.length > 0) {
-      selectedPid = processes[0].pid;
+    if (selectedKey !== null) return;
+    if (groups.length > 0) {
+      selectedKey = groups[0].pids.length > 1 ? `g:${groups[0].key}` : `p:${groups[0].pids[0]}`;
+    } else if (processes.length > 0) {
+      selectedKey = `p:${processes[0].pid}`;
     }
   });
 
-  // When pid changes, pick the first available metric type for that pid
+  const selectedPidOrGroup = $derived.by(() => {
+    if (!selectedKey) return null;
+    if (selectedKey.startsWith('p:')) return { kind: 'pid' as const, pid: Number(selectedKey.slice(2)) };
+    if (selectedKey.startsWith('g:')) return { kind: 'group' as const, groupKey: selectedKey.slice(2) };
+    return null;
+  });
+
+  const activePids = $derived.by((): number[] => {
+    if (!selectedPidOrGroup) return [];
+    if (selectedPidOrGroup.kind === 'pid') return [selectedPidOrGroup.pid];
+    if (selectedPidOrGroup.groupKey === allProcessGroup?.key) return allProcessGroup.pids;
+    const group = groups.find(g => g.key === selectedPidOrGroup.groupKey);
+    return group?.pids ?? [];
+  });
+
+  // When selection changes, pick the first available metric type for the active PID set.
   $effect(() => {
-    if (selectedPid === null) return;
-    const available = METRIC_TYPES.filter(t => hasMetric(selectedPid!, t.key));
-    if (available.length > 0 && !hasMetric(selectedPid, selectedType)) {
+    if (activePids.length === 0) return;
+    const available = METRIC_TYPES.filter(t => hasMetricForPids(activePids, t.key));
+    if (available.length > 0 && !hasMetricForPids(activePids, selectedType)) {
       selectedType = available[0].key;
     }
   });
 
-  function hasMetric(pid: number, typeKey: MetricTypeKey): boolean {
-    return !!(section.chartMetrics ?? []).find(m => m.key === `pid_${pid}_${typeKey}`);
+  function hasMetricForPids(pids: number[], typeKey: MetricTypeKey): boolean {
+    return pids.some(pid => !!(section.chartMetrics ?? []).find(m => m.key === `pid_${pid}_${typeKey}`));
   }
 
-  function getMetric(pid: number | null, typeKey: MetricTypeKey): TelemetryChartMetric | null {
-    if (pid === null) return null;
-    return (section.chartMetrics ?? []).find(m => m.key === `pid_${pid}_${typeKey}`) ?? null;
+  function getAggregatedMetric(pids: number[], typeKey: MetricTypeKey): TelemetryChartMetric | null {
+    const metrics = pids
+      .map(pid => (section.chartMetrics ?? []).find(m => m.key === `pid_${pid}_${typeKey}`) ?? null)
+      .filter((m): m is TelemetryChartMetric => m !== null);
+    if (metrics.length === 0) return null;
+    if (metrics.length === 1) return metrics[0];
+    return {
+      ...metrics[0],
+      series: sumSeriesArrays(metrics.map(m => m.series)),
+      rawSeries: metrics[0].rawSeries?.length
+        ? sumSeriesArrays(metrics.map(m => m.rawSeries ?? []))
+        : undefined,
+    };
   }
 
-  const activeMetric = $derived(getMetric(selectedPid, selectedType));
+  function sumSeriesArrays(seriesArrays: TelemetrySeries[][]): TelemetrySeries[] {
+    const labels = [...new Set(seriesArrays.flatMap(arr => arr.map(s => s.label)))];
+    return labels.map(label => {
+      const matching = seriesArrays
+        .map(arr => arr.find(s => s.label === label))
+        .filter((s): s is TelemetrySeries => !!s);
+      const allTs = [...new Set(matching.flatMap(s => s.points.map(p => p.t)))].sort((a, b) => a - b);
+      return {
+        ...matching[0],
+        points: allTs.map(t => ({
+          t,
+          v: matching.reduce((sum, s) => sum + (s.points.find(p => p.t === t)?.v ?? 0), 0),
+        })),
+      };
+    });
+  }
+
+  const activeMetric = $derived(getAggregatedMetric(activePids, selectedType));
   const activeMetricHasRaw = $derived(!!activeMetric?.rawSeries?.length);
   const activeValueView = $derived(activeMetricHasRaw ? selectedValueView : 'rate');
   const activeMetricSeries = $derived.by(() => {
@@ -102,22 +199,46 @@
     if (!activeMetricHasRaw) return activeMetric.title;
     return `${activeMetric.title} · ${activeValueView === 'raw' ? 'Raw delta' : 'Rate/s'}`;
   });
-  const selectedProcess = $derived(processes.find(p => p.pid === selectedPid) ?? null);
+  const selectedProcess = $derived(activePids.length === 1 ? processes.find(p => p.pid === activePids[0]) ?? null : null);
   const detailColumns = $derived(section.tableColumns.filter((column) => column.key !== 'cmdline'));
   const selectedSummaryItems = $derived.by(() => {
-    if (!selectedProcess) return [];
+    if (activePids.length === 0) return [];
+
+    if (activePids.length === 1) {
+      const process = processes.find(p => p.pid === activePids[0]);
+      if (!process) return [];
+      return [
+        { label: 'State', value: process.row.state, kind: 'text' },
+        { label: 'Current Wait', value: process.row.wchan, kind: 'text' },
+        { label: 'Top Wait', value: process.row.top_wchan, kind: 'text' },
+        { label: 'RSS', value: kbToBytes(process.row.vm_rss_kb), kind: 'bytes' },
+        { label: 'Peak RSS', value: kbToBytes(process.row.peak_vm_rss_kb), kind: 'bytes' },
+        { label: 'Swap', value: kbToBytes(process.row.vm_swap_kb), kind: 'bytes' },
+        { label: 'Threads', value: process.row.threads, kind: 'count' },
+        { label: 'FDs', value: process.row.fd_count, kind: 'count' },
+        { label: 'CPU Jiffies', value: process.row.cpu_jiffies_delta, kind: 'count' },
+        { label: 'Major Faults', value: process.row.major_faults_delta, kind: 'count' },
+        { label: 'Sched Wait', value: process.row.sched_wait_ms_delta, kind: 'duration_ms' },
+      ] as const;
+    }
+
+    const rows = activePids
+      .map(pid => section.tableRows.find(r => Number(r.pid) === pid))
+      .filter((r): r is Record<string, unknown> => !!r);
+
+    function sumField(field: string): number {
+      return rows.reduce((sum, row) => sum + (Number(row[field]) || 0), 0);
+    }
+
     return [
-      { label: 'State', value: selectedProcess.row.state, kind: 'text' },
-      { label: 'Current Wait', value: selectedProcess.row.wchan, kind: 'text' },
-      { label: 'Top Wait', value: selectedProcess.row.top_wchan, kind: 'text' },
-      { label: 'RSS', value: kbToBytes(selectedProcess.row.vm_rss_kb), kind: 'bytes' },
-      { label: 'Peak RSS', value: kbToBytes(selectedProcess.row.peak_vm_rss_kb), kind: 'bytes' },
-      { label: 'Swap', value: kbToBytes(selectedProcess.row.vm_swap_kb), kind: 'bytes' },
-      { label: 'Threads', value: selectedProcess.row.threads, kind: 'count' },
-      { label: 'FDs', value: selectedProcess.row.fd_count, kind: 'count' },
-      { label: 'CPU Jiffies', value: selectedProcess.row.cpu_jiffies_delta, kind: 'count' },
-      { label: 'Major Faults', value: selectedProcess.row.major_faults_delta, kind: 'count' },
-      { label: 'Sched Wait', value: selectedProcess.row.sched_wait_ms_delta, kind: 'duration_ms' },
+      { label: 'Processes', value: activePids.length, kind: 'count' },
+      { label: 'RSS', value: kbToBytes(sumField('vm_rss_kb')), kind: 'bytes' },
+      { label: 'Swap', value: kbToBytes(sumField('vm_swap_kb')), kind: 'bytes' },
+      { label: 'Threads', value: sumField('threads'), kind: 'count' },
+      { label: 'FDs', value: sumField('fd_count'), kind: 'count' },
+      { label: 'CPU Jiffies', value: sumField('cpu_jiffies_delta'), kind: 'count' },
+      { label: 'Major Faults', value: sumField('major_faults_delta'), kind: 'count' },
+      { label: 'Sched Wait', value: sumField('sched_wait_ms_delta'), kind: 'duration_ms' },
     ] as const;
   });
   const selectedWaitChannels = $derived(getWaitChannelSamples(selectedProcess?.row.wchan_distribution));
@@ -161,19 +282,39 @@
   {:else}
     <!-- Process selector + metric pills in one toolbar row -->
     <div class="process-toolbar">
-      <select
-        class="process-select"
-        value={selectedPid}
-        onchange={(e) => { selectedPid = Number((e.target as HTMLSelectElement).value); }}
-      >
-        {#each processes as p}
-          <option value={p.pid}>{p.processName} — PID {p.pid}</option>
-        {/each}
-      </select>
+      <div class="process-selector-row">
+        <select
+          class="process-select"
+          value={selectedKey}
+          onchange={(e) => { selectedKey = (e.target as HTMLSelectElement).value; }}
+        >
+          {#if allProcessGroup}
+            <option value={`g:${allProcessGroup.key}`}>All {allProcessGroup.pids.length} processes (aggregated)</option>
+          {/if}
+          {#each groups as group}
+            <optgroup label={group.label}>
+              {#if group.pids.length > 1}
+                <option value={`g:${group.key}`}>
+                  {group.type === 'internal' ? 'All internals (aggregated)' : `All ${group.pids.length} (aggregated)`}
+                </option>
+              {/if}
+              {#each group.pids as pid}
+                {@const p = processes.find(pr => pr.pid === pid)}
+                <option value={`p:${pid}`}>{p?.processName ?? `pid:${pid}`} — PID {pid}</option>
+              {/each}
+            </optgroup>
+          {/each}
+          {#if groups.length === 0}
+            {#each processes as p}
+              <option value={`p:${p.pid}`}>{p.processName} — PID {p.pid}</option>
+            {/each}
+          {/if}
+        </select>
+      </div>
 
       <div class="metric-pills">
         {#each METRIC_TYPES as t}
-          {@const available = selectedPid !== null && hasMetric(selectedPid, t.key)}
+          {@const available = hasMetricForPids(activePids, t.key)}
           <button
             type="button"
             class="pill"
@@ -205,8 +346,11 @@
     </div>
 
     <!-- Full cmdline as a subtle hint below the toolbar -->
-    {#if selectedProcess?.cmdline}
-      <div class="cmdline-hint" title={selectedProcess.cmdline}>{selectedProcess.cmdline}</div>
+    {#if activePids.length === 1}
+      {@const sp = processes.find(p => p.pid === activePids[0])}
+      {#if sp?.cmdline}
+        <div class="cmdline-hint" title={sp.cmdline}>{sp.cmdline}</div>
+      {/if}
     {/if}
 
     {#if selectedSummaryItems.length > 0}
@@ -220,7 +364,7 @@
       </div>
     {/if}
 
-    {#if selectedWaitChannels.length > 0}
+    {#if activePids.length === 1 && selectedWaitChannels.length > 0}
       <div class="wchan-block">
         <div class="wchan-title">Wait channel samples</div>
         <div class="wchan-list">
@@ -248,7 +392,7 @@
         showAllSeriesByDefault={true}
       />
     {:else}
-      <div class="no-data">No {selectedType.toUpperCase()} data for this process.</div>
+      <div class="no-data">No {selectedType.toUpperCase()} data for this selection.</div>
     {/if}
 
     {#if section.tableRows.length > 0}
@@ -256,7 +400,7 @@
         <div class="table-header">
           <div>
             <div class="table-title">{section.tableTitle}</div>
-            <div class="table-subtitle">Top {section.tableRows.length} PostgreSQL processes by observed activity</div>
+            <div class="table-subtitle">{section.tableRows.length} PostgreSQL processes by observed activity</div>
           </div>
           <button
             type="button"
@@ -280,7 +424,7 @@
               </thead>
               <tbody>
                 {#each section.tableRows as row}
-                  <tr class:selected={Number(row.pid) === selectedPid}>
+                  <tr class:selected={activePids.includes(Number(row.pid))}>
                     {#each detailColumns as column}
                       <td class:mono={column.kind !== 'text' && column.kind !== 'flag'} title={String(row[column.key] ?? '')}>
                         {formatValue(cellValue(row, column), column.kind ?? 'text')}
@@ -309,10 +453,17 @@
   }
 
   .process-toolbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px 10px;
+  }
+
+  .process-selector-row {
+    grid-column: 1 / -1;
     display: flex;
     align-items: center;
-    gap: 10px;
-    flex-wrap: wrap;
+    min-width: 0;
   }
 
   .process-select {
@@ -332,6 +483,7 @@
   .process-select:focus { outline: 2px solid #0066cc; outline-offset: 1px; }
 
   .metric-pills {
+    grid-column: 1;
     display: flex;
     flex-wrap: wrap;
     gap: 4px;
@@ -356,7 +508,8 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    margin-left: auto;
+    grid-column: 2;
+    justify-self: end;
   }
 
   .value-view-label {

@@ -2,12 +2,30 @@
   import LineChart from '$lib/LineChart.svelte';
   import BarChart from '$lib/BarChart.svelte';
   import { formatValue } from '$lib/telemetry/format';
-  import type { TelemetryChartMetric, TelemetrySection } from '$lib/telemetry/types';
+  import type { TelemetryChartMetric, TelemetrySection, TelemetrySeries, TelemetryValueKind } from '$lib/telemetry/types';
 
   interface CompareRun {
     id: number;
     label: string;
     color: string;
+  }
+
+  interface ProcessInfo {
+    pid: number;
+    processName: string;
+  }
+
+  interface ProcessCompareOption {
+    key: string;
+    label: string;
+    type: 'all' | 'client' | 'internal' | 'internal_process';
+  }
+
+  interface SummaryCompareRow {
+    key: string;
+    label: string;
+    kind: TelemetryValueKind;
+    values: Record<number, unknown>;
   }
 
   let {
@@ -25,6 +43,23 @@
   let selectedMetricEntity = $state<string | null>(null);
   let selectedSeriesLabel = $state<string | null>(null);
   let selectedValueView = $state<'rate' | 'raw' | 'avg'>('rate');
+  let selectedProcessKey = $state<string | null>(null);
+  let selectedProcessMetricType = $state<ProcessMetricTypeKey>('cpu');
+
+  const PROCESS_METRIC_TYPES = [
+    { key: 'cpu',         label: 'CPU' },
+    { key: 'faults',      label: 'Faults' },
+    { key: 'mem',         label: 'Mem' },
+    { key: 'io_bytes',    label: 'I/O Bytes' },
+    { key: 'io_chars',    label: 'I/O Chars' },
+    { key: 'io_syscalls', label: 'I/O Calls' },
+    { key: 'sched',       label: 'Sched Time' },
+    { key: 'timeslices',  label: 'Timeslices' },
+    { key: 'ctx',         label: 'Ctx Switches' },
+    { key: 'threads',     label: 'Threads' },
+    { key: 'fds',         label: 'FDs' },
+  ] as const;
+  type ProcessMetricTypeKey = typeof PROCESS_METRIC_TYPES[number]['key'];
 
   function alignSeriesToFirstPoint(points: { t: number; v: number }[]) {
     if (!points.length) return points;
@@ -39,6 +74,7 @@
     const sections = runs.map((run) => sectionsByRun[run.id]).filter((section): section is TelemetrySection => !!section);
     return sections.find((section) => section.status === 'ok') ?? sections[0] ?? null;
   });
+  const isHostProcessesSection = $derived(firstSection?.key === 'host_processes');
 
   const allMetricOptions = $derived(firstSection?.chartMetrics ?? []);
   const metricGroups = $derived.by(() => {
@@ -83,7 +119,149 @@
     return metricOptions.find((metric) => metric.key === key) ?? metricOptions[0];
   });
 
-  const activeMetricHasRaw = $derived(!!activeMetric?.rawSeries?.length);
+  function processesForSection(section: TelemetrySection | null | undefined): ProcessInfo[] {
+    if (!section || section.status !== 'ok') return [];
+    const seen = new Set<number>();
+    const list: ProcessInfo[] = [];
+    for (const row of section.tableRows) {
+      const pid = Number(row.pid);
+      if (!pid || seen.has(pid)) continue;
+      seen.add(pid);
+      list.push({
+        pid,
+        processName: String(row.processName ?? row.comm ?? `pid:${pid}`),
+      });
+    }
+    return list;
+  }
+
+  function clientGroupKey(processName: string): string {
+    return processName.replace(/\s*\(.*\)$/, '').trim();
+  }
+
+  function pidsForProcessSelection(section: TelemetrySection | null | undefined, processKey: string | null): number[] {
+    const processes = processesForSection(section);
+    if (!processKey) return [];
+    if (processKey === '__all__') return processes.map((process) => process.pid);
+    if (processKey === '__internals__') return processes.filter((process) => !process.processName.includes('/')).map((process) => process.pid);
+    if (processKey.startsWith('internal:')) {
+      const processName = processKey.slice('internal:'.length);
+      return processes
+        .filter((process) => !process.processName.includes('/') && process.processName === processName)
+        .map((process) => process.pid);
+    }
+    return processes
+      .filter((process) => process.processName.includes('/') && clientGroupKey(process.processName) === processKey)
+      .map((process) => process.pid);
+  }
+
+  function hasProcessMetric(section: TelemetrySection | null | undefined, pids: number[], typeKey: ProcessMetricTypeKey): boolean {
+    if (!section || section.status !== 'ok') return false;
+    return pids.some((pid) => !!(section.chartMetrics ?? []).find((metric) => metric.key === `pid_${pid}_${typeKey}`));
+  }
+
+  function getAggregatedProcessMetric(section: TelemetrySection | null | undefined, pids: number[], typeKey: ProcessMetricTypeKey): TelemetryChartMetric | null {
+    if (!section || section.status !== 'ok') return null;
+    const metrics = pids
+      .map((pid) => (section.chartMetrics ?? []).find((metric) => metric.key === `pid_${pid}_${typeKey}`) ?? null)
+      .filter((metric): metric is TelemetryChartMetric => metric !== null);
+    if (metrics.length === 0) return null;
+    if (metrics.length === 1) return metrics[0];
+    return {
+      ...metrics[0],
+      label: PROCESS_METRIC_TYPES.find((type) => type.key === typeKey)?.label ?? metrics[0].label,
+      title: PROCESS_METRIC_TYPES.find((type) => type.key === typeKey)?.label ?? metrics[0].title,
+      series: sumSeriesArrays(metrics.map((metric) => metric.series)),
+      rawSeries: metrics[0].rawSeries?.length
+        ? sumSeriesArrays(metrics.map((metric) => metric.rawSeries ?? []))
+        : undefined,
+    };
+  }
+
+  function sumSeriesArrays(seriesArrays: TelemetrySeries[][]): TelemetrySeries[] {
+    const labels = [...new Set(seriesArrays.flatMap((seriesArray) => seriesArray.map((series) => series.label)))];
+    return labels.map((label) => {
+      const matching = seriesArrays
+        .map((seriesArray) => seriesArray.find((series) => series.label === label))
+        .filter((series): series is TelemetrySeries => !!series);
+      const allTs = [...new Set(matching.flatMap((series) => series.points.map((point) => point.t)))].sort((a, b) => a - b);
+      return {
+        ...matching[0],
+        points: allTs.map((t) => ({
+          t,
+          v: matching.reduce((sum, series) => sum + (series.points.find((point) => point.t === t)?.v ?? 0), 0),
+        })),
+      };
+    });
+  }
+
+  const processOptions = $derived.by((): ProcessCompareOption[] => {
+    if (!isHostProcessesSection) return [];
+
+    const clients = new Set<string>();
+    const internals = new Set<string>();
+    let hasAny = false;
+    let hasInternals = false;
+
+    for (const run of runs) {
+      const section = sectionsByRun[run.id];
+      for (const process of processesForSection(section)) {
+        hasAny = true;
+        if (process.processName.includes('/')) {
+          clients.add(clientGroupKey(process.processName));
+        } else {
+          hasInternals = true;
+          internals.add(process.processName);
+        }
+      }
+    }
+
+    const options: ProcessCompareOption[] = [];
+    if (hasAny) options.push({ key: '__all__', label: 'All processes (aggregated)', type: 'all' });
+    for (const key of [...clients].sort((a, b) => a.localeCompare(b))) {
+      options.push({ key, label: `${key} (aggregated)`, type: 'client' });
+    }
+    if (hasInternals) options.push({ key: '__internals__', label: 'Postgres internals (aggregated)', type: 'internal' });
+    for (const name of [...internals].sort((a, b) => a.localeCompare(b))) {
+      options.push({ key: `internal:${name}`, label: name, type: 'internal_process' });
+    }
+    return options;
+  });
+
+  const activeProcessOption = $derived(processOptions.find((option) => option.key === selectedProcessKey) ?? processOptions[0] ?? null);
+  const allProcessOption = $derived(processOptions.find((option) => option.type === 'all') ?? null);
+  const clientProcessOptions = $derived(processOptions.filter((option) => option.type === 'client'));
+  const internalProcessGroupOption = $derived(processOptions.find((option) => option.type === 'internal') ?? null);
+  const internalProcessOptions = $derived(processOptions.filter((option) => option.type === 'internal_process'));
+  const processMetricOptions = $derived.by(() => {
+    if (!activeProcessOption) return [];
+    return PROCESS_METRIC_TYPES.filter((type) => runs.some((run) => {
+      const section = sectionsByRun[run.id];
+      const pids = pidsForProcessSelection(section, activeProcessOption.key);
+      return hasProcessMetric(section, pids, type.key);
+    }));
+  });
+  const activeProcessMetricType = $derived(
+    processMetricOptions.find((type) => type.key === selectedProcessMetricType) ?? processMetricOptions[0] ?? null
+  );
+  const activeProcessMetric = $derived.by((): TelemetryChartMetric | null => {
+    if (!activeProcessOption || !activeProcessMetricType || !firstSection) return null;
+    return getAggregatedProcessMetric(
+      firstSection,
+      pidsForProcessSelection(firstSection, activeProcessOption.key),
+      activeProcessMetricType.key
+    );
+  });
+  const activeProcessMetricHasRaw = $derived.by(() => {
+    if (!activeProcessOption || !activeProcessMetricType) return false;
+    return runs.some((run) => {
+      const section = sectionsByRun[run.id];
+      const pids = pidsForProcessSelection(section, activeProcessOption.key);
+      return !!getAggregatedProcessMetric(section, pids, activeProcessMetricType.key)?.rawSeries?.length;
+    });
+  });
+
+  const activeMetricHasRaw = $derived(isHostProcessesSection ? activeProcessMetricHasRaw : !!activeMetric?.rawSeries?.length);
   const activeValueView = $derived(
     selectedValueView === 'avg' ? 'avg'
     : activeMetricHasRaw ? selectedValueView
@@ -115,7 +293,12 @@
       const section = sectionsByRun[run.id];
       if (!section || section.status !== 'ok') continue;
 
-      if (activeMetric) {
+      if (isHostProcessesSection) {
+        if (!activeProcessOption || !activeProcessMetricType) continue;
+        const pids = pidsForProcessSelection(section, activeProcessOption.key);
+        const runMetric = getAggregatedProcessMetric(section, pids, activeProcessMetricType.key);
+        for (const series of metricSeriesForView(runMetric)) labels.add(series.label);
+      } else if (activeMetric) {
         const runMetric = findComparableMetric(section, activeMetric);
         for (const series of metricSeriesForView(runMetric)) labels.add(series.label);
       } else {
@@ -126,7 +309,38 @@
     return [...labels];
   });
 
-  const summaryRows = $derived.by(() => {
+  const summaryRows = $derived.by((): SummaryCompareRow[] => {
+    if (isHostProcessesSection) {
+      const processKey = activeProcessOption?.key ?? null;
+
+      function sumField(section: TelemetrySection | null | undefined, field: string): number {
+        if (!section || section.status !== 'ok') return 0;
+        const activePids = new Set(pidsForProcessSelection(section, processKey));
+        return section.tableRows
+          .filter((row) => activePids.has(Number(row.pid)))
+          .reduce((sum, row) => sum + (Number(row[field]) || 0), 0);
+      }
+
+      function pidCount(section: TelemetrySection | null | undefined): number {
+        return pidsForProcessSelection(section, processKey).length;
+      }
+
+      function valuesFor(getValue: (section: TelemetrySection | null | undefined) => unknown): Record<number, unknown> {
+        return Object.fromEntries(runs.map((run) => [run.id, getValue(sectionsByRun[run.id])]));
+      }
+
+      return [
+        { key: 'processes', label: 'Processes', kind: 'count', values: valuesFor((section) => pidCount(section)) },
+        { key: 'rss', label: 'RSS', kind: 'bytes', values: valuesFor((section) => sumField(section, 'vm_rss_kb') * 1024) },
+        { key: 'swap', label: 'Swap', kind: 'bytes', values: valuesFor((section) => sumField(section, 'vm_swap_kb') * 1024) },
+        { key: 'threads', label: 'Threads', kind: 'count', values: valuesFor((section) => sumField(section, 'threads')) },
+        { key: 'fds', label: 'FDs', kind: 'count', values: valuesFor((section) => sumField(section, 'fd_count')) },
+        { key: 'cpu_jiffies', label: 'CPU Jiffies', kind: 'count', values: valuesFor((section) => sumField(section, 'cpu_jiffies_delta')) },
+        { key: 'major_faults', label: 'Major Faults', kind: 'count', values: valuesFor((section) => sumField(section, 'major_faults_delta')) },
+        { key: 'sched_wait', label: 'Sched Wait', kind: 'duration_ms', values: valuesFor((section) => sumField(section, 'sched_wait_ms_delta')) },
+      ];
+    }
+
     const cards = firstSection?.summary ?? [];
     return cards.map((card) => ({
       key: card.key,
@@ -149,9 +363,17 @@
         const section = sectionsByRun[run.id];
         if (!section || section.status !== 'ok') return null;
 
-        const sourceSeries = activeMetric
-          ? metricSeriesForView(findComparableMetric(section, activeMetric)).find((series) => series.label === selectedSeriesLabel)
-          : section.chartSeries.find((series) => series.label === selectedSeriesLabel);
+        const sourceSeries = (() => {
+          if (isHostProcessesSection) {
+            if (!activeProcessOption || !activeProcessMetricType) return null;
+            const pids = pidsForProcessSelection(section, activeProcessOption.key);
+            return metricSeriesForView(getAggregatedProcessMetric(section, pids, activeProcessMetricType.key))
+              .find((series) => series.label === selectedSeriesLabel) ?? null;
+          }
+          return activeMetric
+            ? metricSeriesForView(findComparableMetric(section, activeMetric)).find((series) => series.label === selectedSeriesLabel) ?? null
+            : section.chartSeries.find((series) => series.label === selectedSeriesLabel) ?? null;
+        })();
 
         if (!sourceSeries) return null;
         return {
@@ -164,6 +386,15 @@
   });
 
   const chartTitle = $derived.by(() => {
+    if (isHostProcessesSection) {
+      const processLabel = activeProcessOption?.label.replace(/\s*\(aggregated\)$/, '') ?? 'Processes';
+      const metricLabel = activeProcessMetricType?.label ?? 'Metric';
+      const viewSuffix = activeValueView === 'avg' ? ' · Avg'
+        : activeMetricHasRaw ? ` · ${activeValueView === 'raw' ? 'Raw' : 'Rate/s'}`
+        : '';
+      if (selectedSeriesLabel) return `${label} — ${processLabel} · ${metricLabel}${viewSuffix} · ${selectedSeriesLabel}`;
+      return `${label} — ${processLabel} · ${metricLabel}${viewSuffix}`;
+    }
     const entity = activeMetric?.entity ? ` · ${activeMetric.entity}` : '';
     const viewSuffix = activeValueView === 'avg' ? ' · Avg'
       : activeMetricHasRaw ? ` · ${activeValueView === 'raw' ? 'Raw' : 'Rate/s'}`
@@ -207,6 +438,26 @@
   });
 
   $effect(() => {
+    if (!isHostProcessesSection) {
+      selectedProcessKey = null;
+      return;
+    }
+    if (!processOptions.length) {
+      selectedProcessKey = null;
+      return;
+    }
+    if (selectedProcessKey && processOptions.some((option) => option.key === selectedProcessKey)) return;
+    selectedProcessKey = processOptions[0].key;
+  });
+
+  $effect(() => {
+    if (!isHostProcessesSection) return;
+    if (!processMetricOptions.length) return;
+    if (processMetricOptions.some((option) => option.key === selectedProcessMetricType)) return;
+    selectedProcessMetricType = processMetricOptions[0].key;
+  });
+
+  $effect(() => {
     if (!seriesOptions.length) {
       selectedSeriesLabel = null;
       return;
@@ -240,8 +491,8 @@
     </div>
   {/if}
 
-  {#if metricOptions.length > 0 || seriesOptions.length > 1}
-    {#if metricGroups.length > 1}
+  {#if isHostProcessesSection ? (processOptions.length > 0 || seriesOptions.length > 1) : (metricOptions.length > 0 || seriesOptions.length > 1)}
+    {#if !isHostProcessesSection && metricGroups.length > 1}
       <div class="chart-group-tabs" aria-label="Metric categories">
         {#each metricGroups as group}
           <button
@@ -259,7 +510,44 @@
     {/if}
 
     <div class="chart-controls">
-      {#if metricEntities.length > 0}
+      {#if isHostProcessesSection}
+        {#if processOptions.length > 0}
+          <label>
+            Process
+            <select bind:value={selectedProcessKey}>
+              {#if allProcessOption}
+                <option value={allProcessOption.key}>{allProcessOption.label}</option>
+              {/if}
+              {#each clientProcessOptions as option}
+                <optgroup label={option.key}>
+                  <option value={option.key}>All matching connections (aggregated)</option>
+                </optgroup>
+              {/each}
+              {#if internalProcessGroupOption || internalProcessOptions.length > 0}
+                <optgroup label="Postgres internals">
+                  {#if internalProcessGroupOption}
+                    <option value={internalProcessGroupOption.key}>All internals (aggregated)</option>
+                  {/if}
+                  {#each internalProcessOptions as option}
+                    <option value={option.key}>{option.label}</option>
+                  {/each}
+                </optgroup>
+              {/if}
+            </select>
+          </label>
+        {/if}
+
+        {#if processMetricOptions.length > 0}
+          <label>
+            Metric
+            <select bind:value={selectedProcessMetricType}>
+              {#each processMetricOptions as metric}
+                <option value={metric.key}>{metric.label}</option>
+              {/each}
+            </select>
+          </label>
+        {/if}
+      {:else if metricEntities.length > 0}
         <label>
           {entitySelectorLabel}
           <select
@@ -273,7 +561,7 @@
         </label>
       {/if}
 
-      {#if metricOptions.length > 0}
+      {#if !isHostProcessesSection && metricOptions.length > 0}
         <label>
           Metric
           <select bind:value={selectedMetricKey}>
