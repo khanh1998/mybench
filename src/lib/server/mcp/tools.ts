@@ -170,7 +170,10 @@ and the recommended workflow for creating and running a benchmark plan.`
 					'9. validate_design(design_id) — check for issues (undefined params, missing server, no bench step) before running',
 					'10. run_design(design_id, {profile_id?, name?, server_id?, database?, snapshot_interval_seconds?, ec2_server_id?}) — start a local or EC2 test run and get run_id',
 					'11. get_run(run_id) — wait ~(bench duration + collect durations) before first poll, then every ~30s',
-					'12. export_plan(design_id) — get plan.json for production mybench-runner CLI'
+					'12. export_plan(design_id) — get plan.json for production mybench-runner CLI',
+					'--- Analysis (after runs complete) ---',
+					'13. get_collected_data_schema() — learn the schema of all snap_* and host_snap_* tables so you know what to query',
+					'14. query_run_data(sql, params) — write SELECT queries against snap_* tables to compute deltas, compare runs, and find root causes'
 				],
 				recommended_step_structure: {
 					description: 'Always follow this 10-step order when building a benchmark design. Each step has a specific purpose — do not skip or merge steps.',
@@ -1071,6 +1074,103 @@ Use this after validating the plan with run_design.`,
 				})),
 				enabled_snap_tables: enabledSnapTables
 			});
+		}
+	);
+
+	// ─────────────────────────────────────────────────────────────────────────
+	// get_collected_data_schema
+	// ─────────────────────────────────────────────────────────────────────────
+	server.registerTool(
+		'get_collected_data_schema',
+		{
+			description: `Returns the schema of all collected-data tables in the mybench SQLite database.
+Use this before writing queries with query_run_data to understand what columns are available.
+
+Includes:
+- snap_* tables: PostgreSQL statistics snapshots (pg_stat_database, pg_stat_user_tables, pg_stat_wal, pg_locks, pg_stat_statements, etc.)
+- host_snap_* tables: OS/host metrics (CPU, memory, disk I/O, network, per-process stats)
+- benchmark_runs, designs, decisions: core metadata for filtering by run/design/decision
+
+All snap_* and host_snap_* tables share these standard columns:
+- _run_id: foreign key to benchmark_runs.id — use this to filter snapshots for a specific run
+- _collected_at: ISO timestamp of when the snapshot was taken
+- _phase: "pre" | "bench" | "post" — which collection phase this snapshot belongs to
+
+The delta pattern for cumulative counters: subtract the first snapshot value from the last within a phase.
+Example: wal_bytes written during benchmark = MAX(wal_bytes) - MIN(wal_bytes) WHERE _run_id=? AND _phase='bench'`
+		},
+		() => {
+			const db = getDb();
+
+			const tableNames = (db.prepare(
+				`SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE 'snap_%' OR name LIKE 'host_snap_%') ORDER BY name`
+			).all() as { name: string }[]).map(r => r.name);
+
+			const snapSchema: Record<string, { name: string; type: string }[]> = {};
+			for (const tbl of tableNames) {
+				const cols = db.prepare(`PRAGMA table_info(${tbl})`).all() as { name: string; cid: number; type: string }[];
+				snapSchema[tbl] = cols.map(c => ({ name: c.name, type: c.type || 'TEXT' }));
+			}
+
+			const coreTableDefs: Record<string, { name: string; type: string }[]> = {};
+			for (const tbl of ['benchmark_runs', 'designs', 'decisions']) {
+				const cols = db.prepare(`PRAGMA table_info(${tbl})`).all() as { name: string; cid: number; type: string }[];
+				coreTableDefs[tbl] = cols.map(c => ({ name: c.name, type: c.type || 'TEXT' }));
+			}
+
+			return text({
+				standard_snap_columns: {
+					_run_id: 'INTEGER — foreign key to benchmark_runs.id',
+					_collected_at: 'TEXT — ISO timestamp of snapshot',
+					_phase: 'TEXT — "pre" | "bench" | "post"'
+				},
+				core_tables: coreTableDefs,
+				snap_tables: snapSchema
+			});
+		}
+	);
+
+	// ─────────────────────────────────────────────────────────────────────────
+	// query_run_data
+	// ─────────────────────────────────────────────────────────────────────────
+	server.registerTool(
+		'query_run_data',
+		{
+			description: `Executes a read-only SQL query against the mybench SQLite database and returns the results.
+Use get_collected_data_schema first to understand available tables and columns.
+
+Useful patterns:
+- Filter snapshots by run: WHERE _run_id = ?  (pass run_id in params)
+- Compare two runs: WHERE _run_id IN (?, ?)
+- Delta for cumulative counters within bench phase: MAX(col) - MIN(col) WHERE _run_id=? AND _phase='bench'
+- Join to designs/decisions: JOIN benchmark_runs br ON snap._run_id = br.id JOIN designs d ON br.design_id = d.id
+
+Only SELECT and WITH statements are allowed. Results are capped at 500 rows.`,
+			inputSchema: {
+				sql: z.string().describe('SELECT or WITH query to execute'),
+				params: z.array(z.union([z.string(), z.number(), z.null()])).optional().describe('Positional parameters for ? placeholders in the SQL')
+			}
+		},
+		({ sql, params = [] }) => {
+			const normalized = sql.trim().toUpperCase();
+			if (!normalized.startsWith('SELECT') && !normalized.startsWith('WITH')) {
+				return text({ error: 'Only SELECT and WITH queries are allowed' });
+			}
+
+			const db = getDb();
+			try {
+				const rows = db.prepare(sql).all(...params) as Record<string, unknown>[];
+				const limited = rows.slice(0, 500);
+				const columns = limited.length > 0 ? Object.keys(limited[0]) : [];
+				return text({
+					columns,
+					rows: limited,
+					row_count: limited.length,
+					truncated: rows.length > 500 ? rows.length : undefined
+				});
+			} catch (err) {
+				return text({ error: err instanceof Error ? err.message : String(err) });
+			}
 		}
 	);
 
