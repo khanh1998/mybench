@@ -524,6 +524,9 @@
       const rid = run.id;
 
       // AAS: group by type+event for detailed tooltip, aggregate to type for chart stacking
+      // Only active backends count toward AAS. Idle-in-transaction backends usually show
+      // Client:ClientRead while waiting for the client, which inflates load without showing
+      // backend work or meaningful resource pressure.
       const aasRes = await queryApi(
         `SELECT _collected_at,
           COALESCE(wait_event_type, 'CPU') as wait_event_type,
@@ -1167,6 +1170,7 @@
 
     // queryid is already a TEXT string from the SQL query (CAST(queryid AS TEXT))
     // so no float64 precision loss. Compare as text in SQLite.
+    // Keep wait attribution aligned with AAS: only active backend samples are counted.
     const [res, statementRes] = await Promise.all([
       queryApi(
         `SELECT COALESCE(wait_event_type,'CPU') as wtype,
