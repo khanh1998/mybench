@@ -2466,7 +2466,7 @@ function buildHostSystemSection(db: Database.Database, runId: number, runStartMs
 	// Load average
 	if (loadavgRows.length > 0) {
 		const g = buildInstantGroup('load_avg', 'Load Average', 'Load Average', loadavgRows,
-			['load1', 'load5', 'load15', 'running_threads'], 'count', runStartMs, 1, L, D);
+			['load1', 'load5', 'load15'], 'count', runStartMs, 1, L, D);
 		pushChartMetric(chartMetrics, withChartGroup(g, 'CPU'));
 		const g2 = buildHostDerivedInstantGroup('threads_total', 'Thread Count', 'Host Threads', loadavgRows, [
 			{ label: 'Total threads', description: 'Total scheduler entities from /proc/loadavg', valueFn: (row) => toNumber(row.total_threads) },
@@ -2548,11 +2548,12 @@ function buildHostSystemSection(db: Database.Database, runId: number, runStartMs
 			};
 		}
 		const cpuPctGroup = buildHostDerivedRateGroup('stat_cpu_pct', 'CPU %', 'CPU Usage % (/proc/stat)', statRows, [
-			{ label: 'User %',    valueFn: cpuPct(['cpu_user', 'cpu_nice']) },
-			{ label: 'System %',  valueFn: cpuPct(['cpu_system']) },
-			{ label: 'IO Wait %', valueFn: cpuPct(['cpu_iowait']) },
-			{ label: 'Stolen %',  valueFn: cpuPct(['cpu_steal']) },
-			{ label: 'Idle %',    valueFn: cpuPct(['cpu_idle']) },
+			{ label: 'User %',    description: 'CPU time in user-space processes, normalized across all cores', valueFn: cpuPct(['cpu_user']) },
+			{ label: 'Nice %',    description: 'CPU time in user-space processes running at lowered priority (nice > 0)', valueFn: cpuPct(['cpu_nice']) },
+			{ label: 'System %',  description: 'CPU time in kernel-space (syscalls, drivers)', valueFn: cpuPct(['cpu_system']) },
+			{ label: 'IO Wait %', description: 'CPU time idle while waiting for I/O to complete', valueFn: cpuPct(['cpu_iowait']) },
+			{ label: 'Stolen %',  description: 'CPU time stolen by the hypervisor for other VMs (cloud environments)', valueFn: cpuPct(['cpu_steal']) },
+			{ label: 'Idle %',    description: 'CPU time truly idle', valueFn: cpuPct(['cpu_idle']) },
 		], 'percent', runStartMs);
 		pushChartMetric(chartMetrics, withChartGroup(cpuPctGroup, 'CPU'));
 
@@ -2560,7 +2561,9 @@ function buildHostSystemSection(db: Database.Database, runId: number, runStartMs
 			['cpu_user', 'cpu_nice', 'cpu_system', 'cpu_iowait', 'cpu_steal', 'cpu_irq', 'cpu_softirq'], 'count', runStartMs, 1, L, D);
 		pushChartMetric(chartMetrics, withChartGroup(g, 'CPU'));
 		const g2 = buildRateGroup('stat_ctx', 'Ctx & Interrupts', 'Context Switches, Interrupts & Forks /s', statRows,
-			['ctxt', 'intr', 'processes'], 'count', runStartMs, 1, L, D);
+			['ctxt', 'intr', 'processes'], 'count', runStartMs, 1,
+			{ ctxt: 'Ctx switches/s', intr: 'Interrupts/s', processes: 'Forks/s' },
+			{ ctxt: 'CPU context switches per second — high values indicate heavy scheduling pressure or lock contention', intr: 'Hardware interrupts serviced per second — driven by NIC packets, disk I/O completions, and timer ticks', processes: 'New processes (forks) created per second' });
 		pushChartMetric(chartMetrics, withChartGroup(g2, 'CPU'));
 		const g3 = buildInstantGroup('stat_procs', 'Run Queue', 'Runnable / Blocked Processes', statRows,
 			['procs_running', 'procs_blocked'], 'count', runStartMs, 1, L, D);
@@ -2609,23 +2612,111 @@ function buildHostSystemSection(db: Database.Database, runId: number, runStartMs
 		const devRows = diskstatsRows.filter(r => r.device === dev);
 		if (devRows.length < 2) continue;
 		const g = buildRateGroup(`disk_${dev}_ops`, 'IOPS', `Disk ${dev} — IOPS`, devRows,
-			['rd_ios', 'wr_ios'], 'count', runStartMs, 1, L, D);
+			['rd_ios', 'wr_ios', 'dc_ios', 'fl_ios'], 'count', runStartMs, 1,
+			{ rd_ios: 'Reads/s', wr_ios: 'Writes/s', dc_ios: 'Discards/s', fl_ios: 'Flushes/s' },
+			{ rd_ios: 'Completed read operations per second', wr_ios: 'Completed write operations per second', dc_ios: 'Completed discard (TRIM) operations per second', fl_ios: 'Completed flush (fsync) operations per second' });
 		pushChartMetric(chartMetrics, withChartGroup(g, 'Block Devices', dev));
-		const g2 = buildRateGroup(`disk_${dev}_bytes`, 'Throughput', `Disk ${dev} — Throughput (sectors/s)`, devRows,
-			['rd_sectors', 'wr_sectors'], 'count', runStartMs, 1, L, D);
+		const gMerges = buildRateGroup(`disk_${dev}_merges`, 'Merges', `Disk ${dev} — Request Merges /s`, devRows,
+			['rd_merges', 'wr_merges', 'dc_merges'], 'count', runStartMs, 1,
+			{ rd_merges: 'Read merges/s', wr_merges: 'Write merges/s', dc_merges: 'Discard merges/s' },
+			{ rd_merges: 'Read requests merged by the I/O scheduler per second', wr_merges: 'Write requests merged by the I/O scheduler per second', dc_merges: 'Discard requests merged by the I/O scheduler per second' });
+		pushChartMetric(chartMetrics, withChartGroup(gMerges, 'Block Devices', dev));
+		const g2 = buildRateGroup(`disk_${dev}_bytes`, 'Throughput', `Disk ${dev} — Throughput (KB/s)`, devRows,
+			['rd_sectors', 'wr_sectors', 'dc_sectors'], 'bytes', runStartMs, 0.5,
+			{ rd_sectors: 'Read KB/s', wr_sectors: 'Write KB/s', dc_sectors: 'Discard KB/s' },
+			{ rd_sectors: 'Kilobytes read per second (rd_sectors × 512 bytes)', wr_sectors: 'Kilobytes written per second (wr_sectors × 512 bytes)', dc_sectors: 'Kilobytes discarded (TRIMmed) per second (dc_sectors × 512 bytes)' });
 		pushChartMetric(chartMetrics, withChartGroup(g2, 'Block Devices', dev));
-		const g2b = buildRateGroup(`disk_${dev}_merges`, 'Merges', `Disk ${dev} — Request Merges /s`, devRows,
-			['rd_merges', 'wr_merges'], 'count', runStartMs, 1, L, D);
-		pushChartMetric(chartMetrics, withChartGroup(g2b, 'Block Devices', dev));
 		const g3 = buildInstantGroup(`disk_${dev}_queue`, 'Queue', `Disk ${dev} — In-flight I/Os`, devRows,
 			['in_flight'], 'count', runStartMs, 1, L, D);
 		pushChartMetric(chartMetrics, withChartGroup(g3, 'Block Devices', dev));
-		const g4 = buildRateGroup(`disk_${dev}_time`, 'Latency', `Disk ${dev} — I/O Wait (ms/s)`, devRows,
-			['rd_ticks', 'wr_ticks', 'io_ticks', 'time_in_queue'], 'count', runStartMs, 1, L, D);
+		const g4 = buildHostDerivedRateGroup(`disk_${dev}_busy`, 'Busy %', `Disk ${dev} — Device Busy %`,
+			devRows, [
+				{
+					label: 'Device busy %',
+					description: 'Percentage of wall-clock time the device had at least one I/O in flight (io_ticks / elapsed_ms × 100). Capped at 100%.',
+					valueFn: (cur, prev, dt) => {
+						const dTicks = Number(cur.io_ticks) - Number(prev.io_ticks);
+						return Math.min(100, (dTicks / (dt * 1000)) * 100);
+					},
+				},
+			], 'count', runStartMs);
+		const g4b_queue = buildHostDerivedRateGroup(`disk_${dev}_occupancy`, 'Queue Depth', `Disk ${dev} — Avg Queue Occupancy`,
+			devRows, [
+				{
+					label: 'Avg concurrent reads',
+					description: 'Average number of read I/Os in flight simultaneously (rd_ticks / elapsed_ms). Greater than 1 means parallel reads.',
+					valueFn: (cur, prev, dt) => {
+						const dTicks = Number(cur.rd_ticks) - Number(prev.rd_ticks);
+						return dTicks / (dt * 1000);
+					},
+				},
+				{
+					label: 'Avg concurrent writes',
+					description: 'Average number of write I/Os in flight simultaneously (wr_ticks / elapsed_ms). Greater than 1 means parallel writes.',
+					valueFn: (cur, prev, dt) => {
+						const dTicks = Number(cur.wr_ticks) - Number(prev.wr_ticks);
+						return dTicks / (dt * 1000);
+					},
+				},
+				{
+					label: 'Avg concurrent discards',
+					description: 'Average number of discard (TRIM) I/Os in flight simultaneously (dc_ticks / elapsed_ms).',
+					valueFn: (cur, prev, dt) => {
+						const dTicks = Number(cur.dc_ticks) - Number(prev.dc_ticks);
+						return dTicks / (dt * 1000);
+					},
+				},
+				{
+					label: 'Avg concurrent flushes',
+					description: 'Average number of flush (fsync) I/Os in flight simultaneously (fl_ticks / elapsed_ms).',
+					valueFn: (cur, prev, dt) => {
+						const dTicks = Number(cur.fl_ticks) - Number(prev.fl_ticks);
+						return dTicks / (dt * 1000);
+					},
+				},
+			], 'count', runStartMs);
 		pushChartMetric(chartMetrics, withChartGroup(g4, 'Block Devices', dev));
-		const g5 = buildRateGroup(`disk_${dev}_discard_flush`, 'Discard/Flush', `Disk ${dev} — Discard and Flush Activity`, devRows,
-			['dc_ios', 'dc_sectors', 'dc_ticks', 'fl_ios', 'fl_ticks'], 'count', runStartMs, 1, L, D);
-		pushChartMetric(chartMetrics, withChartGroup(g5, 'Block Devices', dev));
+		pushChartMetric(chartMetrics, withChartGroup(g4b_queue, 'Block Devices', dev));
+		const g4b = buildHostDerivedRateGroup(`disk_${dev}_latency`, 'Latency', `Disk ${dev} — Avg Latency (ms/op)`,
+			devRows, [
+				{
+					label: 'Read ms/op',
+					description: 'Average read latency per operation (rd_ticks / rd_ios) — only shown for intervals with at least one read I/O',
+					valueFn: (cur, prev) => {
+						const dIos = Number(cur.rd_ios) - Number(prev.rd_ios);
+						if (dIos <= 0) return null;
+						return (Number(cur.rd_ticks) - Number(prev.rd_ticks)) / dIos;
+					},
+				},
+				{
+					label: 'Write ms/op',
+					description: 'Average write latency per operation (wr_ticks / wr_ios) — only shown for intervals with at least one write I/O',
+					valueFn: (cur, prev) => {
+						const dIos = Number(cur.wr_ios) - Number(prev.wr_ios);
+						if (dIos <= 0) return null;
+						return (Number(cur.wr_ticks) - Number(prev.wr_ticks)) / dIos;
+					},
+				},
+				{
+					label: 'Discard ms/op',
+					description: 'Average discard (TRIM) latency per operation (dc_ticks / dc_ios) — only shown for intervals with at least one discard I/O',
+					valueFn: (cur, prev) => {
+						const dIos = Number(cur.dc_ios) - Number(prev.dc_ios);
+						if (dIos <= 0) return null;
+						return (Number(cur.dc_ticks) - Number(prev.dc_ticks)) / dIos;
+					},
+				},
+				{
+					label: 'Flush ms/op',
+					description: 'Average flush (fsync) latency per operation (fl_ticks / fl_ios) — only shown for intervals with at least one flush I/O',
+					valueFn: (cur, prev) => {
+						const dIos = Number(cur.fl_ios) - Number(prev.fl_ios);
+						if (dIos <= 0) return null;
+						return (Number(cur.fl_ticks) - Number(prev.fl_ticks)) / dIos;
+					},
+				},
+			], 'duration_ms', runStartMs);
+		pushChartMetric(chartMetrics, withChartGroup(g4b, 'Block Devices', dev));
 	}
 
 	// Network — per interface
