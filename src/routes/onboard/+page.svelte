@@ -86,6 +86,11 @@
 	let configureOutput = $state('');
 	let configureDone = $state(false);
 	let configureOk = $state<boolean | null>(null);
+	let trackIoTiming = $state(true);
+	let trackWalIoTiming = $state(true);
+	let trackActivities = $state(true);
+	let trackCounts = $state(true);
+	let trackFunctions = $state(false);
 
 	// Step 5
 	let clusterName = $state('DO Singapore');
@@ -184,6 +189,14 @@
 		}
 	}
 
+	async function installAllClientTools() {
+		for (const tool of ['mybench-runner', 'pgbench', 'sysbench'] as const) {
+			const s = clientInspect?.tools?.[tool];
+			if (s?.ok || installResults[`client:${tool}`]) continue;
+			await installClientTool(tool);
+		}
+	}
+
 	async function installClientTool(tool: 'mybench-runner' | 'pgbench' | 'sysbench') {
 		const key = `client:${tool}`;
 		installing = new Set([...installing, key]);
@@ -261,7 +274,12 @@
 				db_private_ip: dbPrivateIp.trim(),
 				client_private_ip: clientPrivateIp.trim(),
 				db_user: pgUser, db_pass: pgPass, db_name: pgDb,
-				tune_config: tuneConfig.trim() || null
+				tune_config: tuneConfig.trim() || null,
+				track_io_timing: trackIoTiming,
+				track_wal_io_timing: trackWalIoTiming,
+				track_activities: trackActivities,
+				track_counts: trackCounts,
+				track_functions: trackFunctions
 			}, (line) => { configureOutput += line + '\n'; });
 			configureOk = ok;
 			configureDone = true;
@@ -460,7 +478,16 @@
 				<div class="droplet-grid">
 					<!-- Client tools -->
 					<div class="droplet-card">
-						<div class="droplet-label">Client Droplet</div>
+						<div class="droplet-label">
+							Client Droplet
+							{#if clientInspect?.ok && ['mybench-runner', 'pgbench', 'sysbench'].some(t => !clientInspect?.tools?.[t]?.ok && !installResults[`client:${t}`])}
+								<button style="margin-left:auto; font-size:12px"
+									disabled={[...installing].some(k => k.startsWith('client:'))}
+									onclick={installAllClientTools}>
+									{[...installing].some(k => k.startsWith('client:')) ? 'Installing…' : 'Install All'}
+								</button>
+							{/if}
+						</div>
 						{#if clientInspect?.ok}
 							{#each ['mybench-runner', 'pgbench', 'sysbench'] as tool}
 								{@const s = clientInspect.tools?.[tool]}
@@ -644,6 +671,41 @@
 					></textarea>
 					<p style="font-size:11px; color:#888; margin:4px 0 0">Written to <code>conf.d/mybench-tune.conf</code>. Delete that file to revert. Clear the box above to skip.</p>
 				{/if}
+			</div>
+
+			<!-- Statistics Settings -->
+			<div class="tune-section" style="margin-top:12px">
+				<div class="tune-header">
+					<strong>Statistics Settings</strong>
+					<span style="color:#666; font-size:12px">Applied via <code>ALTER SYSTEM SET</code> after restart</span>
+				</div>
+				<div class="stats-checks">
+					<label class="check-row">
+						<input type="checkbox" checked={trackIoTiming} onchange={(e) => trackIoTiming = e.currentTarget.checked} />
+						<code>track_io_timing</code>
+						<span class="check-desc">Times I/O calls — adds latency to pg_statio_* views. Recommended.</span>
+					</label>
+					<label class="check-row">
+						<input type="checkbox" checked={trackWalIoTiming} onchange={(e) => trackWalIoTiming = e.currentTarget.checked} />
+						<code>track_wal_io_timing</code>
+						<span class="check-desc">Times WAL write/sync — reveals write amplification differences. Recommended.</span>
+					</label>
+					<label class="check-row">
+						<input type="checkbox" checked={trackActivities} onchange={(e) => trackActivities = e.currentTarget.checked} />
+						<code>track_activities</code>
+						<span class="check-desc">Tracks currently-executing queries (PostgreSQL default: on).</span>
+					</label>
+					<label class="check-row">
+						<input type="checkbox" checked={trackCounts} onchange={(e) => trackCounts = e.currentTarget.checked} />
+						<code>track_counts</code>
+						<span class="check-desc">Row-level stats in pg_stat_user_tables, required for autovacuum (PostgreSQL default: on).</span>
+					</label>
+					<label class="check-row">
+						<input type="checkbox" checked={trackFunctions} onchange={(e) => trackFunctions = e.currentTarget.checked} />
+						<code>track_functions</code>
+						<span class="check-desc">PL/pgSQL function call counts and timing. Enable if your design uses stored procedures.</span>
+					</label>
+				</div>
 			</div>
 
 			{#if !configureDone}
@@ -885,5 +947,23 @@
 		font-size: 12px;
 		line-height: 1.5;
 		box-sizing: border-box;
+	}
+
+	.stats-checks {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		margin-top: 10px;
+	}
+	.check-row {
+		display: flex;
+		align-items: baseline;
+		gap: 8px;
+		font-size: 13px;
+		cursor: pointer;
+	}
+	.check-desc {
+		color: #666;
+		font-size: 12px;
 	}
 </style>

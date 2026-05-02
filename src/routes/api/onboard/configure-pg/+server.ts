@@ -8,7 +8,8 @@ function buildConfigureCmd(
 	dbUser: string,
 	dbPass: string,
 	dbName: string,
-	tuneConfig: string | null
+	tuneConfig: string | null,
+	statsSettings: { trackIoTiming: boolean; trackWalIoTiming: boolean; trackActivities: boolean; trackCounts: boolean; trackFunctions: boolean }
 ): string {
 	// Escape single quotes in password by ending quote, adding escaped quote, reopening
 	const escapedPass = dbPass.replace(/'/g, "'\\''");
@@ -77,6 +78,16 @@ sudo systemctl restart postgresql
 echo "PostgreSQL restarted successfully."
 
 echo ""
+echo "==> Applying statistics settings..."
+sudo -u postgres psql -c "ALTER SYSTEM SET track_io_timing = ${statsSettings.trackIoTiming ? 'on' : 'off'};"
+sudo -u postgres psql -c "ALTER SYSTEM SET track_wal_io_timing = ${statsSettings.trackWalIoTiming ? 'on' : 'off'};"
+sudo -u postgres psql -c "ALTER SYSTEM SET track_activities = ${statsSettings.trackActivities ? 'on' : 'off'};"
+sudo -u postgres psql -c "ALTER SYSTEM SET track_counts = ${statsSettings.trackCounts ? 'on' : 'off'};"
+sudo -u postgres psql -c "ALTER SYSTEM SET track_functions = '${statsSettings.trackFunctions ? 'all' : 'none'}';"
+sudo -u postgres psql -c "SELECT pg_reload_conf();"
+echo "Statistics settings applied."
+
+echo ""
 echo "==> Configuring UFW: ensuring SSH stays open, then allowing port 5432..."
 sudo ufw allow ssh comment 'SSH access'
 sudo ufw allow from ${clientPrivateIp} to any port 5432 comment 'mybench client VPC'
@@ -112,7 +123,8 @@ echo "==> Configuration complete!"
  */
 export const POST: RequestHandler = async ({ request }) => {
 	const body = await request.json();
-	const { host, user, private_key, db_private_ip, client_private_ip, db_user, db_pass, db_name, tune_config } = body;
+	const { host, user, private_key, db_private_ip, client_private_ip, db_user, db_pass, db_name, tune_config,
+		track_io_timing, track_wal_io_timing, track_activities, track_counts, track_functions } = body;
 	if (!host) throw error(400, 'host is required');
 	if (!private_key) throw error(400, 'private_key is required');
 	if (!db_private_ip) throw error(400, 'db_private_ip is required');
@@ -120,7 +132,14 @@ export const POST: RequestHandler = async ({ request }) => {
 	if (!db_pass) throw error(400, 'db_pass is required');
 
 	const server = { id: 0, name: '', host, user: user ?? 'root', port: 22, private_key, remote_dir: '~', log_dir: '/tmp', vpc: '' };
-	const cmd = buildConfigureCmd(db_private_ip, client_private_ip, db_user ?? 'mybench', db_pass, db_name ?? 'mybench', tune_config ?? null);
+	const statsSettings = {
+		trackIoTiming: track_io_timing !== false,
+		trackWalIoTiming: track_wal_io_timing !== false,
+		trackActivities: track_activities !== false,
+		trackCounts: track_counts !== false,
+		trackFunctions: track_functions === true
+	};
+	const cmd = buildConfigureCmd(db_private_ip, client_private_ip, db_user ?? 'mybench', db_pass, db_name ?? 'mybench', tune_config ?? null, statsSettings);
 
 	const stream = new ReadableStream({
 		async start(controller) {
