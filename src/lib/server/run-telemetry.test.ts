@@ -120,13 +120,20 @@ function createDb() {
       context TEXT,
       reads INTEGER,
       read_bytes INTEGER,
+      read_time REAL,
       writes INTEGER,
       write_bytes INTEGER,
+      write_time REAL,
+      writebacks INTEGER,
+      writeback_time REAL,
       extends INTEGER,
       extend_bytes INTEGER,
+      extend_time REAL,
       hits INTEGER,
       evictions INTEGER,
-      fsyncs INTEGER
+      reuses INTEGER,
+      fsyncs INTEGER,
+      fsync_time REAL
     );
     CREATE TABLE snap_pg_statio_user_tables (
       _id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -234,11 +241,16 @@ function seedRun(db: Database.Database) {
 	insertCheckpointerRow.run(1, '2026-03-30T05:58:19Z', 'bench', 5, 3, 1, 1, 1, 180, 35, 520, '2026-03-30T05:00:00Z');
 
 	const insertIoRow = db.prepare(`
-    INSERT INTO snap_pg_stat_io (_run_id, _collected_at, _phase, backend_type, object, context, reads, read_bytes, writes, write_bytes, extends, extend_bytes, hits, evictions, fsyncs)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO snap_pg_stat_io (
+      _run_id, _collected_at, _phase, backend_type, object, context,
+      reads, read_bytes, read_time, writes, write_bytes, write_time,
+      writebacks, writeback_time, extends, extend_bytes, extend_time,
+      hits, evictions, reuses, fsyncs, fsync_time
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
-	insertIoRow.run(1, '2026-03-30T05:57:59Z', 'bench', 'client backend', 'relation', 'normal', 10, 81920, 4, 32768, 1, 8192, 20, 2, 1);
-	insertIoRow.run(1, '2026-03-30T05:58:19Z', 'bench', 'client backend', 'relation', 'normal', 15, 122880, 7, 57344, 3, 24576, 25, 5, 2);
+	insertIoRow.run(1, '2026-03-30T05:57:59Z', 'bench', 'client backend', 'relation', 'normal', 10, 81920, 20, 4, 32768, 12, 1, 4, 1, 8192, 3, 20, 2, 1, 1, 5);
+	insertIoRow.run(1, '2026-03-30T05:58:19Z', 'bench', 'client backend', 'relation', 'normal', 15, 122880, 40, 7, 57344, 24, 3, 14, 3, 24576, 9, 25, 5, 2, 2, 11);
 
 	const insertStatioUserTableRow = db.prepare(`
     INSERT INTO snap_pg_statio_user_tables (_run_id, _collected_at, _phase, schemaname, relname, heap_blks_read, heap_blks_hit, toast_blks_read)
@@ -461,24 +473,13 @@ describe('buildRunTelemetry', () => {
 		const io = telemetry.sections.find((section) => section.key === 'io');
 
 		expect(database?.chartSeries.map((series) => series.label)).toEqual([
-			'transactions',
-			'commits',
-			'rollbacks',
-			'blocks read',
-			'blocks hit',
-			'temp bytes',
-			'deadlocks',
-			'⟳ cache hit rate',
-			'⟳ rollback rate'
+			'total/s',
+			'commits/s',
+			'rollbacks/s'
 		]);
 		expect(telemetry.sections.some((section) => section.key === 'database_conflicts')).toBe(false);
 		expect(wal?.chartSeries.map((series) => series.label)).toEqual([
-			'wal bytes',
-			'wal records',
-			'full page images',
-			'wal buffers full',
-			'⟳ FPI ratio (fpi / records)',
-			'⟳ avg WAL bytes / record'
+			'wal bytes/s'
 		]);
 		expect(wal?.summary.map((card) => card.key)).toEqual([
 			'wal_bytes',
@@ -500,16 +501,8 @@ describe('buildRunTelemetry', () => {
 		expect(wal?.tableSnapshots?.[0]?.rows.find((row) => row.metric === 'WAL bytes')?.value).toBe(0);
 		expect(wal?.tableSnapshots?.[1]?.rows.find((row) => row.metric === 'WAL bytes')?.value).toBe(1200);
 
-		expect(io?.summary.map((card) => [card.key, card.value])).toEqual([
-			['reads', 5],
-			['read_bytes', 40960],
-			['writes', 3],
-			['write_bytes', 24576],
-			['extend_bytes', 16384],
-			['evictions', 3],
-			['fsyncs', 1]
-		]);
-		expect(io?.chartMetrics?.map((metric) => metric.key)).toEqual([
+		expect(io?.summary).toEqual([]);
+		expect(io?.chartMetrics?.map((metric) => metric.key)).toEqual(expect.arrayContaining([
 			'read_bytes',
 			'reads',
 			'write_bytes',
@@ -519,8 +512,27 @@ describe('buildRunTelemetry', () => {
 			'hits',
 			'evictions',
 			'fsyncs',
-			'read_miss_ratio'
-		]);
+			'read_time',
+			'write_time',
+			'writebacks',
+			'reuses',
+			'avg_read_time_ms',
+			'avg_write_time_ms',
+			'read_miss_ratio',
+			'cache_hit_rate',
+			'evictions_per_write',
+			'fsyncs_per_write',
+			'write_byte_share',
+			'reuse_ratio',
+			'io_time_mix'
+		]));
+		expect(io?.chartMetrics?.find((metric) => metric.key === 'read_bytes')?.group).toBe('Data Volume');
+		expect(io?.chartMetrics?.find((metric) => metric.key === 'avg_read_time_ms')?.group).toBe('Latency');
+		expect(io?.chartMetrics?.find((metric) => metric.key === 'read_miss_ratio')?.group).toBe('Buffer Pressure');
+		expect(io?.chartMetrics?.find((metric) => metric.key === 'fsyncs_per_write')?.group).toBe('Writeback & Sync');
+		expect(io?.chartMetrics?.find((metric) => metric.key === 'write_byte_share')?.group).toBe('I/O Mix');
+		expect(io?.chartMetrics?.find((metric) => metric.key === 'read_bytes')?.description).toContain('Source: pg_stat_io.read_bytes');
+		expect(io?.chartMetrics?.find((metric) => metric.key === 'avg_read_time_ms')?.description).toContain('Uses: read_time / reads');
 		expect(io?.tableRows).toEqual([
 			{
 				group: 'client backend/relation/normal',
@@ -593,9 +605,9 @@ describe('buildRunTelemetry', () => {
 		]);
 		expect(userTables?.chartMetrics?.map((metric) => metric.key)).toEqual([
 			'writes',
+			'dead_tuple_growth',
 			'seq_scan_ratio',
 			'hot_update_ratio',
-			'dead_tuple_growth',
 			'index_scan_ratio'
 		]);
 	});

@@ -297,6 +297,8 @@
               type="button"
               class="chart-metric-chip"
               class:active={activeChartMetric?.key === metric.key}
+              title={metric.description ?? metric.title}
+              aria-label={metric.description ? `${metric.label}: ${metric.description}` : metric.label}
               onclick={() => selectedChartMetricKey = metric.key}
             >{metric.label}</button>
           {/each}

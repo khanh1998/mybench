@@ -30,6 +30,7 @@ export interface TelemetrySeries {
 export interface TelemetryChartMetric {
   key: string;
   label: string;
+  description?: string;
   kind: TelemetryValueKind;
   title: string;
   series: TelemetrySeries[];

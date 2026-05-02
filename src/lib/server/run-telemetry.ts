@@ -33,6 +33,7 @@ export interface TelemetrySeries {
 export interface TelemetryChartMetric {
 	key: string;
 	label: string;
+	description?: string;
 	kind: TelemetryValueKind;
 	title: string;
 	series: TelemetrySeries[];
@@ -449,8 +450,10 @@ function buildGroupedMetricCharts<T extends { key: string; label: string; rows: 
 	metrics: Array<{
 		key: string;
 		label: string;
+		description?: string;
 		kind: TelemetryValueKind;
 		title: string;
+		group?: string;
 		category?: 'raw' | 'derived';
 		scoreFn: (entry: T) => number | null;
 		seriesValueAt: (rows: SnapshotRow[], index: number) => number | null;
@@ -480,8 +483,10 @@ function buildGroupedMetricCharts<T extends { key: string; label: string; rows: 
 			return {
 				key: metric.key,
 				label: metric.label,
+				description: metric.description,
 				kind: metric.kind,
 				title: metric.title,
+				group: metric.group,
 				category: metric.category,
 				series,
 				rawSeries: rawSeries?.length ? rawSeries : undefined,
@@ -1362,6 +1367,38 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 		};
 	}
 
+	const IO_GROUP = {
+		volume: 'Data Volume',
+		operations: 'Operations',
+		latency: 'Latency',
+		buffer: 'Buffer Pressure',
+		sync: 'Writeback & Sync',
+		growth: 'Relation Growth',
+		mix: 'I/O Mix'
+	} as const;
+	const PG_STAT_IO_DOCS = {
+		reads: 'Number of read operations.',
+		read_bytes: 'Total size of read operations in bytes.',
+		read_time: 'Time spent waiting for read operations in milliseconds.',
+		writes: 'Number of write operations.',
+		write_bytes: 'Total size of write operations in bytes.',
+		write_time: 'Time spent waiting for write operations in milliseconds.',
+		writebacks: 'Units of size BLCKSZ that PostgreSQL requested the kernel write out to permanent storage.',
+		writeback_time: 'Time spent waiting for writeback operations in milliseconds.',
+		extends: 'Number of relation extend operations.',
+		extend_bytes: 'Total size of relation extend operations in bytes.',
+		extend_time: 'Time spent waiting for extend operations in milliseconds.',
+		hits: 'Times a desired block was found in a shared buffer.',
+		evictions: 'Times a block was written out from a shared or local buffer to make it available for another use.',
+		reuses: 'Times an existing buffer in a size-limited ring buffer outside shared buffers was reused.',
+		fsyncs: 'Number of fsync calls.',
+		fsync_time: 'Time spent waiting for fsync operations in milliseconds.'
+	} as const;
+	const ioSource = (columns: string[]) => `Source: pg_stat_io.${columns.join(', pg_stat_io.')}.`;
+	const ioRateDescription = (description: string, columns: string[]) => `${description} Shown as a per second delta for each backend_type/object/context series. ${ioSource(columns)}`;
+	const ioRawDescription = (description: string, columns: string[]) => `${description} Raw view shows the cumulative delta since the first selected sample for each backend_type/object/context series. ${ioSource(columns)}`;
+	const ioDerivedDescription = (description: string, uses: string) => `${description} Uses: ${uses}.`;
+
 	const grouped = groupRows(rows, (row) => `${row.backend_type ?? 'unknown'}|${row.object ?? 'unknown'}|${row.context ?? 'unknown'}`);
 	const entries = [...grouped.entries()].map(([key, bucket]) => {
 		const [backend_type, object, context] = key.split('|');
@@ -1408,8 +1445,10 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 		{
 			key: 'read_bytes',
 			label: 'Read Bytes',
+			description: ioRateDescription(PG_STAT_IO_DOCS.read_bytes, ['read_bytes']),
 			kind: 'bytes',
 			title: 'Top IO groups by read bytes over time',
+			group: IO_GROUP.volume,
 			category: 'raw',
 			scoreFn: (entry) => entry.readBytes,
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'read_bytes'), elapsedSecondsAt(groupRows, index)),
@@ -1418,8 +1457,10 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 		{
 			key: 'reads',
 			label: 'Reads',
+			description: ioRateDescription(PG_STAT_IO_DOCS.reads, ['reads']),
 			kind: 'count',
 			title: 'Top IO groups by reads over time',
+			group: IO_GROUP.operations,
 			category: 'raw',
 			scoreFn: (entry) => entry.reads,
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'reads'), elapsedSecondsAt(groupRows, index)),
@@ -1428,8 +1469,10 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 		{
 			key: 'write_bytes',
 			label: 'Write Bytes',
+			description: ioRateDescription(PG_STAT_IO_DOCS.write_bytes, ['write_bytes']),
 			kind: 'bytes',
 			title: 'Top IO groups by write bytes over time',
+			group: IO_GROUP.volume,
 			category: 'raw',
 			scoreFn: (entry) => entry.writeBytes,
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'write_bytes'), elapsedSecondsAt(groupRows, index)),
@@ -1438,8 +1481,10 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 		{
 			key: 'writes',
 			label: 'Writes',
+			description: ioRateDescription(PG_STAT_IO_DOCS.writes, ['writes']),
 			kind: 'count',
 			title: 'Top IO groups by writes over time',
+			group: IO_GROUP.operations,
 			category: 'raw',
 			scoreFn: (entry) => entry.writes,
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'writes'), elapsedSecondsAt(groupRows, index)),
@@ -1448,8 +1493,10 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 		{
 			key: 'extend_bytes',
 			label: 'Extend Bytes',
+			description: ioRateDescription(PG_STAT_IO_DOCS.extend_bytes, ['extend_bytes']),
 			kind: 'bytes',
 			title: 'Top IO groups by extend bytes over time',
+			group: IO_GROUP.growth,
 			category: 'raw',
 			scoreFn: (entry) => entry.extendBytes,
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'extend_bytes'), elapsedSecondsAt(groupRows, index)),
@@ -1458,8 +1505,10 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 		{
 			key: 'extends',
 			label: 'Extends',
+			description: ioRateDescription(PG_STAT_IO_DOCS.extends, ['extends']),
 			kind: 'count',
 			title: 'Top IO groups by extends over time',
+			group: IO_GROUP.growth,
 			category: 'raw',
 			scoreFn: (entry) => entry.extends,
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'extends'), elapsedSecondsAt(groupRows, index)),
@@ -1468,8 +1517,10 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 		{
 			key: 'hits',
 			label: 'Hits',
+			description: ioRateDescription(PG_STAT_IO_DOCS.hits, ['hits']),
 			kind: 'count',
 			title: 'Top IO groups by hits over time',
+			group: IO_GROUP.buffer,
 			category: 'raw',
 			scoreFn: (entry) => entry.hits,
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'hits'), elapsedSecondsAt(groupRows, index)),
@@ -1478,8 +1529,10 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 		{
 			key: 'evictions',
 			label: 'Evictions',
+			description: ioRateDescription(PG_STAT_IO_DOCS.evictions, ['evictions']),
 			kind: 'count',
 			title: 'Top IO groups by evictions over time',
+			group: IO_GROUP.buffer,
 			category: 'raw',
 			scoreFn: (entry) => entry.evictions,
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'evictions'), elapsedSecondsAt(groupRows, index)),
@@ -1488,8 +1541,10 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 		{
 			key: 'fsyncs',
 			label: 'FSyncs',
+			description: ioRateDescription(PG_STAT_IO_DOCS.fsyncs, ['fsyncs']),
 			kind: 'count',
 			title: 'Top IO groups by fsyncs over time',
+			group: IO_GROUP.sync,
 			category: 'raw',
 			scoreFn: (entry) => entry.fsyncs,
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'fsyncs'), elapsedSecondsAt(groupRows, index)),
@@ -1498,8 +1553,10 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 		{
 			key: 'read_time',
 			label: 'Read Time (ms)',
+			description: ioRateDescription(PG_STAT_IO_DOCS.read_time, ['read_time']),
 			kind: 'duration_ms',
 			title: 'Top IO groups by read time over time',
+			group: IO_GROUP.latency,
 			category: 'raw',
 			scoreFn: (entry) => entry.readTime,
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'read_time'), elapsedSecondsAt(groupRows, index)),
@@ -1508,8 +1565,10 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 		{
 			key: 'write_time',
 			label: 'Write Time (ms)',
+			description: ioRateDescription(PG_STAT_IO_DOCS.write_time, ['write_time']),
 			kind: 'duration_ms',
 			title: 'Top IO groups by write time over time',
+			group: IO_GROUP.latency,
 			category: 'raw',
 			scoreFn: (entry) => entry.writeTime,
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'write_time'), elapsedSecondsAt(groupRows, index)),
@@ -1518,8 +1577,10 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 		{
 			key: 'extend_time',
 			label: 'Extend Time (ms)',
+			description: ioRateDescription(PG_STAT_IO_DOCS.extend_time, ['extend_time']),
 			kind: 'duration_ms',
 			title: 'Top IO groups by extend time over time',
+			group: IO_GROUP.growth,
 			category: 'raw',
 			scoreFn: (entry) => entry.extendTime,
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'extend_time'), elapsedSecondsAt(groupRows, index)),
@@ -1528,8 +1589,10 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 		{
 			key: 'fsync_time',
 			label: 'FSync Time (ms)',
+			description: ioRateDescription(PG_STAT_IO_DOCS.fsync_time, ['fsync_time']),
 			kind: 'duration_ms',
 			title: 'Top IO groups by fsync time over time',
+			group: IO_GROUP.sync,
 			category: 'raw',
 			scoreFn: (entry) => entry.fsyncTime,
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'fsync_time'), elapsedSecondsAt(groupRows, index)),
@@ -1538,8 +1601,10 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 		{
 			key: 'writebacks',
 			label: 'Writebacks',
+			description: ioRateDescription(PG_STAT_IO_DOCS.writebacks, ['writebacks']),
 			kind: 'count',
 			title: 'Top IO groups by writebacks over time',
+			group: IO_GROUP.sync,
 			category: 'raw',
 			scoreFn: (entry) => entry.writebacks,
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'writebacks'), elapsedSecondsAt(groupRows, index)),
@@ -1548,8 +1613,10 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 		{
 			key: 'reuses',
 			label: 'Reuses',
+			description: ioRateDescription(PG_STAT_IO_DOCS.reuses, ['reuses']),
 			kind: 'count',
 			title: 'Top IO groups by buffer reuses over time',
+			group: IO_GROUP.buffer,
 			category: 'raw',
 			scoreFn: (entry) => entry.reuses,
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'reuses'), elapsedSecondsAt(groupRows, index)),
@@ -1557,45 +1624,66 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 		},
 		{
 			key: 'avg_read_time_ms',
-			label: '⟳ Avg Read Time (ms)',
+			label: 'Avg Read Time (ms)',
+			description: ioDerivedDescription('Average read wait time per read operation; useful for spotting read latency roots by backend/object/context.', 'read_time / reads'),
 			kind: 'duration_ms',
 			title: 'Average time per read operation over time',
+			group: IO_GROUP.latency,
 			category: 'derived',
 			scoreFn: (entry) => safeRatio(entry.readTime, entry.reads),
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'read_time'), deltaAt(groupRows, index, 'reads'))
 		},
 		{
 			key: 'avg_write_time_ms',
-			label: '⟳ Avg Write Time (ms)',
+			label: 'Avg Write Time (ms)',
+			description: ioDerivedDescription('Average write wait time per write operation; high values point to write path latency.', 'write_time / writes'),
 			kind: 'duration_ms',
 			title: 'Average time per write operation over time',
+			group: IO_GROUP.latency,
 			category: 'derived',
 			scoreFn: (entry) => safeRatio(entry.writeTime, entry.writes),
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'write_time'), deltaAt(groupRows, index, 'writes'))
 		},
 		{
 			key: 'avg_fsync_time_ms',
-			label: '⟳ Avg FSync Time (ms)',
+			label: 'Avg FSync Time (ms)',
+			description: ioDerivedDescription('Average fsync wait time per fsync call; high values indicate sync latency or storage flush pressure.', 'fsync_time / fsyncs'),
 			kind: 'duration_ms',
 			title: 'Average time per fsync call over time',
+			group: IO_GROUP.sync,
 			category: 'derived',
 			scoreFn: (entry) => safeRatio(entry.fsyncTime, entry.fsyncs),
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'fsync_time'), deltaAt(groupRows, index, 'fsyncs'))
 		},
 		{
 			key: 'read_miss_ratio',
-			label: '⟳ Read Miss Ratio',
+			label: 'Read Miss Ratio',
+			description: ioDerivedDescription('Share of buffer access that required a read operation; rising values suggest cache misses or cold reads.', 'reads / (reads + hits)'),
 			kind: 'percent',
 			title: 'Cache miss rate (reads / (reads + hits)) over time — lower is better',
+			group: IO_GROUP.buffer,
 			category: 'derived',
 			scoreFn: (entry) => safeRatio(entry.reads, sum([entry.reads, entry.hits])),
 			seriesValueAt: (groupRows, index) => ratioAt(groupRows, index, 'reads', ['reads', 'hits'])
 		},
 		{
+			key: 'cache_hit_rate',
+			label: 'Cache Hit Rate',
+			description: ioDerivedDescription('Share of desired blocks found in shared buffers; lower values point toward cold reads or working-set pressure.', 'hits / (hits + reads)'),
+			kind: 'percent',
+			title: 'Buffer cache hit rate by IO group over time',
+			group: IO_GROUP.buffer,
+			category: 'derived',
+			scoreFn: (entry) => safeRatio(entry.hits, sum([entry.hits, entry.reads])),
+			seriesValueAt: (groupRows, index) => ratioAt(groupRows, index, 'hits', ['hits', 'reads'])
+		},
+		{
 			key: 'writeback_time',
 			label: 'Writeback Time (ms)',
+			description: ioRateDescription(PG_STAT_IO_DOCS.writeback_time, ['writeback_time']),
 			kind: 'duration_ms',
 			title: 'Top IO groups by writeback time over time',
+			group: IO_GROUP.sync,
 			category: 'raw',
 			scoreFn: (entry) => entry.writebackTime,
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'writeback_time'), elapsedSecondsAt(groupRows, index)),
@@ -1603,72 +1691,143 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 		},
 		{
 			key: 'avg_writeback_time_ms',
-			label: '⟳ Avg Writeback Time (ms)',
+			label: 'Avg Writeback Time (ms)',
+			description: ioDerivedDescription('Average time spent waiting for kernel writeback requests; useful for OS page-cache pressure.', 'writeback_time / writebacks'),
 			kind: 'duration_ms',
 			title: 'Average time per writeback operation over time',
+			group: IO_GROUP.sync,
 			category: 'derived',
 			scoreFn: (entry) => safeRatio(entry.writebackTime, entry.writebacks),
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'writeback_time'), deltaAt(groupRows, index, 'writebacks'))
 		},
 		{
 			key: 'avg_extend_time_ms',
-			label: '⟳ Avg Extend Time (ms)',
+			label: 'Avg Extend Time (ms)',
+			description: ioDerivedDescription('Average wait time per relation extend operation; high values can make table or index growth expensive.', 'extend_time / extends'),
 			kind: 'duration_ms',
 			title: 'Average time per extend operation over time',
+			group: IO_GROUP.growth,
 			category: 'derived',
 			scoreFn: (entry) => safeRatio(entry.extendTime, entry.extends),
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'extend_time'), deltaAt(groupRows, index, 'extends'))
 		},
 		{
 			key: 'avg_read_size',
-			label: '⟳ Avg Read Size',
+			label: 'Avg Read Size',
+			description: ioDerivedDescription('Average bytes per read operation; helps distinguish many small reads from larger read batches.', 'read_bytes / reads'),
 			kind: 'bytes',
 			title: 'Average bytes per read operation over time',
+			group: IO_GROUP.volume,
 			category: 'derived',
 			scoreFn: (entry) => safeRatio(entry.readBytes, entry.reads),
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'read_bytes'), deltaAt(groupRows, index, 'reads'))
 		},
 		{
 			key: 'avg_write_size',
-			label: '⟳ Avg Write Size',
+			label: 'Avg Write Size',
+			description: ioDerivedDescription('Average bytes per write operation; helps distinguish many small writes from larger write batches.', 'write_bytes / writes'),
 			kind: 'bytes',
 			title: 'Average bytes per write operation over time',
+			group: IO_GROUP.volume,
 			category: 'derived',
 			scoreFn: (entry) => safeRatio(entry.writeBytes, entry.writes),
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'write_bytes'), deltaAt(groupRows, index, 'writes'))
 		},
 		{
 			key: 'avg_extend_size',
-			label: '⟳ Avg Extend Size',
+			label: 'Avg Extend Size',
+			description: ioDerivedDescription('Average bytes per relation extend operation; indicates relation growth chunk size.', 'extend_bytes / extends'),
 			kind: 'bytes',
 			title: 'Average bytes per extend operation over time',
+			group: IO_GROUP.growth,
 			category: 'derived',
 			scoreFn: (entry) => safeRatio(entry.extendBytes, entry.extends),
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'extend_bytes'), deltaAt(groupRows, index, 'extends'))
 		},
 		{
 			key: 'eviction_ratio',
-			label: '⟳ Eviction Ratio',
+			label: 'Eviction Ratio',
+			description: ioDerivedDescription('Evictions normalized by buffer access; high values indicate buffer churn or shared buffer pressure.', 'evictions / (hits + reads)'),
 			kind: 'percent',
 			title: 'Evictions as a fraction of total buffer accesses (reads + hits) — high means buffer pressure',
+			group: IO_GROUP.buffer,
 			category: 'derived',
 			scoreFn: (entry) => safeRatio(entry.evictions, sum([entry.hits, entry.reads])),
 			seriesValueAt: (groupRows, index) => ratioAt(groupRows, index, 'evictions', ['hits', 'reads'])
 		},
 		{
+			key: 'evictions_per_write',
+			label: 'Evictions / Write',
+			description: ioDerivedDescription('Evictions per write operation; useful when backend writes appear coupled with buffer replacement pressure.', 'evictions / writes'),
+			kind: 'count',
+			title: 'Evictions per write operation over time',
+			group: IO_GROUP.buffer,
+			category: 'derived',
+			scoreFn: (entry) => safeRatio(entry.evictions, entry.writes),
+			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'evictions'), deltaAt(groupRows, index, 'writes'))
+		},
+		{
 			key: 'writeback_ratio',
-			label: '⟳ Writebacks/Write',
+			label: 'Writebacks / Write',
+			description: ioDerivedDescription('Writeback requests per write operation; spikes can indicate dirty-page or OS page-cache pressure.', 'writebacks / writes'),
 			kind: 'count',
 			title: 'Writeback operations per write — spikes indicate OS page cache pressure',
+			group: IO_GROUP.sync,
 			category: 'derived',
 			scoreFn: (entry) => safeRatio(entry.writebacks, entry.writes),
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'writebacks'), deltaAt(groupRows, index, 'writes'))
 		},
 		{
+			key: 'fsyncs_per_write',
+			label: 'FSyncs / Write',
+			description: ioDerivedDescription('Fsync calls per write operation; high values, especially for client backends, can indicate sync/checkpoint path pressure.', 'fsyncs / writes'),
+			kind: 'count',
+			title: 'Fsync calls per write operation over time',
+			group: IO_GROUP.sync,
+			category: 'derived',
+			scoreFn: (entry) => safeRatio(entry.fsyncs, entry.writes),
+			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'fsyncs'), deltaAt(groupRows, index, 'writes'))
+		},
+		{
+			key: 'fsync_time_per_write',
+			label: 'FSync Time / Write',
+			description: ioDerivedDescription('Fsync wait time normalized by writes; highlights sync cost paid per write operation.', 'fsync_time / writes'),
+			kind: 'duration_ms',
+			title: 'Fsync time per write operation over time',
+			group: IO_GROUP.sync,
+			category: 'derived',
+			scoreFn: (entry) => safeRatio(entry.fsyncTime, entry.writes),
+			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'fsync_time'), deltaAt(groupRows, index, 'writes'))
+		},
+		{
+			key: 'write_byte_share',
+			label: 'Write Byte Share',
+			description: ioDerivedDescription('Write-like bytes as a share of total IO bytes; helps separate read-heavy from write/growth-heavy pressure.', '(write_bytes + extend_bytes) / (read_bytes + write_bytes + extend_bytes)'),
+			kind: 'percent',
+			title: 'Write-like bytes as share of total IO bytes over time',
+			group: IO_GROUP.mix,
+			category: 'derived',
+			scoreFn: (entry) => safeRatio(sum([entry.writeBytes, entry.extendBytes]), sum([entry.readBytes, entry.writeBytes, entry.extendBytes])),
+			seriesValueAt: (groupRows, index) => safeRatio(sumDeltaAt(groupRows, index, ['write_bytes', 'extend_bytes']), sumDeltaAt(groupRows, index, ['read_bytes', 'write_bytes', 'extend_bytes']))
+		},
+		{
+			key: 'reuse_ratio',
+			label: 'Reuse Ratio',
+			description: ioDerivedDescription('Ring-buffer reuses normalized by IO operations; useful for bulkread, bulkwrite, and vacuum contexts.', 'reuses / (reads + writes + extends)'),
+			kind: 'percent',
+			title: 'Buffer reuse ratio over time',
+			group: IO_GROUP.buffer,
+			category: 'derived',
+			scoreFn: (entry) => safeRatio(entry.reuses, sum([entry.reads, entry.writes, entry.extends])),
+			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'reuses'), sumDeltaAt(groupRows, index, ['reads', 'writes', 'extends']))
+		},
+		{
 			key: 'extend_vs_write_ratio',
-			label: '⟳ Extend vs Write Ratio',
+			label: 'Extend vs Write Ratio',
+			description: ioDerivedDescription('Relation extends as a share of write-like operations; high values mean workload time is tied to growth/allocation.', 'extends / (writes + extends)'),
 			kind: 'percent',
 			title: 'Extends as a fraction of write-like ops (writes + extends) — high means heavy table growth',
+			group: IO_GROUP.growth,
 			category: 'derived',
 			scoreFn: (entry) => safeRatio(entry.extends, sum([entry.writes, entry.extends])),
 			seriesValueAt: (groupRows, index) => ratioAt(groupRows, index, 'extends', ['writes', 'extends'])
@@ -1718,7 +1877,16 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 	const allChartMetrics: TelemetryChartMetric[] = [
 		...chartMetrics,
 		...(ioTimeMixSeries.length > 0
-			? [{ key: 'io_time_mix', label: '⟳ IO Time Mix', kind: 'percent' as const, title: 'IO time breakdown — fraction of total IO time per component', category: 'derived' as const, series: ioTimeMixSeries }]
+			? [{
+				key: 'io_time_mix',
+				label: 'IO Time Mix',
+				description: ioDerivedDescription('Share of total IO wait time spent in each wait component, aggregated across IO groups.', 'each *_time / total IO time'),
+				kind: 'percent' as const,
+				title: 'IO time breakdown: fraction of total IO time per component',
+				group: IO_GROUP.mix,
+				category: 'derived' as const,
+				series: ioTimeMixSeries
+			}]
 			: [])
 	];
 
@@ -1726,15 +1894,7 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 		key: 'io',
 		label: 'IO',
 		status: 'ok',
-		summary: [
-			metricCard('reads', 'Reads', 'count', sum(entries.map((entry) => entry.reads))),
-			metricCard('read_bytes', 'Read Bytes', 'bytes', sum(entries.map((entry) => entry.readBytes))),
-			metricCard('writes', 'Writes', 'count', sum(entries.map((entry) => entry.writes))),
-			metricCard('write_bytes', 'Write Bytes', 'bytes', sum(entries.map((entry) => entry.writeBytes))),
-			metricCard('extend_bytes', 'Extend Bytes', 'bytes', sum(entries.map((entry) => entry.extendBytes))),
-			metricCard('evictions', 'Evictions', 'count', sum(entries.map((entry) => entry.evictions))),
-			metricCard('fsyncs', 'FSyncs', 'count', sum(entries.map((entry) => entry.fsyncs)))
-		],
+		summary: [],
 		chartTitle: allChartMetrics[0]?.title ?? 'Top IO groups by read bytes over time',
 		chartSeries: allChartMetrics[0]?.series ?? [],
 		chartMetrics: allChartMetrics,
@@ -4142,18 +4302,19 @@ export function buildRunTelemetry(db: Database.Database, runId: number, phases?:
 	const postMarker = toMs(run.post_started_at);
 	if (postMarker !== null) markers.push({ t: postMarker - runStartMs, label: 'post', color: '#e6531d' });
 
+	const databaseTransactions = sum([delta(databaseRows, 'xact_commit'), delta(databaseRows, 'xact_rollback')]);
+	const databaseTempBytes = delta(databaseRows, 'temp_bytes');
+	const databaseTps = safeRatio(databaseTransactions, elapsedSeconds(databaseRows));
+	const databaseBufferHitRatio = safeRatio(delta(databaseRows, 'blks_hit'), sum([delta(databaseRows, 'blks_hit'), delta(databaseRows, 'blks_read')]));
+
 	const heroCards: TelemetryCard[] = [
-		metricCard('transactions', 'Transactions', 'count', databaseSection.summary.find((card) => card.key === 'transactions')?.value ?? null),
-		metricCard('db_tps', 'DB-stat TPS', 'tps', databaseSection.summary.find((card) => card.key === 'tps')?.value ?? null),
-		metricCard('buffer_hit_ratio', 'Buffer Hit Ratio', 'percent', databaseSection.summary.find((card) => card.key === 'buffer_hit_ratio')?.value ?? null),
+		metricCard('transactions', 'Transactions', 'count', databaseTransactions),
+		metricCard('db_tps', 'DB-stat TPS', 'tps', databaseTps),
+		metricCard('buffer_hit_ratio', 'Buffer Hit Ratio', 'percent', databaseBufferHitRatio),
 		metricCard('wal_bytes', 'WAL Bytes', 'bytes', walSection.summary.find((card) => card.key === 'wal_bytes')?.value ?? null),
 		metricCard('wal_per_tx', 'WAL / Tx', 'bytes', walSection.summary.find((card) => card.key === 'wal_bytes_per_tx')?.value ?? null),
-		metricCard('temp_bytes', 'Temp Bytes', 'bytes', databaseSection.summary.find((card) => card.key === 'temp_bytes')?.value ?? null),
-		metricCard('temp_bytes_per_tx', 'Temp / Tx', 'bytes', (() => {
-			const tmp = toNumber(databaseSection.summary.find((card) => card.key === 'temp_bytes')?.value);
-			const tx = toNumber(databaseSection.summary.find((card) => card.key === 'transactions')?.value);
-			return tmp !== null && tx !== null && tx > 0 ? tmp / tx : null;
-		})()),
+		metricCard('temp_bytes', 'Temp Bytes', 'bytes', databaseTempBytes),
+		metricCard('temp_bytes_per_tx', 'Temp / Tx', 'bytes', safeRatio(databaseTempBytes, databaseTransactions)),
 		metricCard('requested_checkpoints', 'Requested Checkpoints', 'count', sections.find((section) => section.key === 'checkpointer')?.summary.find((card) => card.key === 'num_requested')?.value ?? null),
 		metricCard('dead_tuple_growth', 'Dead Tuple Growth', 'count', sections.find((section) => section.key === 'user_tables')?.summary.find((card) => card.key === 'dead_tuple_growth')?.value ?? null),
 		metricCard('deadlocks', 'Deadlocks', 'count', delta(databaseRows, 'deadlocks'))
