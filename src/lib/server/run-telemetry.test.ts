@@ -27,7 +27,24 @@ function createDb() {
       xact_rollback INTEGER,
       blks_read INTEGER,
       blks_hit INTEGER,
+      tup_returned INTEGER,
+      tup_fetched INTEGER,
+      tup_inserted INTEGER,
+      tup_updated INTEGER,
+      tup_deleted INTEGER,
+      blk_read_time REAL,
+      blk_write_time REAL,
+      temp_files INTEGER,
       temp_bytes INTEGER,
+      sessions INTEGER,
+      sessions_abandoned INTEGER,
+      sessions_fatal INTEGER,
+      sessions_killed INTEGER,
+      session_time REAL,
+      active_time REAL,
+      idle_in_transaction_time REAL,
+      parallel_workers_to_launch INTEGER,
+      parallel_workers_launched INTEGER,
       deadlocks INTEGER
     );
     CREATE TABLE snap_pg_stat_database_conflicts (
@@ -144,17 +161,24 @@ function seedRun(db: Database.Database) {
   `).run();
 
 	const insertDbRow = db.prepare(`
-    INSERT INTO snap_pg_stat_database (_run_id, _collected_at, _phase, datname, xact_commit, xact_rollback, blks_read, blks_hit, temp_bytes, deadlocks)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO snap_pg_stat_database (
+      _run_id, _collected_at, _phase, datname, xact_commit, xact_rollback,
+      blks_read, blks_hit, tup_returned, tup_fetched, tup_inserted, tup_updated, tup_deleted,
+      blk_read_time, blk_write_time, temp_files, temp_bytes,
+      sessions, sessions_abandoned, sessions_fatal, sessions_killed,
+      session_time, active_time, idle_in_transaction_time,
+      parallel_workers_to_launch, parallel_workers_launched, deadlocks
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
-	insertDbRow.run(1, '2026-03-30T05:57:38Z', 'pre', 'benchmark', 100, 5, 10, 90, 0, 0);
-	insertDbRow.run(1, '2026-03-30T05:57:59Z', 'bench', 'benchmark', 120, 6, 20, 180, 500, 0);
-	insertDbRow.run(1, '2026-03-30T05:58:19Z', 'bench', 'benchmark', 140, 8, 30, 270, 1000, 1);
-	insertDbRow.run(1, '2026-03-30T05:58:59Z', 'post', 'benchmark', 150, 8, 35, 300, 1200, 1);
+	insertDbRow.run(1, '2026-03-30T05:57:38Z', 'pre', 'benchmark', 100, 5, 10, 90, 900, 80, 0, 0, 0, 100, 10, 0, 0, 10, 1, 0, 0, 0, 0, 0, 0, 0, 0);
+	insertDbRow.run(1, '2026-03-30T05:57:59Z', 'bench', 'benchmark', 120, 6, 20, 180, 1000, 100, 10, 5, 0, 160, 22, 1, 500, 12, 1, 0, 0, 1000, 800, 100, 2, 1, 0);
+	insertDbRow.run(1, '2026-03-30T05:58:19Z', 'bench', 'benchmark', 140, 8, 30, 270, 1500, 140, 20, 15, 5, 240, 42, 3, 1000, 16, 2, 1, 0, 3000, 2200, 300, 5, 4, 1);
+	insertDbRow.run(1, '2026-03-30T05:58:59Z', 'post', 'benchmark', 150, 8, 35, 300, 1700, 150, 25, 20, 8, 260, 47, 4, 1200, 18, 2, 1, 1, 3600, 2400, 360, 6, 5, 1);
 
 	// These rows should be ignored because telemetry must use benchmark_runs.database.
-	insertDbRow.run(1, '2026-03-30T05:57:38Z', 'pre', 'changed_db', 1000, 0, 100, 100, 0, 0);
-	insertDbRow.run(1, '2026-03-30T05:58:59Z', 'post', 'changed_db', 3000, 0, 300, 100, 0, 0);
+	insertDbRow.run(1, '2026-03-30T05:57:38Z', 'pre', 'changed_db', 1000, 0, 100, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+	insertDbRow.run(1, '2026-03-30T05:58:59Z', 'post', 'changed_db', 3000, 0, 300, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
 
 	const insertConflictRow = db.prepare(`
     INSERT INTO snap_pg_stat_database_conflicts (
@@ -256,6 +280,145 @@ describe('buildRunTelemetry', () => {
 		const hitRatio = telemetry.heroCards.find((card) => card.key === 'buffer_hit_ratio');
 		expect(transactions?.value).toBe(22);
 		expect(hitRatio?.value).toBeCloseTo(0.9);
+	});
+
+	it('exposes block I/O time as rate and raw delta views', () => {
+		const telemetry = buildRunTelemetry(db, 1, ['bench']);
+		const database = telemetry.sections.find((section) => section.key === 'database');
+		const blockIoTime = database?.chartMetrics?.find((metric) => metric.key === 'block_io_time');
+
+		expect(blockIoTime?.series.map((series) => series.label)).toEqual([
+			'block read time/s',
+			'block write time/s'
+		]);
+		expect(blockIoTime?.series.find((series) => series.label === 'block read time/s')?.points).toEqual([
+			{ t: 49000, v: 4 }
+		]);
+		expect(blockIoTime?.rawSeries?.map((series) => series.label)).toEqual([
+			'block read time',
+			'block write time'
+		]);
+		expect(blockIoTime?.rawSeries?.find((series) => series.label === 'block read time')?.points).toEqual([
+			{ t: 29000, v: 0 },
+			{ t: 49000, v: 80 }
+		]);
+	});
+
+	it('exposes temp usage as rate and raw delta views and includes temp files', () => {
+		const telemetry = buildRunTelemetry(db, 1, ['bench']);
+		const database = telemetry.sections.find((section) => section.key === 'database');
+		const tempUsage = database?.chartMetrics?.find((metric) => metric.key === 'temp_usage');
+		const tempFiles = database?.chartMetrics?.find((metric) => metric.key === 'temp_files');
+
+		expect(tempUsage).toEqual(expect.objectContaining({
+			label: 'Temp Usage',
+			kind: 'bytes'
+		}));
+		expect(tempUsage?.series.find((series) => series.label === 'temp bytes/s')?.points).toEqual([
+			{ t: 49000, v: 25 }
+		]);
+		expect(tempUsage?.rawSeries?.find((series) => series.label === 'temp bytes')?.points).toEqual([
+			{ t: 29000, v: 0 },
+			{ t: 49000, v: 500 }
+		]);
+		expect(tempFiles).toEqual(expect.objectContaining({
+			label: 'Temp Files',
+			kind: 'count'
+		}));
+		expect(tempFiles?.series.find((series) => series.label === 'temp files/s')?.points).toEqual([
+			{ t: 49000, v: 0.1 }
+		]);
+		expect(tempFiles?.rawSeries?.find((series) => series.label === 'temp files')?.points).toEqual([
+			{ t: 29000, v: 0 },
+			{ t: 49000, v: 2 }
+		]);
+		expect(database?.tableRows.find((row) => row.metric === 'Temp files')?.value).toBe(2);
+	});
+
+	it('exposes session behavior and parallel worker metrics as rate and raw delta views', () => {
+		const telemetry = buildRunTelemetry(db, 1, ['bench']);
+		const database = telemetry.sections.find((section) => section.key === 'database');
+		const sessionTime = database?.chartMetrics?.find((metric) => metric.key === 'session_time');
+		const sessions = database?.chartMetrics?.find((metric) => metric.key === 'sessions');
+		const parallelWorkers = database?.chartMetrics?.find((metric) => metric.key === 'parallel_workers');
+
+		expect(sessionTime?.series.map((series) => series.label)).toEqual([
+			'session time/s',
+			'active time/s',
+			'idle in transaction time/s'
+		]);
+		expect(sessionTime?.series.find((series) => series.label === 'active time/s')?.points).toEqual([
+			{ t: 49000, v: 70 }
+		]);
+		expect(sessionTime?.rawSeries?.find((series) => series.label === 'idle in transaction time')?.points).toEqual([
+			{ t: 29000, v: 0 },
+			{ t: 49000, v: 200 }
+		]);
+		expect(sessions).toEqual(expect.objectContaining({
+			label: 'Sessions',
+			group: 'Session Behavior',
+			category: 'raw'
+		}));
+		expect(sessions?.series.map((series) => series.label)).toEqual([
+			'sessions/s',
+			'abandoned/s',
+			'fatal/s',
+			'killed/s'
+		]);
+		expect(sessions?.series.find((series) => series.label === 'sessions/s')?.points).toEqual([
+			{ t: 49000, v: 0.2 }
+		]);
+		expect(sessions?.rawSeries?.find((series) => series.label === 'sessions fatal')?.points).toEqual([
+			{ t: 29000, v: 0 },
+			{ t: 49000, v: 1 }
+		]);
+		expect(sessions?.rawSeries?.find((series) => series.label === 'sessions')?.description).toContain('Total sessions established');
+		expect(parallelWorkers?.series.map((series) => series.label)).toEqual([
+			'workers to launch/s',
+			'workers launched/s'
+		]);
+		expect(parallelWorkers?.rawSeries?.find((series) => series.label === 'workers launched')?.points).toEqual([
+			{ t: 29000, v: 0 },
+			{ t: 49000, v: 3 }
+		]);
+		expect(database?.summary).toEqual([]);
+		expect(database?.tableRows.find((row) => row.metric === 'Session time (ms)')?.value).toBe(2000);
+		expect(database?.tableRows.find((row) => row.metric === 'Sessions')?.value).toBe(4);
+		expect(database?.tableRows.find((row) => row.metric === 'Sessions fatal')?.value).toBe(1);
+		expect(database?.tableRows.find((row) => row.metric === 'Sessions abandoned')?.value).toBe(1);
+		expect(database?.tableRows.find((row) => row.metric === 'Parallel workers launched')?.value).toBe(3);
+		expect(database?.tableRows.find((row) => row.metric === 'Parallel workers to launch')?.value).toBe(3);
+	});
+
+	it('groups database metrics by root-cause area and exposes derived diagnostics', () => {
+		const telemetry = buildRunTelemetry(db, 1, ['bench']);
+		const database = telemetry.sections.find((section) => section.key === 'database');
+		const groupsByMetric = new Map(database?.chartMetrics?.map((metric) => [metric.key, metric.group]));
+
+		expect(groupsByMetric.get('transactions')).toBe('Workload Shape');
+		expect(groupsByMetric.get('io_per_tx')).toBe('I/O Pressure');
+		expect(groupsByMetric.get('temp_bytes_per_tx')).toBe('Spills');
+		expect(groupsByMetric.get('session_time_per_tx')).toBe('Session Behavior');
+		expect(groupsByMetric.get('parallel_launch_success')).toBe('Parallelism');
+		expect(groupsByMetric.get('deadlocks_per_tx')).toBe('Errors');
+
+		expect(database?.chartMetrics?.find((metric) => metric.key === 'cache_miss_rate')?.series[0]?.points).toEqual([
+			{ t: 49000, v: 0.1 }
+		]);
+		expect(database?.chartMetrics?.find((metric) => metric.key === 'io_per_tx')?.series.find((series) => series.label === 'disk reads / tx')?.points[0]?.v).toBeCloseTo(10 / 22);
+		expect(database?.chartMetrics?.find((metric) => metric.key === 'avg_temp_file_size')?.series[0]?.points).toEqual([
+			{ t: 49000, v: 250 }
+		]);
+		expect(database?.chartMetrics?.find((metric) => metric.key === 'parallel_launch_success')?.series[0]?.points).toEqual([
+			{ t: 49000, v: 1 }
+		]);
+		expect(database?.chartMetrics?.find((metric) => metric.key === 'deadlocks_per_tx')?.series[0]?.points[0]?.v).toBeCloseTo(1 / 22 * 1_000_000);
+		expect(database?.chartMetrics?.find((metric) => metric.key === 'cache_miss_rate')?.series[0]?.description).toContain('cache pressure');
+		expect(database?.chartMetrics?.find((metric) => metric.key === 'cache_miss_rate')?.series[0]?.description).toContain('Uses: blks_read / (blks_hit + blks_read)');
+		expect(database?.chartMetrics?.find((metric) => metric.key === 'temp_usage')?.series[0]?.description).toContain('per second');
+		expect(database?.chartMetrics?.find((metric) => metric.key === 'temp_usage')?.rawSeries?.[0]?.description).toContain('Cumulative');
+		expect(database?.tableRows.find((row) => row.metric === 'Temp bytes / tx')?.value).toBeCloseTo(500 / 22);
+		expect(database?.tableRows.find((row) => row.metric === 'I/O time / active time')?.value).toBeCloseTo(100 / 1400);
 	});
 
 	it('adds explainer text to hero and summary cards', () => {

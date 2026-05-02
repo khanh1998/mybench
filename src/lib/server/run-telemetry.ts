@@ -110,8 +110,20 @@ const METRIC_INFO: Partial<Record<string, string>> = {
 		'Share of block access served from shared buffers instead of disk: blks_hit / (blks_hit + blks_read). Higher is usually better.',
 	temp_bytes:
 		'Bytes written to temporary files during the selected phases. Higher values often mean sorts or hashes spilled to disk.',
+	temp_files:
+		'Temporary files created during the selected phases. Higher values often mean sorts or hashes spilled to disk.',
 	temp_bytes_per_tx:
 		'Average temporary-file bytes per transaction: temp_bytes divided by total transactions. Higher values often indicate spills from sorts or hashes.',
+	session_time:
+		'Total database session time reported by pg_stat_database during the selected phases.',
+	active_time:
+		'Total time database sessions spent executing queries during the selected phases.',
+	idle_in_transaction_time:
+		'Total time database sessions spent idle while inside a transaction during the selected phases.',
+	parallel_workers_to_launch:
+		'Parallel workers PostgreSQL wanted to launch during the selected phases.',
+	parallel_workers_launched:
+		'Parallel workers PostgreSQL actually launched during the selected phases.',
 	rollback_ratio:
 		'Share of transactions that rolled back: xact_rollback / (xact_commit + xact_rollback). Higher values can point to contention, retries, or application errors.',
 	blk_read_time_per_tx:
@@ -322,7 +334,7 @@ function buildCumulativeSeries(
 function buildMetricSeries(
 	rows: SnapshotRow[],
 	runStartMs: number,
-	metrics: Array<{ label: string; valueFn: (row: SnapshotRow) => number | null }>
+	metrics: Array<{ label: string; description?: string; valueFn: (row: SnapshotRow) => number | null }>
 ): TelemetrySeries[] {
 	return metrics
 		.map((metric, index) => {
@@ -333,10 +345,12 @@ function buildMetricSeries(
 					const current = metric.valueFn(row);
 					if (current === null) return null;
 					return relPoint(row, runStartMs, current - baseline);
-				})
-				.filter((point): point is TelemetrySeriesPoint => point !== null);
+			})
+			.filter((point): point is TelemetrySeriesPoint => point !== null);
 			if (points.length === 0) return null;
-			return { label: metric.label, color: COLORS[index % COLORS.length], points };
+			const series: TelemetrySeries = { label: metric.label, color: COLORS[index % COLORS.length], points };
+			if (metric.description) series.description = metric.description;
+			return series;
 		})
 		.filter((series): series is TelemetrySeries => series !== null);
 }
@@ -388,11 +402,11 @@ function buildGroupedSeries(
 
 // Builds TelemetrySeries for derived/computed metrics (ratios, rates, averages).
 // Unlike buildMetricSeries, seriesValueAt receives the full rows array so it can compute
-// delta-based ratios (e.g. cache hit rate = Δhit / (Δhit + Δread)) at each snapshot.
+// delta-based ratios (e.g. cache hit rate = delta hit / (delta hit + delta read)) at each snapshot.
 function buildDerivedSeries(
 	rows: SnapshotRow[],
 	runStartMs: number,
-	metrics: Array<{ label: string; seriesValueAt: (rows: SnapshotRow[], index: number) => number | null }>,
+	metrics: Array<{ label: string; description?: string; seriesValueAt: (rows: SnapshotRow[], index: number) => number | null }>,
 	colorOffset = 0
 ): TelemetrySeries[] {
 	return metrics
@@ -403,10 +417,12 @@ function buildDerivedSeries(
 					const value = metric.seriesValueAt(rows, rowIndex);
 					if (value === null || !Number.isFinite(value)) return null;
 					return relPoint(row, runStartMs, value);
-				})
-				.filter((point): point is TelemetrySeriesPoint => point !== null);
+			})
+			.filter((point): point is TelemetrySeriesPoint => point !== null);
 			if (points.length === 0) return null;
-			return { label: metric.label, color: COLORS[(colorOffset + index) % COLORS.length], points };
+			const series: TelemetrySeries = { label: metric.label, color: COLORS[(colorOffset + index) % COLORS.length], points };
+			if (metric.description) series.description = metric.description;
+			return series;
 		})
 		.filter((series): series is TelemetrySeries => series !== null);
 }
@@ -620,10 +636,55 @@ function buildDatabaseSection(rows: SnapshotRow[], runStartMs: number): Telemetr
 	const txCommit = delta(rows, 'xact_commit');
 	const txRollback = delta(rows, 'xact_rollback');
 	const totalTransactions = sum([txCommit, txRollback]);
-	const hitRatio = safeRatio(delta(rows, 'blks_hit'), sum([delta(rows, 'blks_hit'), delta(rows, 'blks_read')]));
+	const blocksRead = delta(rows, 'blks_read');
+	const blocksHit = delta(rows, 'blks_hit');
+	const totalBlockAccess = sum([blocksRead, blocksHit]);
+	const hitRatio = safeRatio(blocksHit, totalBlockAccess);
+	const missRatio = safeRatio(blocksRead, totalBlockAccess);
+	const rowsReturned = delta(rows, 'tup_returned');
+	const rowsFetched = delta(rows, 'tup_fetched');
+	const rowsInserted = delta(rows, 'tup_inserted');
+	const rowsUpdated = delta(rows, 'tup_updated');
+	const rowsDeleted = delta(rows, 'tup_deleted');
+	const rowsWritten = sum([rowsInserted, rowsUpdated, rowsDeleted]);
+	const totalRowActivity = sum([rowsReturned, rowsFetched, rowsWritten]);
 	const tempBytes = delta(rows, 'temp_bytes');
+	const tempFiles = delta(rows, 'temp_files');
+	const sessions = delta(rows, 'sessions');
+	const sessionsAbandoned = delta(rows, 'sessions_abandoned');
+	const sessionsFatal = delta(rows, 'sessions_fatal');
+	const sessionsKilled = delta(rows, 'sessions_killed');
+	const sessionTime = delta(rows, 'session_time');
+	const activeTime = delta(rows, 'active_time');
+	const idleInTransactionTime = delta(rows, 'idle_in_transaction_time');
+	const parallelWorkersToLaunch = delta(rows, 'parallel_workers_to_launch');
+	const parallelWorkersLaunched = delta(rows, 'parallel_workers_launched');
+	const blockReadTime = delta(rows, 'blk_read_time');
+	const blockWriteTime = delta(rows, 'blk_write_time');
+	const blockIoTime = sum([blockReadTime, blockWriteTime]);
 	const deadlocks = delta(rows, 'deadlocks');
 	const tps = safeRatio(totalTransactions, elapsedSeconds(rows));
+	const diskReadsPerTx = safeRatio(blocksRead, totalTransactions);
+	const blockAccessPerTx = safeRatio(totalBlockAccess, totalTransactions);
+	const blockReadMsPerBlock = safeRatio(blockReadTime, blocksRead);
+	const ioActiveRatio = safeRatio(blockIoTime, activeTime);
+	const rowsReturnedPerTx = safeRatio(rowsReturned, totalTransactions);
+	const rowsFetchedPerTx = safeRatio(rowsFetched, totalTransactions);
+	const rowsWrittenPerTx = safeRatio(rowsWritten, totalTransactions);
+	const returnedFetchedRatio = safeRatio(rowsReturned, rowsFetched);
+	const writeMix = safeRatio(rowsWritten, totalRowActivity);
+	const tempBytesPerTx = safeRatio(tempBytes, totalTransactions);
+	const tempFilesPerTx = safeRatio(tempFiles, totalTransactions);
+	const avgTempFileSize = safeRatio(tempBytes, tempFiles);
+	const activeTimePerTx = safeRatio(activeTime, totalTransactions);
+	const sessionTimePerTx = safeRatio(sessionTime, totalTransactions);
+	const idleInTransactionTimePerTx = safeRatio(idleInTransactionTime, totalTransactions);
+	const parallelLaunchSuccess = safeRatio(parallelWorkersLaunched, parallelWorkersToLaunch);
+	const parallelWorkersPerTx = safeRatio(parallelWorkersLaunched, totalTransactions);
+	const deadlocksPerMillionTx = (() => {
+		const value = safeRatio(deadlocks, totalTransactions);
+		return value === null ? null : value * 1_000_000;
+	})();
 
 	if (rows.length === 0) {
 		return {
@@ -642,113 +703,261 @@ function buildDatabaseSection(rows: SnapshotRow[], runStartMs: number): Telemetr
 	}
 
 	const dbChartMetrics: TelemetryChartMetric[] = [];
-	const push = (m: TelemetryChartMetric | null) => { if (m && (m.series.length > 0 || (m.rawSeries?.length ?? 0) > 0)) dbChartMetrics.push(m); };
+	const DB_GROUP = {
+		workload: 'Workload Shape',
+		io: 'I/O Pressure',
+		spills: 'Spills',
+		session: 'Session Behavior',
+		parallel: 'Parallelism',
+		errors: 'Errors'
+	} as const;
+	const PG_STAT_DATABASE_DOCS = {
+		xact_commit: 'Transactions in this database that committed.',
+		xact_rollback: 'Transactions in this database that rolled back.',
+		blks_read: 'Disk blocks read in this database.',
+		blks_hit: 'Disk blocks found already in the PostgreSQL buffer cache, so no read was needed.',
+		tup_returned: 'Live rows fetched by sequential scans and index entries returned by index scans in this database.',
+		tup_fetched: 'Live rows fetched by index scans in this database.',
+		tup_inserted: 'Rows inserted by queries in this database.',
+		tup_updated: 'Rows updated by queries in this database.',
+		tup_deleted: 'Rows deleted by queries in this database.',
+		temp_files: 'Temporary files created by queries in this database, regardless of why the file was created.',
+		temp_bytes: 'Data written to temporary files by queries in this database.',
+		deadlocks: 'Deadlocks detected in this database.',
+		blk_read_time: 'Time spent reading data file blocks by backends in this database, in milliseconds.',
+		blk_write_time: 'Time spent writing data file blocks by backends in this database, in milliseconds.',
+		sessions: 'Total sessions established to this database.',
+		sessions_abandoned: 'Database sessions to this database that were terminated because connection to the client was lost.',
+		sessions_fatal: 'Database sessions to this database that were terminated by fatal errors.',
+		sessions_killed: 'Database sessions to this database that were terminated by operator intervention.',
+		session_time: 'Time spent by database sessions in this database, in milliseconds.',
+		active_time: 'Time spent executing SQL statements in this database, in milliseconds.',
+		idle_in_transaction_time: 'Time spent idling while in a transaction in this database, in milliseconds.',
+		parallel_workers_to_launch: 'Parallel workers planned to be launched by queries on this database.',
+		parallel_workers_launched: 'Parallel workers launched by queries on this database.'
+	} as const;
+	const pgStatSource = (columns: string[]) => `Source: pg_stat_database.${columns.join(', pg_stat_database.')}.`;
+	const rateDescription = (description: string, columns: string[]) => `${description} Shown as a per second delta. ${pgStatSource(columns)}`;
+	const rawDescription = (description: string, columns: string[]) => `${description} Cumulative raw view shows the delta since the first selected sample. ${pgStatSource(columns)}`;
+	const push = (m: TelemetryChartMetric | null, group: string) => {
+		if (m && (m.series.length > 0 || (m.rawSeries?.length ?? 0) > 0)) dbChartMetrics.push({ ...m, group });
+	};
 
 	// RAW metrics — series = rate/s, rawSeries = cumulative delta
 	const txRate = buildDerivedSeries(rows, runStartMs, [
-		{ label: 'total/s', seriesValueAt: (r, i) => safeRatio(sumDeltaAt(r, i, ['xact_commit', 'xact_rollback']), elapsedSecondsAt(r, i)) },
-		{ label: 'commits/s', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'xact_commit'), elapsedSecondsAt(r, i)) },
-		{ label: 'rollbacks/s', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'xact_rollback'), elapsedSecondsAt(r, i)) }
+		{ label: 'total/s', description: rateDescription('Committed plus rolled-back transactions in this database.', ['xact_commit', 'xact_rollback']), seriesValueAt: (r, i) => safeRatio(sumDeltaAt(r, i, ['xact_commit', 'xact_rollback']), elapsedSecondsAt(r, i)) },
+		{ label: 'commits/s', description: rateDescription(PG_STAT_DATABASE_DOCS.xact_commit, ['xact_commit']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'xact_commit'), elapsedSecondsAt(r, i)) },
+		{ label: 'rollbacks/s', description: rateDescription(PG_STAT_DATABASE_DOCS.xact_rollback, ['xact_rollback']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'xact_rollback'), elapsedSecondsAt(r, i)) }
 	]);
 	const txRaw = buildMetricSeries(rows, runStartMs, [
-		{ label: 'transactions', valueFn: (row) => sum([toNumber(row.xact_commit), toNumber(row.xact_rollback)]) },
-		{ label: 'commits', valueFn: (row) => toNumber(row.xact_commit) },
-		{ label: 'rollbacks', valueFn: (row) => toNumber(row.xact_rollback) }
+		{ label: 'transactions', description: rawDescription('Committed plus rolled-back transactions in this database.', ['xact_commit', 'xact_rollback']), valueFn: (row) => sum([toNumber(row.xact_commit), toNumber(row.xact_rollback)]) },
+		{ label: 'commits', description: rawDescription(PG_STAT_DATABASE_DOCS.xact_commit, ['xact_commit']), valueFn: (row) => toNumber(row.xact_commit) },
+		{ label: 'rollbacks', description: rawDescription(PG_STAT_DATABASE_DOCS.xact_rollback, ['xact_rollback']), valueFn: (row) => toNumber(row.xact_rollback) }
 	]);
-	push({ key: 'transactions', label: 'Transactions', kind: 'tps', title: 'Transaction rate over time', category: 'raw', series: txRate, rawSeries: txRaw });
+	push({ key: 'transactions', label: 'Transactions', kind: 'tps', title: 'Transaction rate over time', category: 'raw', series: txRate, rawSeries: txRaw }, DB_GROUP.workload);
 
 	const blockRate = buildDerivedSeries(rows, runStartMs, [
-		{ label: 'hits/s', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'blks_hit'), elapsedSecondsAt(r, i)) },
-		{ label: 'reads/s', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'blks_read'), elapsedSecondsAt(r, i)) }
+		{ label: 'hits/s', description: rateDescription(PG_STAT_DATABASE_DOCS.blks_hit, ['blks_hit']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'blks_hit'), elapsedSecondsAt(r, i)) },
+		{ label: 'reads/s', description: rateDescription(PG_STAT_DATABASE_DOCS.blks_read, ['blks_read']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'blks_read'), elapsedSecondsAt(r, i)) }
 	]);
 	const blockRaw = buildMetricSeries(rows, runStartMs, [
-		{ label: 'blocks hit', valueFn: (row) => toNumber(row.blks_hit) },
-		{ label: 'blocks read', valueFn: (row) => toNumber(row.blks_read) }
+		{ label: 'blocks hit', description: rawDescription(PG_STAT_DATABASE_DOCS.blks_hit, ['blks_hit']), valueFn: (row) => toNumber(row.blks_hit) },
+		{ label: 'blocks read', description: rawDescription(PG_STAT_DATABASE_DOCS.blks_read, ['blks_read']), valueFn: (row) => toNumber(row.blks_read) }
 	]);
-	push({ key: 'block_access', label: 'Block Access', kind: 'count', title: 'Block access over time', category: 'raw', series: blockRate, rawSeries: blockRaw });
+	push({ key: 'block_access', label: 'Block Access', kind: 'count', title: 'Block access over time', category: 'raw', series: blockRate, rawSeries: blockRaw }, DB_GROUP.io);
 
 	const rowWriteRate = buildDerivedSeries(rows, runStartMs, [
-		{ label: 'inserts/s', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'tup_inserted'), elapsedSecondsAt(r, i)) },
-		{ label: 'updates/s', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'tup_updated'), elapsedSecondsAt(r, i)) },
-		{ label: 'deletes/s', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'tup_deleted'), elapsedSecondsAt(r, i)) }
+		{ label: 'inserts/s', description: rateDescription(PG_STAT_DATABASE_DOCS.tup_inserted, ['tup_inserted']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'tup_inserted'), elapsedSecondsAt(r, i)) },
+		{ label: 'updates/s', description: rateDescription(PG_STAT_DATABASE_DOCS.tup_updated, ['tup_updated']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'tup_updated'), elapsedSecondsAt(r, i)) },
+		{ label: 'deletes/s', description: rateDescription(PG_STAT_DATABASE_DOCS.tup_deleted, ['tup_deleted']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'tup_deleted'), elapsedSecondsAt(r, i)) }
 	]);
 	const rowWriteRaw = buildMetricSeries(rows, runStartMs, [
-		{ label: 'rows inserted', valueFn: (row) => toNumber(row.tup_inserted) },
-		{ label: 'rows updated', valueFn: (row) => toNumber(row.tup_updated) },
-		{ label: 'rows deleted', valueFn: (row) => toNumber(row.tup_deleted) }
+		{ label: 'rows inserted', description: rawDescription(PG_STAT_DATABASE_DOCS.tup_inserted, ['tup_inserted']), valueFn: (row) => toNumber(row.tup_inserted) },
+		{ label: 'rows updated', description: rawDescription(PG_STAT_DATABASE_DOCS.tup_updated, ['tup_updated']), valueFn: (row) => toNumber(row.tup_updated) },
+		{ label: 'rows deleted', description: rawDescription(PG_STAT_DATABASE_DOCS.tup_deleted, ['tup_deleted']), valueFn: (row) => toNumber(row.tup_deleted) }
 	]);
-	push({ key: 'row_writes', label: 'Row Writes', kind: 'count', title: 'Row write activity', category: 'raw', series: rowWriteRate, rawSeries: rowWriteRaw });
+	push({ key: 'row_writes', label: 'Row Writes', kind: 'count', title: 'Row write activity', category: 'raw', series: rowWriteRate, rawSeries: rowWriteRaw }, DB_GROUP.workload);
 
 	const rowReadRate = buildDerivedSeries(rows, runStartMs, [
-		{ label: 'returned/s', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'tup_returned'), elapsedSecondsAt(r, i)) },
-		{ label: 'fetched/s', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'tup_fetched'), elapsedSecondsAt(r, i)) }
+		{ label: 'returned/s', description: rateDescription(PG_STAT_DATABASE_DOCS.tup_returned, ['tup_returned']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'tup_returned'), elapsedSecondsAt(r, i)) },
+		{ label: 'fetched/s', description: rateDescription(PG_STAT_DATABASE_DOCS.tup_fetched, ['tup_fetched']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'tup_fetched'), elapsedSecondsAt(r, i)) }
 	]);
 	const rowReadRaw = buildMetricSeries(rows, runStartMs, [
-		{ label: 'rows returned', valueFn: (row) => toNumber(row.tup_returned) },
-		{ label: 'rows fetched', valueFn: (row) => toNumber(row.tup_fetched) }
+		{ label: 'rows returned', description: rawDescription(PG_STAT_DATABASE_DOCS.tup_returned, ['tup_returned']), valueFn: (row) => toNumber(row.tup_returned) },
+		{ label: 'rows fetched', description: rawDescription(PG_STAT_DATABASE_DOCS.tup_fetched, ['tup_fetched']), valueFn: (row) => toNumber(row.tup_fetched) }
 	]);
-	push({ key: 'row_reads', label: 'Row Reads', kind: 'count', title: 'Row read activity', category: 'raw', series: rowReadRate, rawSeries: rowReadRaw });
+	push({ key: 'row_reads', label: 'Row Reads', kind: 'count', title: 'Row read activity', category: 'raw', series: rowReadRate, rawSeries: rowReadRaw }, DB_GROUP.workload);
 
-	const tempSeries = buildMetricSeries(rows, runStartMs, [{ label: 'temp bytes', valueFn: (row) => toNumber(row.temp_bytes) }]);
-	push({ key: 'temp_usage', label: 'Temp Usage', kind: 'bytes', title: 'Temp file usage over time', category: 'raw', series: tempSeries });
+	const tempBytesRate = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'temp bytes/s', description: rateDescription(PG_STAT_DATABASE_DOCS.temp_bytes, ['temp_bytes']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'temp_bytes'), elapsedSecondsAt(r, i)) }
+	]);
+	const tempBytesRaw = buildMetricSeries(rows, runStartMs, [{ label: 'temp bytes', description: rawDescription(PG_STAT_DATABASE_DOCS.temp_bytes, ['temp_bytes']), valueFn: (row) => toNumber(row.temp_bytes) }]);
+	push({ key: 'temp_usage', label: 'Temp Usage', kind: 'bytes', title: 'Temp bytes over time', category: 'raw', series: tempBytesRate, rawSeries: tempBytesRaw }, DB_GROUP.spills);
+
+	const tempFilesRate = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'temp files/s', description: rateDescription(PG_STAT_DATABASE_DOCS.temp_files, ['temp_files']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'temp_files'), elapsedSecondsAt(r, i)) }
+	]);
+	const tempFilesRaw = buildMetricSeries(rows, runStartMs, [{ label: 'temp files', description: rawDescription(PG_STAT_DATABASE_DOCS.temp_files, ['temp_files']), valueFn: (row) => toNumber(row.temp_files) }]);
+	push({ key: 'temp_files', label: 'Temp Files', kind: 'count', title: 'Temp files over time', category: 'raw', series: tempFilesRate, rawSeries: tempFilesRaw }, DB_GROUP.spills);
 
 	const deadlockRate = buildDerivedSeries(rows, runStartMs, [
-		{ label: 'deadlocks/s', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'deadlocks'), elapsedSecondsAt(r, i)) }
+		{ label: 'deadlocks/s', description: rateDescription(PG_STAT_DATABASE_DOCS.deadlocks, ['deadlocks']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'deadlocks'), elapsedSecondsAt(r, i)) }
 	]);
-	const deadlockRaw = buildMetricSeries(rows, runStartMs, [{ label: 'deadlocks', valueFn: (row) => toNumber(row.deadlocks) }]);
-	push({ key: 'deadlocks', label: 'Deadlocks', kind: 'count', title: 'Deadlocks over time', category: 'raw', series: deadlockRate, rawSeries: deadlockRaw });
+	const deadlockRaw = buildMetricSeries(rows, runStartMs, [{ label: 'deadlocks', description: rawDescription(PG_STAT_DATABASE_DOCS.deadlocks, ['deadlocks']), valueFn: (row) => toNumber(row.deadlocks) }]);
+	push({ key: 'deadlocks', label: 'Deadlocks', kind: 'count', title: 'Deadlocks over time', category: 'raw', series: deadlockRate, rawSeries: deadlockRaw }, DB_GROUP.errors);
 
-	const blockIoTimeSeries = buildMetricSeries(rows, runStartMs, [
-		{ label: 'block read time', valueFn: (row) => toNumber(row.blk_read_time) },
-		{ label: 'block write time', valueFn: (row) => toNumber(row.blk_write_time) }
+	const blockIoTimeRate = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'block read time/s', description: rateDescription(PG_STAT_DATABASE_DOCS.blk_read_time, ['blk_read_time']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'blk_read_time'), elapsedSecondsAt(r, i)) },
+		{ label: 'block write time/s', description: rateDescription(PG_STAT_DATABASE_DOCS.blk_write_time, ['blk_write_time']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'blk_write_time'), elapsedSecondsAt(r, i)) }
 	]);
-	push({ key: 'block_io_time', label: 'Block I/O Time', kind: 'duration_ms', title: 'Block I/O time over time', category: 'raw', series: blockIoTimeSeries });
+	const blockIoTimeRaw = buildMetricSeries(rows, runStartMs, [
+		{ label: 'block read time', description: rawDescription(PG_STAT_DATABASE_DOCS.blk_read_time, ['blk_read_time']), valueFn: (row) => toNumber(row.blk_read_time) },
+		{ label: 'block write time', description: rawDescription(PG_STAT_DATABASE_DOCS.blk_write_time, ['blk_write_time']), valueFn: (row) => toNumber(row.blk_write_time) }
+	]);
+	push({ key: 'block_io_time', label: 'Block I/O Time', kind: 'duration_ms', title: 'Block I/O time over time', category: 'raw', series: blockIoTimeRate, rawSeries: blockIoTimeRaw }, DB_GROUP.io);
+
+	const sessionTimeRate = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'session time/s', description: rateDescription(PG_STAT_DATABASE_DOCS.session_time, ['session_time']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'session_time'), elapsedSecondsAt(r, i)) },
+		{ label: 'active time/s', description: rateDescription(PG_STAT_DATABASE_DOCS.active_time, ['active_time']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'active_time'), elapsedSecondsAt(r, i)) },
+		{ label: 'idle in transaction time/s', description: rateDescription(PG_STAT_DATABASE_DOCS.idle_in_transaction_time, ['idle_in_transaction_time']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'idle_in_transaction_time'), elapsedSecondsAt(r, i)) }
+	]);
+	const sessionTimeRaw = buildMetricSeries(rows, runStartMs, [
+		{ label: 'session time', description: rawDescription(PG_STAT_DATABASE_DOCS.session_time, ['session_time']), valueFn: (row) => toNumber(row.session_time) },
+		{ label: 'active time', description: rawDescription(PG_STAT_DATABASE_DOCS.active_time, ['active_time']), valueFn: (row) => toNumber(row.active_time) },
+		{ label: 'idle in transaction time', description: rawDescription(PG_STAT_DATABASE_DOCS.idle_in_transaction_time, ['idle_in_transaction_time']), valueFn: (row) => toNumber(row.idle_in_transaction_time) }
+	]);
+	push({ key: 'session_time', label: 'Session Time', kind: 'duration_ms', title: 'Session time over time', category: 'raw', series: sessionTimeRate, rawSeries: sessionTimeRaw }, DB_GROUP.session);
+
+	const sessionsRate = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'sessions/s', description: rateDescription(PG_STAT_DATABASE_DOCS.sessions, ['sessions']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'sessions'), elapsedSecondsAt(r, i)) },
+		{ label: 'abandoned/s', description: rateDescription(PG_STAT_DATABASE_DOCS.sessions_abandoned, ['sessions_abandoned']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'sessions_abandoned'), elapsedSecondsAt(r, i)) },
+		{ label: 'fatal/s', description: rateDescription(PG_STAT_DATABASE_DOCS.sessions_fatal, ['sessions_fatal']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'sessions_fatal'), elapsedSecondsAt(r, i)) },
+		{ label: 'killed/s', description: rateDescription(PG_STAT_DATABASE_DOCS.sessions_killed, ['sessions_killed']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'sessions_killed'), elapsedSecondsAt(r, i)) }
+	]);
+	const sessionsRaw = buildMetricSeries(rows, runStartMs, [
+		{ label: 'sessions', description: rawDescription(PG_STAT_DATABASE_DOCS.sessions, ['sessions']), valueFn: (row) => toNumber(row.sessions) },
+		{ label: 'sessions abandoned', description: rawDescription(PG_STAT_DATABASE_DOCS.sessions_abandoned, ['sessions_abandoned']), valueFn: (row) => toNumber(row.sessions_abandoned) },
+		{ label: 'sessions fatal', description: rawDescription(PG_STAT_DATABASE_DOCS.sessions_fatal, ['sessions_fatal']), valueFn: (row) => toNumber(row.sessions_fatal) },
+		{ label: 'sessions killed', description: rawDescription(PG_STAT_DATABASE_DOCS.sessions_killed, ['sessions_killed']), valueFn: (row) => toNumber(row.sessions_killed) }
+	]);
+	push({ key: 'sessions', label: 'Sessions', kind: 'count', title: 'Session counts over time', category: 'raw', series: sessionsRate, rawSeries: sessionsRaw }, DB_GROUP.session);
+
+	const parallelWorkersRate = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'workers to launch/s', description: rateDescription(PG_STAT_DATABASE_DOCS.parallel_workers_to_launch, ['parallel_workers_to_launch']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'parallel_workers_to_launch'), elapsedSecondsAt(r, i)) },
+		{ label: 'workers launched/s', description: rateDescription(PG_STAT_DATABASE_DOCS.parallel_workers_launched, ['parallel_workers_launched']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'parallel_workers_launched'), elapsedSecondsAt(r, i)) }
+	]);
+	const parallelWorkersRaw = buildMetricSeries(rows, runStartMs, [
+		{ label: 'workers to launch', description: rawDescription(PG_STAT_DATABASE_DOCS.parallel_workers_to_launch, ['parallel_workers_to_launch']), valueFn: (row) => toNumber(row.parallel_workers_to_launch) },
+		{ label: 'workers launched', description: rawDescription(PG_STAT_DATABASE_DOCS.parallel_workers_launched, ['parallel_workers_launched']), valueFn: (row) => toNumber(row.parallel_workers_launched) }
+	]);
+	push({ key: 'parallel_workers', label: 'Parallel Workers', kind: 'count', title: 'Parallel worker usage over time', category: 'raw', series: parallelWorkersRate, rawSeries: parallelWorkersRaw }, DB_GROUP.parallel);
 
 	// DERIVED metrics — computed ratios and per-unit values
 	const cacheHitSeries = buildDerivedSeries(rows, runStartMs, [
-		{ label: 'cache hit rate', seriesValueAt: (r, i) => ratioAt(r, i, 'blks_hit', ['blks_hit', 'blks_read']) }
+		{ label: 'cache hit rate', description: 'Share of block access served from shared buffers instead of disk. Uses: blks_hit / (blks_hit + blks_read).', seriesValueAt: (r, i) => ratioAt(r, i, 'blks_hit', ['blks_hit', 'blks_read']) }
 	]);
-	push({ key: 'cache_hit_rate', label: 'Cache Hit Rate', kind: 'percent', title: 'Buffer cache hit rate over time', category: 'derived', series: cacheHitSeries });
+	push({ key: 'cache_hit_rate', label: 'Cache Hit Rate', kind: 'percent', title: 'Buffer cache hit rate over time', category: 'derived', series: cacheHitSeries }, DB_GROUP.io);
+
+	const cacheMissSeries = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'cache miss rate', description: 'Share of block access that required disk reads; rising values point to cache pressure or cold data. Uses: blks_read / (blks_hit + blks_read).', seriesValueAt: (r, i) => ratioAt(r, i, 'blks_read', ['blks_hit', 'blks_read']) }
+	]);
+	push({ key: 'cache_miss_rate', label: 'Cache Miss Rate', kind: 'percent', title: 'Buffer cache miss rate over time', category: 'derived', series: cacheMissSeries }, DB_GROUP.io);
 
 	const rollbackRateSeries = buildDerivedSeries(rows, runStartMs, [
-		{ label: 'rollback rate', seriesValueAt: (r, i) => ratioAt(r, i, 'xact_rollback', ['xact_commit', 'xact_rollback']) }
+		{ label: 'rollback rate', description: 'Rollbacks as a share of all transactions; high values can indicate retries, conflicts, or application errors. Uses: xact_rollback / (xact_commit + xact_rollback).', seriesValueAt: (r, i) => ratioAt(r, i, 'xact_rollback', ['xact_commit', 'xact_rollback']) }
 	]);
-	push({ key: 'rollback_rate', label: 'Rollback Rate', kind: 'percent', title: 'Transaction rollback rate over time', category: 'derived', series: rollbackRateSeries });
+	push({ key: 'rollback_rate', label: 'Rollback Rate', kind: 'percent', title: 'Transaction rollback rate over time', category: 'derived', series: rollbackRateSeries }, DB_GROUP.errors);
 
 	const blockReadMsSeries = buildDerivedSeries(rows, runStartMs, [
-		{ label: 'ms / block read', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'blk_read_time'), deltaAt(r, i, 'blks_read')) }
+		{ label: 'ms / block read', description: 'Average read latency per disk block read. Uses: blk_read_time / blks_read.', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'blk_read_time'), deltaAt(r, i, 'blks_read')) }
 	]);
-	push({ key: 'block_read_ms', label: 'Block Read ms/block', kind: 'duration_ms', title: 'Avg block read time per block', category: 'derived', series: blockReadMsSeries });
+	push({ key: 'block_read_ms', label: 'Block Read ms/block', kind: 'duration_ms', title: 'Avg block read time per block', category: 'derived', series: blockReadMsSeries }, DB_GROUP.io);
+
+	const ioPerTxSeries = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'disk reads / tx', description: 'Disk block reads per transaction; separates transaction volume from I/O intensity. Uses: blks_read / transactions.', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'blks_read'), sumDeltaAt(r, i, ['xact_commit', 'xact_rollback'])) },
+		{ label: 'block access / tx', description: 'Shared-buffer hits plus disk reads per transaction; rough proxy for query footprint. Uses: (blks_read + blks_hit) / transactions.', seriesValueAt: (r, i) => safeRatio(sumDeltaAt(r, i, ['blks_read', 'blks_hit']), sumDeltaAt(r, i, ['xact_commit', 'xact_rollback'])) }
+	]);
+	push({ key: 'io_per_tx', label: 'I/O / Tx', kind: 'count', title: 'Block access per transaction', category: 'derived', series: ioPerTxSeries }, DB_GROUP.io);
+
+	const ioActiveRatioSeries = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'I/O time / active time', description: 'Block read plus write time as a share of active session time; high values suggest I/O-bound work. Uses: (blk_read_time + blk_write_time) / active_time.', seriesValueAt: (r, i) => safeRatio(sumDeltaAt(r, i, ['blk_read_time', 'blk_write_time']), deltaAt(r, i, 'active_time')) }
+	]);
+	push({ key: 'io_active_ratio', label: 'I/O / Active Time', kind: 'percent', title: 'Block I/O time as share of active session time', category: 'derived', series: ioActiveRatioSeries }, DB_GROUP.io);
 
 	const activeBackendsSeries = buildDerivedSeries(rows, runStartMs, [
-		{ label: 'active backends', seriesValueAt: (r, i) => toNumber(r[i].numbackends) }
+		{ label: 'active backends', description: 'Current backend count from pg_stat_database; instantaneous, not a cumulative counter. Uses: numbackends.', seriesValueAt: (r, i) => toNumber(r[i].numbackends) }
 	]);
-	push({ key: 'active_backends', label: 'Active Backends', kind: 'count', title: 'Active backends (instantaneous)', category: 'derived', series: activeBackendsSeries });
+	push({ key: 'active_backends', label: 'Active Backends', kind: 'count', title: 'Active backends (instantaneous)', category: 'derived', series: activeBackendsSeries }, DB_GROUP.session);
 
 	const sessionRatioSeries = buildDerivedSeries(rows, runStartMs, [
-		{ label: 'active time ratio', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'active_time'), deltaAt(r, i, 'session_time')) },
-		{ label: 'idle in txn ratio', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'idle_in_transaction_time'), deltaAt(r, i, 'session_time')) },
-		{ label: 'session error rate', seriesValueAt: (r, i) => safeRatio(sum([deltaAt(r, i, 'sessions_abandoned'), deltaAt(r, i, 'sessions_fatal'), deltaAt(r, i, 'sessions_killed')]), deltaAt(r, i, 'sessions')) }
+		{ label: 'active time ratio', description: 'Share of session time spent executing queries; low values can point to connection/client wait overhead. Uses: active_time / session_time.', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'active_time'), deltaAt(r, i, 'session_time')) },
+		{ label: 'idle in txn ratio', description: 'Share of session time spent idle while inside a transaction; high values point to client transaction-scope issues. Uses: idle_in_transaction_time / session_time.', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'idle_in_transaction_time'), deltaAt(r, i, 'session_time')) },
+		{ label: 'session error rate', description: 'Abandoned, fatal, or killed sessions divided by total sessions. Uses: (sessions_abandoned + sessions_fatal + sessions_killed) / sessions.', seriesValueAt: (r, i) => safeRatio(sum([deltaAt(r, i, 'sessions_abandoned'), deltaAt(r, i, 'sessions_fatal'), deltaAt(r, i, 'sessions_killed')]), deltaAt(r, i, 'sessions')) }
 	]);
-	push({ key: 'session_ratios', label: 'Session Ratios', kind: 'percent', title: 'Session time breakdown', category: 'derived', series: sessionRatioSeries });
+	push({ key: 'session_ratios', label: 'Session Ratios', kind: 'percent', title: 'Session time breakdown', category: 'derived', series: sessionRatioSeries }, DB_GROUP.session);
+
+	const sessionPerTxSeries = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'active time / tx', description: 'Database execution time per transaction; useful for comparing query cost across designs. Uses: active_time / transactions.', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'active_time'), sumDeltaAt(r, i, ['xact_commit', 'xact_rollback'])) },
+		{ label: 'session time / tx', description: 'Total session time per transaction, including active and waiting/idle session time. Uses: session_time / transactions.', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'session_time'), sumDeltaAt(r, i, ['xact_commit', 'xact_rollback'])) },
+		{ label: 'idle in txn time / tx', description: 'Idle-in-transaction time per transaction; highlights client-side transaction stalls. Uses: idle_in_transaction_time / transactions.', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'idle_in_transaction_time'), sumDeltaAt(r, i, ['xact_commit', 'xact_rollback'])) }
+	]);
+	push({ key: 'session_time_per_tx', label: 'Session Time / Tx', kind: 'duration_ms', title: 'Session time per transaction', category: 'derived', series: sessionPerTxSeries }, DB_GROUP.session);
 
 	const rowsPerTxSeries = buildDerivedSeries(rows, runStartMs, [
-		{ label: 'rows returned / tx', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'tup_returned'), sumDeltaAt(r, i, ['xact_commit', 'xact_rollback'])) }
+		{ label: 'rows returned / tx', description: 'Rows returned by queries per transaction; high values can mean broad scans or large result sets. Uses: tup_returned / transactions.', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'tup_returned'), sumDeltaAt(r, i, ['xact_commit', 'xact_rollback'])) },
+		{ label: 'rows fetched / tx', description: 'Rows fetched from tables per transaction; useful for comparing executor table access. Uses: tup_fetched / transactions.', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'tup_fetched'), sumDeltaAt(r, i, ['xact_commit', 'xact_rollback'])) },
+		{ label: 'rows written / tx', description: 'Inserted, updated, and deleted rows per transaction; separates write intensity from transaction count. Uses: (tup_inserted + tup_updated + tup_deleted) / transactions.', seriesValueAt: (r, i) => safeRatio(sumDeltaAt(r, i, ['tup_inserted', 'tup_updated', 'tup_deleted']), sumDeltaAt(r, i, ['xact_commit', 'xact_rollback'])) }
 	]);
-	push({ key: 'rows_per_tx', label: 'Rows / Tx', kind: 'count', title: 'Rows returned per transaction', category: 'derived', series: rowsPerTxSeries });
+	push({ key: 'rows_per_tx', label: 'Rows / Tx', kind: 'count', title: 'Rows per transaction', category: 'derived', series: rowsPerTxSeries }, DB_GROUP.workload);
+
+	const returnedFetchedSeries = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'returned / fetched', description: 'Rows returned divided by rows fetched; high values can indicate broad scan-style query work. Uses: tup_returned / tup_fetched.', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'tup_returned'), deltaAt(r, i, 'tup_fetched')) }
+	]);
+	push({ key: 'returned_fetched_ratio', label: 'Returned / Fetched', kind: 'count', title: 'Rows returned per fetched row', category: 'derived', series: returnedFetchedSeries }, DB_GROUP.workload);
+
+	const writeMixSeries = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'write mix', description: 'Writes as a share of row activity; helps distinguish read-heavy from write-heavy workload shape. Uses: row writes / (rows returned + rows fetched + row writes).', seriesValueAt: (r, i) => safeRatio(sumDeltaAt(r, i, ['tup_inserted', 'tup_updated', 'tup_deleted']), sum([deltaAt(r, i, 'tup_returned'), deltaAt(r, i, 'tup_fetched'), sumDeltaAt(r, i, ['tup_inserted', 'tup_updated', 'tup_deleted'])])) }
+	]);
+	push({ key: 'write_mix', label: 'Write Mix', kind: 'percent', title: 'Writes as a share of row activity', category: 'derived', series: writeMixSeries }, DB_GROUP.workload);
+
+	const tempPerTxSeries = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'temp bytes / tx', description: 'Temporary-file bytes per transaction; high values often indicate sort/hash spills. Uses: temp_bytes / transactions.', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'temp_bytes'), sumDeltaAt(r, i, ['xact_commit', 'xact_rollback'])) }
+	]);
+	push({ key: 'temp_bytes_per_tx', label: 'Temp Bytes / Tx', kind: 'bytes', title: 'Temporary bytes per transaction', category: 'derived', series: tempPerTxSeries }, DB_GROUP.spills);
+
+	const tempFilesPerTxSeries = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'temp files / tx', description: 'Temporary files created per transaction; many files can indicate repeated spill events. Uses: temp_files / transactions.', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'temp_files'), sumDeltaAt(r, i, ['xact_commit', 'xact_rollback'])) }
+	]);
+	push({ key: 'temp_files_per_tx', label: 'Temp Files / Tx', kind: 'count', title: 'Temporary files per transaction', category: 'derived', series: tempFilesPerTxSeries }, DB_GROUP.spills);
+
+	const avgTempFileSizeSeries = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'avg temp file size', description: 'Average bytes per temp file; separates a few large spills from many small spill files. Uses: temp_bytes / temp_files.', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'temp_bytes'), deltaAt(r, i, 'temp_files')) }
+	]);
+	push({ key: 'avg_temp_file_size', label: 'Avg Temp File Size', kind: 'bytes', title: 'Average temporary file size', category: 'derived', series: avgTempFileSizeSeries }, DB_GROUP.spills);
+
+	const parallelLaunchSeries = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'launch success rate', description: 'Parallel workers launched divided by workers requested; low values suggest parallel worker pressure. Uses: parallel_workers_launched / parallel_workers_to_launch.', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'parallel_workers_launched'), deltaAt(r, i, 'parallel_workers_to_launch')) }
+	]);
+	push({ key: 'parallel_launch_success', label: 'Parallel Launch Success', kind: 'percent', title: 'Parallel worker launch success rate', category: 'derived', series: parallelLaunchSeries }, DB_GROUP.parallel);
+
+	const parallelWorkersPerTxSeries = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'workers launched / tx', description: 'Parallel workers launched per transaction; shows whether parallel execution meaningfully participated. Uses: parallel_workers_launched / transactions.', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'parallel_workers_launched'), sumDeltaAt(r, i, ['xact_commit', 'xact_rollback'])) }
+	]);
+	push({ key: 'parallel_workers_per_tx', label: 'Parallel Workers / Tx', kind: 'count', title: 'Parallel workers launched per transaction', category: 'derived', series: parallelWorkersPerTxSeries }, DB_GROUP.parallel);
+
+	const deadlocksPerTxSeries = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'deadlocks / 1M tx', description: 'Deadlocks normalized per million transactions so runs of different sizes are comparable. Uses: deadlocks / transactions.', seriesValueAt: (r, i) => {
+			const value = safeRatio(deltaAt(r, i, 'deadlocks'), sumDeltaAt(r, i, ['xact_commit', 'xact_rollback']));
+			return value === null ? null : value * 1_000_000;
+		} }
+	]);
+	push({ key: 'deadlocks_per_tx', label: 'Deadlocks / 1M Tx', kind: 'count', title: 'Deadlocks normalized by transaction volume', category: 'derived', series: deadlocksPerTxSeries }, DB_GROUP.errors);
 
 	return {
 		key: 'database',
 		label: 'Database',
 		status: 'ok',
-		summary: [
-			metricCard('transactions', 'Transactions', 'count', totalTransactions),
-			metricCard('tps', 'DB-stat TPS', 'tps', tps),
-			metricCard('buffer_hit_ratio', 'Buffer Hit Ratio', 'percent', hitRatio),
-			metricCard('rollback_ratio', 'Rollback Rate', 'percent', safeRatio(txRollback, totalTransactions)),
-			metricCard('temp_bytes', 'Temp Bytes', 'bytes', tempBytes),
-			metricCard('blk_read_time_per_tx', 'Block Read Time / Tx', 'duration_ms', safeRatio(delta(rows, 'blk_read_time'), totalTransactions))
-		],
+		summary: [],
 		chartTitle: dbChartMetrics[0]?.title ?? 'Database metrics over time',
 		chartSeries: dbChartMetrics[0]?.series ?? [],
 		chartMetrics: dbChartMetrics,
@@ -764,35 +973,119 @@ function buildDatabaseSection(rows: SnapshotRow[], runStartMs: number): Telemetr
 			{ metric: 'Rollbacks', value: txRollback, kind: 'count' },
 			{ metric: 'DB-stat TPS', value: tps, kind: 'tps' },
 			{ metric: 'Buffer hit ratio', value: hitRatio, kind: 'percent' },
-			{ metric: 'Blocks read', value: delta(rows, 'blks_read'), kind: 'count' },
-			{ metric: 'Blocks hit', value: delta(rows, 'blks_hit'), kind: 'count' },
-			{ metric: 'Rows inserted', value: delta(rows, 'tup_inserted'), kind: 'count' },
-			{ metric: 'Rows updated', value: delta(rows, 'tup_updated'), kind: 'count' },
-			{ metric: 'Rows deleted', value: delta(rows, 'tup_deleted'), kind: 'count' },
+			{ metric: 'Cache miss rate', value: missRatio, kind: 'percent' },
+			{ metric: 'Blocks read', value: blocksRead, kind: 'count' },
+			{ metric: 'Blocks hit', value: blocksHit, kind: 'count' },
+			{ metric: 'Disk reads / tx', value: diskReadsPerTx, kind: 'count' },
+			{ metric: 'Block access / tx', value: blockAccessPerTx, kind: 'count' },
+			{ metric: 'Rows inserted', value: rowsInserted, kind: 'count' },
+			{ metric: 'Rows updated', value: rowsUpdated, kind: 'count' },
+			{ metric: 'Rows deleted', value: rowsDeleted, kind: 'count' },
+			{ metric: 'Rows returned / tx', value: rowsReturnedPerTx, kind: 'count' },
+			{ metric: 'Rows fetched / tx', value: rowsFetchedPerTx, kind: 'count' },
+			{ metric: 'Rows written / tx', value: rowsWrittenPerTx, kind: 'count' },
+			{ metric: 'Returned / fetched', value: returnedFetchedRatio, kind: 'count' },
+			{ metric: 'Write mix', value: writeMix, kind: 'percent' },
 			{ metric: 'Temp bytes', value: tempBytes, kind: 'bytes' },
+			{ metric: 'Temp files', value: tempFiles, kind: 'count' },
+			{ metric: 'Temp bytes / tx', value: tempBytesPerTx, kind: 'bytes' },
+			{ metric: 'Temp files / tx', value: tempFilesPerTx, kind: 'count' },
+			{ metric: 'Avg temp file size', value: avgTempFileSize, kind: 'bytes' },
+			{ metric: 'Sessions', value: sessions, kind: 'count' },
+			{ metric: 'Sessions abandoned', value: sessionsAbandoned, kind: 'count' },
+			{ metric: 'Sessions fatal', value: sessionsFatal, kind: 'count' },
+			{ metric: 'Sessions killed', value: sessionsKilled, kind: 'count' },
+			{ metric: 'Session time (ms)', value: sessionTime, kind: 'duration_ms' },
+			{ metric: 'Active time (ms)', value: activeTime, kind: 'duration_ms' },
+			{ metric: 'Idle in transaction time (ms)', value: idleInTransactionTime, kind: 'duration_ms' },
+			{ metric: 'I/O time / active time', value: ioActiveRatio, kind: 'percent' },
+			{ metric: 'Active time / tx', value: activeTimePerTx, kind: 'duration_ms' },
+			{ metric: 'Session time / tx', value: sessionTimePerTx, kind: 'duration_ms' },
+			{ metric: 'Idle in transaction time / tx', value: idleInTransactionTimePerTx, kind: 'duration_ms' },
+			{ metric: 'Parallel workers to launch', value: parallelWorkersToLaunch, kind: 'count' },
+			{ metric: 'Parallel workers launched', value: parallelWorkersLaunched, kind: 'count' },
+			{ metric: 'Parallel launch success', value: parallelLaunchSuccess, kind: 'percent' },
+			{ metric: 'Parallel workers / tx', value: parallelWorkersPerTx, kind: 'count' },
 			{ metric: 'Deadlocks', value: deadlocks, kind: 'count' },
-			{ metric: 'Block read time (ms)', value: delta(rows, 'blk_read_time'), kind: 'duration_ms' },
-			{ metric: 'Block write time (ms)', value: delta(rows, 'blk_write_time'), kind: 'duration_ms' }
+			{ metric: 'Deadlocks / 1M tx', value: deadlocksPerMillionTx, kind: 'count' },
+			{ metric: 'Block read time (ms)', value: blockReadTime, kind: 'duration_ms' },
+			{ metric: 'Block write time (ms)', value: blockWriteTime, kind: 'duration_ms' }
 		]),
 		tableSnapshots: buildMetricTableSnapshots(rows, runStartMs, (snapshotRows, index) => {
 			const commit = deltaAt(snapshotRows, index, 'xact_commit');
 			const rollback = deltaAt(snapshotRows, index, 'xact_rollback');
 			const transactions = sum([commit, rollback]);
+			const snapshotBlocksRead = deltaAt(snapshotRows, index, 'blks_read');
+			const snapshotBlocksHit = deltaAt(snapshotRows, index, 'blks_hit');
+			const snapshotBlockAccess = sum([snapshotBlocksRead, snapshotBlocksHit]);
+			const snapshotRowsReturned = deltaAt(snapshotRows, index, 'tup_returned');
+			const snapshotRowsFetched = deltaAt(snapshotRows, index, 'tup_fetched');
+			const snapshotRowsWritten = sum([
+				deltaAt(snapshotRows, index, 'tup_inserted'),
+				deltaAt(snapshotRows, index, 'tup_updated'),
+				deltaAt(snapshotRows, index, 'tup_deleted')
+			]);
+			const snapshotTempBytes = deltaAt(snapshotRows, index, 'temp_bytes');
+			const snapshotTempFiles = deltaAt(snapshotRows, index, 'temp_files');
+			const snapshotSessions = deltaAt(snapshotRows, index, 'sessions');
+			const snapshotSessionsAbandoned = deltaAt(snapshotRows, index, 'sessions_abandoned');
+			const snapshotSessionsFatal = deltaAt(snapshotRows, index, 'sessions_fatal');
+			const snapshotSessionsKilled = deltaAt(snapshotRows, index, 'sessions_killed');
+			const snapshotActiveTime = deltaAt(snapshotRows, index, 'active_time');
+			const snapshotSessionTime = deltaAt(snapshotRows, index, 'session_time');
+			const snapshotIdleInTransactionTime = deltaAt(snapshotRows, index, 'idle_in_transaction_time');
+			const snapshotParallelWorkersToLaunch = deltaAt(snapshotRows, index, 'parallel_workers_to_launch');
+			const snapshotParallelWorkersLaunched = deltaAt(snapshotRows, index, 'parallel_workers_launched');
+			const snapshotBlockReadTime = deltaAt(snapshotRows, index, 'blk_read_time');
+			const snapshotBlockWriteTime = deltaAt(snapshotRows, index, 'blk_write_time');
+			const snapshotDeadlocks = deltaAt(snapshotRows, index, 'deadlocks');
+			const snapshotDeadlocksPerMillion = (() => {
+				const value = safeRatio(snapshotDeadlocks, transactions);
+				return value === null ? null : value * 1_000_000;
+			})();
 			return makeMetricRows([
 				{ metric: 'Transactions', value: transactions, kind: 'count' },
 				{ metric: 'Commits', value: commit, kind: 'count' },
 				{ metric: 'Rollbacks', value: rollback, kind: 'count' },
 				{ metric: 'DB-stat TPS', value: safeRatio(transactions, elapsedSecondsAt(snapshotRows, index)), kind: 'tps' },
 				{ metric: 'Buffer hit ratio', value: ratioAt(snapshotRows, index, 'blks_hit', ['blks_hit', 'blks_read']), kind: 'percent' },
-				{ metric: 'Blocks read', value: deltaAt(snapshotRows, index, 'blks_read'), kind: 'count' },
-				{ metric: 'Blocks hit', value: deltaAt(snapshotRows, index, 'blks_hit'), kind: 'count' },
+				{ metric: 'Cache miss rate', value: ratioAt(snapshotRows, index, 'blks_read', ['blks_hit', 'blks_read']), kind: 'percent' },
+				{ metric: 'Blocks read', value: snapshotBlocksRead, kind: 'count' },
+				{ metric: 'Blocks hit', value: snapshotBlocksHit, kind: 'count' },
+				{ metric: 'Disk reads / tx', value: safeRatio(snapshotBlocksRead, transactions), kind: 'count' },
+				{ metric: 'Block access / tx', value: safeRatio(snapshotBlockAccess, transactions), kind: 'count' },
 				{ metric: 'Rows inserted', value: deltaAt(snapshotRows, index, 'tup_inserted'), kind: 'count' },
 				{ metric: 'Rows updated', value: deltaAt(snapshotRows, index, 'tup_updated'), kind: 'count' },
 				{ metric: 'Rows deleted', value: deltaAt(snapshotRows, index, 'tup_deleted'), kind: 'count' },
-				{ metric: 'Temp bytes', value: deltaAt(snapshotRows, index, 'temp_bytes'), kind: 'bytes' },
-				{ metric: 'Deadlocks', value: deltaAt(snapshotRows, index, 'deadlocks'), kind: 'count' },
-				{ metric: 'Block read time (ms)', value: deltaAt(snapshotRows, index, 'blk_read_time'), kind: 'duration_ms' },
-				{ metric: 'Block write time (ms)', value: deltaAt(snapshotRows, index, 'blk_write_time'), kind: 'duration_ms' }
+				{ metric: 'Rows returned / tx', value: safeRatio(snapshotRowsReturned, transactions), kind: 'count' },
+				{ metric: 'Rows fetched / tx', value: safeRatio(snapshotRowsFetched, transactions), kind: 'count' },
+				{ metric: 'Rows written / tx', value: safeRatio(snapshotRowsWritten, transactions), kind: 'count' },
+				{ metric: 'Returned / fetched', value: safeRatio(snapshotRowsReturned, snapshotRowsFetched), kind: 'count' },
+				{ metric: 'Write mix', value: safeRatio(snapshotRowsWritten, sum([snapshotRowsReturned, snapshotRowsFetched, snapshotRowsWritten])), kind: 'percent' },
+				{ metric: 'Temp bytes', value: snapshotTempBytes, kind: 'bytes' },
+				{ metric: 'Temp files', value: snapshotTempFiles, kind: 'count' },
+				{ metric: 'Temp bytes / tx', value: safeRatio(snapshotTempBytes, transactions), kind: 'bytes' },
+				{ metric: 'Temp files / tx', value: safeRatio(snapshotTempFiles, transactions), kind: 'count' },
+				{ metric: 'Avg temp file size', value: safeRatio(snapshotTempBytes, snapshotTempFiles), kind: 'bytes' },
+				{ metric: 'Sessions', value: snapshotSessions, kind: 'count' },
+				{ metric: 'Sessions abandoned', value: snapshotSessionsAbandoned, kind: 'count' },
+				{ metric: 'Sessions fatal', value: snapshotSessionsFatal, kind: 'count' },
+				{ metric: 'Sessions killed', value: snapshotSessionsKilled, kind: 'count' },
+				{ metric: 'Session time (ms)', value: snapshotSessionTime, kind: 'duration_ms' },
+				{ metric: 'Active time (ms)', value: snapshotActiveTime, kind: 'duration_ms' },
+				{ metric: 'Idle in transaction time (ms)', value: snapshotIdleInTransactionTime, kind: 'duration_ms' },
+				{ metric: 'I/O time / active time', value: safeRatio(sum([snapshotBlockReadTime, snapshotBlockWriteTime]), snapshotActiveTime), kind: 'percent' },
+				{ metric: 'Active time / tx', value: safeRatio(snapshotActiveTime, transactions), kind: 'duration_ms' },
+				{ metric: 'Session time / tx', value: safeRatio(snapshotSessionTime, transactions), kind: 'duration_ms' },
+				{ metric: 'Idle in transaction time / tx', value: safeRatio(snapshotIdleInTransactionTime, transactions), kind: 'duration_ms' },
+				{ metric: 'Parallel workers to launch', value: snapshotParallelWorkersToLaunch, kind: 'count' },
+				{ metric: 'Parallel workers launched', value: snapshotParallelWorkersLaunched, kind: 'count' },
+				{ metric: 'Parallel launch success', value: safeRatio(snapshotParallelWorkersLaunched, snapshotParallelWorkersToLaunch), kind: 'percent' },
+				{ metric: 'Parallel workers / tx', value: safeRatio(snapshotParallelWorkersLaunched, transactions), kind: 'count' },
+				{ metric: 'Deadlocks', value: snapshotDeadlocks, kind: 'count' },
+				{ metric: 'Deadlocks / 1M tx', value: snapshotDeadlocksPerMillion, kind: 'count' },
+				{ metric: 'Block read time (ms)', value: snapshotBlockReadTime, kind: 'duration_ms' },
+				{ metric: 'Block write time (ms)', value: snapshotBlockWriteTime, kind: 'duration_ms' }
 			]);
 		})
 	};

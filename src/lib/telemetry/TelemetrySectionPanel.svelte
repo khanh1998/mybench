@@ -226,11 +226,13 @@
   </div>
 
   {#if section.status === 'ok'}
-    <div class="summary-grid">
-      {#each section.summary as card}
-        <TelemetryValueCard {card} variant="summary" />
-      {/each}
-    </div>
+    {#if section.summary.length > 0}
+      <div class="summary-grid">
+        {#each section.summary as card}
+          <TelemetryValueCard {card} variant="summary" />
+        {/each}
+      </div>
+    {/if}
 
     {#if chartMetricGroups.length > 1}
       <div class="chart-group-tabs" aria-label="Metric sections">
