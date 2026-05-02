@@ -34,8 +34,11 @@ export interface TelemetryChartMetric {
   title: string;
   series: TelemetrySeries[];
   rawSeries?: TelemetrySeries[];
+  allSeries?: TelemetrySeries[];
+  allRawSeries?: TelemetrySeries[];
   group?: string;
   entity?: string;
+  category?: 'raw' | 'derived';
 }
 
 export interface TelemetryMarker {

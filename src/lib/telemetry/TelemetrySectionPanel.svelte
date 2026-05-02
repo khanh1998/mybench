@@ -24,10 +24,12 @@
   let selectedChartMetricKey = $state<string | null>(null);
   let selectedChartMetricGroup = $state<string | null>(null);
   let selectedChartMetricEntity = $state<string | null>(null);
+  let selectedCategory = $state<'all' | 'raw' | 'derived'>('all');
   let tableExpanded = $state(false);
   let selectedTableTime = $state<number | null>(null);
   let lastSectionKey = $state('');
   let selectedValueView = $state<'rate' | 'raw' | 'avg'>('rate');
+  let showAllEntries = $state(false);
 
   const chartMetricGroups = $derived.by(() => {
     const groups: string[] = [];
@@ -65,9 +67,19 @@
         : 'Target'
   );
 
+  const hasCategories = $derived(
+    (section.chartMetrics ?? []).some((m) => m.category === 'raw') &&
+    (section.chartMetrics ?? []).some((m) => m.category === 'derived')
+  );
+
   const visibleChartMetrics = $derived.by((): TelemetryChartMetric[] => {
-    if (chartMetricEntities.length === 0) return groupedChartMetrics;
-    return groupedChartMetrics.filter((metric) => metric.entity === activeChartMetricEntity);
+    let metrics = chartMetricEntities.length === 0
+      ? groupedChartMetrics
+      : groupedChartMetrics.filter((metric) => metric.entity === activeChartMetricEntity);
+    if (selectedCategory !== 'all') {
+      metrics = metrics.filter((m) => m.category === selectedCategory || !m.category);
+    }
+    return metrics;
   });
 
   const activeChartMetric = $derived.by(() => {
@@ -77,6 +89,7 @@
     return visibleChartMetrics.find((metric) => metric.key === selected) ?? visibleChartMetrics[0];
   });
   const activeMetricHasRaw = $derived(!!activeChartMetric?.rawSeries?.length);
+  const activeMetricHasMore = $derived(!!activeChartMetric?.allSeries?.length);
   const activeValueView = $derived(
     selectedValueView === 'avg' ? 'avg'
     : activeMetricHasRaw ? selectedValueView
@@ -84,7 +97,11 @@
   );
   const activeChartSeries = $derived.by(() => {
     if (!activeChartMetric) return section.chartSeries;
-    if (activeValueView === 'raw') return activeChartMetric.rawSeries ?? [];
+    if (activeValueView === 'raw') {
+      if (showAllEntries && activeChartMetric.allRawSeries?.length) return activeChartMetric.allRawSeries;
+      return activeChartMetric.rawSeries ?? [];
+    }
+    if (showAllEntries && activeChartMetric.allSeries?.length) return activeChartMetric.allSeries;
     return activeChartMetric.series;
   });
   const activeChartTitle = $derived.by(() => {
@@ -141,6 +158,8 @@
     tableExpanded = false;
     selectedChartMetricGroup = null;
     selectedChartMetricEntity = null;
+    selectedCategory = 'all';
+    showAllEntries = false;
   });
 
   $effect(() => {
@@ -230,6 +249,26 @@
       </div>
     {/if}
 
+    {#if hasCategories}
+      <div class="category-toggle" aria-label="Metric category">
+        <button
+          type="button"
+          class:active={selectedCategory === 'all'}
+          onclick={() => { selectedCategory = 'all'; selectedChartMetricKey = null; }}
+        >All</button>
+        <button
+          type="button"
+          class:active={selectedCategory === 'raw'}
+          onclick={() => { selectedCategory = 'raw'; selectedChartMetricKey = null; }}
+        >Raw</button>
+        <button
+          type="button"
+          class:active={selectedCategory === 'derived'}
+          onclick={() => { selectedCategory = 'derived'; selectedChartMetricKey = null; }}
+        >Derived</button>
+      </div>
+    {/if}
+
     {#if visibleChartMetrics.length > 0}
       <div class="chart-metric-toolbar">
         {#if chartMetricEntities.length > 0}
@@ -260,6 +299,20 @@
             >{metric.label}</button>
           {/each}
         </div>
+        {#if activeMetricHasMore}
+          <div class="entries-toggle" aria-label="Entries scope">
+            <button
+              type="button"
+              class:active={!showAllEntries}
+              onclick={() => showAllEntries = false}
+            >Top 5</button>
+            <button
+              type="button"
+              class:active={showAllEntries}
+              onclick={() => showAllEntries = true}
+            >Active</button>
+          </div>
+        {/if}
         <div class="value-view-control" aria-label="Metric value view">
           <span class="value-view-label">View</span>
           <div class="value-view-toggle">
@@ -463,6 +516,72 @@
   .chart-group-tab.active {
     color: var(--accent);
     border-bottom-color: var(--accent);
+  }
+
+  .entries-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    border: 1px solid #d7dee8;
+    border-radius: 8px;
+    background: #f1f5f9;
+    padding: 2px;
+    align-self: flex-start;
+  }
+
+  .entries-toggle button {
+    min-width: 44px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: #64748b;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 700;
+    padding: 5px 10px;
+  }
+
+  .entries-toggle button:hover {
+    color: var(--accent);
+  }
+
+  .entries-toggle button.active {
+    background: #fff;
+    color: var(--accent);
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12);
+  }
+
+  .category-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    border: 1px solid #d7dee8;
+    border-radius: 8px;
+    background: #f1f5f9;
+    padding: 2px;
+    align-self: flex-start;
+  }
+
+  .category-toggle button {
+    min-width: 60px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: #64748b;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 700;
+    padding: 5px 10px;
+  }
+
+  .category-toggle button:hover {
+    color: var(--accent);
+  }
+
+  .category-toggle button.active {
+    background: #fff;
+    color: var(--accent);
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12);
   }
 
   .chart-metric-toolbar {
