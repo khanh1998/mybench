@@ -1096,11 +1096,19 @@ function buildDatabaseSection(rows: SnapshotRow[], runStartMs: number): Telemetr
 	};
 }
 
-function buildWalSection(rows: SnapshotRow[], runStartMs: number, transactions: number | null): TelemetrySection {
+function buildWalSection(rows: SnapshotRow[], runStartMs: number, transactionRows: SnapshotRow[]): TelemetrySection {
 	const walBytes = delta(rows, 'wal_bytes');
 	const walRecords = delta(rows, 'wal_records');
 	const walFpi = delta(rows, 'wal_fpi');
 	const walBuffersFull = delta(rows, 'wal_buffers_full');
+	const transactions = sum([delta(transactionRows, 'xact_commit'), delta(transactionRows, 'xact_rollback')]);
+	const walRate = safeRatio(walBytes, elapsedSeconds(rows));
+	const walBytesPerTx = safeRatio(walBytes, transactions);
+	const walRecordsPerTx = safeRatio(walRecords, transactions);
+	const walBuffersFullPerMb = (() => {
+		const value = safeRatio(walBuffersFull, walBytes);
+		return value === null ? null : value * 1024 * 1024;
+	})();
 
 	if (rows.length === 0) {
 		return {
@@ -1119,47 +1127,128 @@ function buildWalSection(rows: SnapshotRow[], runStartMs: number, transactions: 
 	}
 
 	const walChartMetrics: TelemetryChartMetric[] = [];
-	const pushWal = (m: TelemetryChartMetric | null) => { if (m && (m.series.length > 0 || (m.rawSeries?.length ?? 0) > 0)) walChartMetrics.push(m); };
+	const WAL_GROUP = {
+		volume: 'WAL Volume',
+		records: 'Record Shape',
+		buffers: 'Buffer Pressure',
+		efficiency: 'Efficiency'
+	} as const;
+	const PG_STAT_WAL_DOCS = {
+		wal_records: 'Total number of WAL records generated.',
+		wal_fpi: 'Total number of WAL full page images generated.',
+		wal_bytes: 'Total amount of WAL generated in bytes.',
+		wal_buffers_full: 'Number of times WAL data was written to disk because WAL buffers became full.'
+	} as const;
+	const walSource = (columns: string[]) => `Source: pg_stat_wal.${columns.join(', pg_stat_wal.')}.`;
+	const walRateDescription = (description: string, columns: string[]) => `${description} Shown as a per second delta. ${walSource(columns)}`;
+	const walRawDescription = (description: string, columns: string[]) => `${description} Raw view shows the cumulative delta since the first selected sample. ${walSource(columns)}`;
+	const walDerivedDescription = (description: string, uses: string) => `${description} Uses: ${uses}.`;
+	const pushWal = (m: TelemetryChartMetric | null, group: string) => {
+		if (m && (m.series.length > 0 || (m.rawSeries?.length ?? 0) > 0)) walChartMetrics.push({ ...m, group });
+	};
+	const walRowsWritten = sum([
+		delta(transactionRows, 'tup_inserted'),
+		delta(transactionRows, 'tup_updated'),
+		delta(transactionRows, 'tup_deleted')
+	]);
+	const walBytesPerRowWritten = safeRatio(walBytes, walRowsWritten);
+	const walBuffersFullPerKTx = (() => {
+		const value = safeRatio(walBuffersFull, transactions);
+		return value === null ? null : value * 1000;
+	})();
+	const transactionsAt = (walSnapshotRows: SnapshotRow[], walIndex: number): number | null => {
+		if (transactionRows.length === 0) return null;
+		const walTs = toMs(String(walSnapshotRows[walIndex]?._collected_at ?? ''));
+		let txIndex = -1;
+		for (let index = 0; index < transactionRows.length; index++) {
+			const txTs = toMs(String(transactionRows[index]._collected_at));
+			if (walTs !== null && txTs !== null && txTs <= walTs) txIndex = index;
+		}
+		if (txIndex < 0) txIndex = Math.min(walIndex, transactionRows.length - 1);
+		return sumDeltaAt(transactionRows, txIndex, ['xact_commit', 'xact_rollback']);
+	};
+	const rowsWrittenAt = (walSnapshotRows: SnapshotRow[], walIndex: number): number | null => {
+		if (transactionRows.length === 0) return null;
+		const walTs = toMs(String(walSnapshotRows[walIndex]?._collected_at ?? ''));
+		let txIndex = -1;
+		for (let index = 0; index < transactionRows.length; index++) {
+			const txTs = toMs(String(transactionRows[index]._collected_at));
+			if (walTs !== null && txTs !== null && txTs <= walTs) txIndex = index;
+		}
+		if (txIndex < 0) txIndex = Math.min(walIndex, transactionRows.length - 1);
+		return sumDeltaAt(transactionRows, txIndex, ['tup_inserted', 'tup_updated', 'tup_deleted']);
+	};
 
 	const walBytesRate = buildDerivedSeries(rows, runStartMs, [
-		{ label: 'wal bytes/s', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'wal_bytes'), elapsedSecondsAt(r, i)) }
+		{ label: 'wal bytes/s', description: walRateDescription(PG_STAT_WAL_DOCS.wal_bytes, ['wal_bytes']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'wal_bytes'), elapsedSecondsAt(r, i)) }
 	]);
-	const walBytesRaw = buildMetricSeries(rows, runStartMs, [{ label: 'wal bytes', valueFn: (row) => toNumber(row.wal_bytes) }]);
-	pushWal({ key: 'wal_bytes', label: 'WAL Bytes', kind: 'bytes', title: 'WAL volume over time', category: 'raw', series: walBytesRate, rawSeries: walBytesRaw });
+	const walBytesRaw = buildMetricSeries(rows, runStartMs, [{ label: 'wal bytes', description: walRawDescription(PG_STAT_WAL_DOCS.wal_bytes, ['wal_bytes']), valueFn: (row) => toNumber(row.wal_bytes) }]);
+	pushWal({ key: 'wal_bytes', label: 'WAL Bytes', description: walRateDescription(PG_STAT_WAL_DOCS.wal_bytes, ['wal_bytes']), kind: 'bytes', title: 'WAL volume over time', category: 'raw', series: walBytesRate, rawSeries: walBytesRaw }, WAL_GROUP.volume);
 
 	const walCountsRate = buildDerivedSeries(rows, runStartMs, [
-		{ label: 'records/s', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'wal_records'), elapsedSecondsAt(r, i)) },
-		{ label: 'full page images/s', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'wal_fpi'), elapsedSecondsAt(r, i)) },
-		{ label: 'buffers full/s', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'wal_buffers_full'), elapsedSecondsAt(r, i)) }
+		{ label: 'records/s', description: walRateDescription(PG_STAT_WAL_DOCS.wal_records, ['wal_records']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'wal_records'), elapsedSecondsAt(r, i)) },
+		{ label: 'full page images/s', description: walRateDescription(PG_STAT_WAL_DOCS.wal_fpi, ['wal_fpi']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'wal_fpi'), elapsedSecondsAt(r, i)) }
 	]);
 	const walCountsRaw = buildMetricSeries(rows, runStartMs, [
-		{ label: 'wal records', valueFn: (row) => toNumber(row.wal_records) },
-		{ label: 'full page images', valueFn: (row) => toNumber(row.wal_fpi) },
-		{ label: 'wal buffers full', valueFn: (row) => toNumber(row.wal_buffers_full) }
+		{ label: 'wal records', description: walRawDescription(PG_STAT_WAL_DOCS.wal_records, ['wal_records']), valueFn: (row) => toNumber(row.wal_records) },
+		{ label: 'full page images', description: walRawDescription(PG_STAT_WAL_DOCS.wal_fpi, ['wal_fpi']), valueFn: (row) => toNumber(row.wal_fpi) }
 	]);
-	pushWal({ key: 'wal_counts', label: 'WAL Records', kind: 'count', title: 'WAL record counts over time', category: 'raw', series: walCountsRate, rawSeries: walCountsRaw });
+	pushWal({ key: 'wal_counts', label: 'WAL Records', description: 'WAL record and full-page-image counters from pg_stat_wal, shown as per second deltas.', kind: 'count', title: 'WAL record counts over time', category: 'raw', series: walCountsRate, rawSeries: walCountsRaw }, WAL_GROUP.records);
+
+	const walBufferFullRate = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'buffers full/s', description: walRateDescription(PG_STAT_WAL_DOCS.wal_buffers_full, ['wal_buffers_full']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'wal_buffers_full'), elapsedSecondsAt(r, i)) }
+	]);
+	const walBufferFullRaw = buildMetricSeries(rows, runStartMs, [
+		{ label: 'wal buffers full', description: walRawDescription(PG_STAT_WAL_DOCS.wal_buffers_full, ['wal_buffers_full']), valueFn: (row) => toNumber(row.wal_buffers_full) }
+	]);
+	pushWal({ key: 'wal_buffers_full', label: 'WAL Buffers Full', description: walRateDescription(PG_STAT_WAL_DOCS.wal_buffers_full, ['wal_buffers_full']), kind: 'count', title: 'WAL buffer-full events over time', category: 'raw', series: walBufferFullRate, rawSeries: walBufferFullRaw }, WAL_GROUP.buffers);
 
 	const fpiRatioSeries = buildDerivedSeries(rows, runStartMs, [
-		{ label: 'FPI ratio', seriesValueAt: (r, i) => ratioAt(r, i, 'wal_fpi', ['wal_records']) }
+		{ label: 'FPI ratio', description: walDerivedDescription('Share of WAL records that were full-page images; higher values often point to checkpoint-driven page rewrites.', 'wal_fpi / wal_records'), seriesValueAt: (r, i) => ratioAt(r, i, 'wal_fpi', ['wal_records']) }
 	]);
-	pushWal({ key: 'fpi_ratio', label: 'FPI Ratio', kind: 'percent', title: 'Full-page image ratio over time', category: 'derived', series: fpiRatioSeries });
+	pushWal({ key: 'fpi_ratio', label: 'FPI Ratio', description: walDerivedDescription('Share of WAL records that were full-page images; higher values often point to checkpoint-driven page rewrites.', 'wal_fpi / wal_records'), kind: 'percent', title: 'Full-page image ratio over time', category: 'derived', series: fpiRatioSeries }, WAL_GROUP.records);
 
 	const walBytesPerRecordSeries = buildDerivedSeries(rows, runStartMs, [
-		{ label: 'bytes / record', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'wal_bytes'), deltaAt(r, i, 'wal_records')) }
+		{ label: 'bytes / record', description: walDerivedDescription('Average WAL bytes per record; rising values indicate larger WAL records or more full-page-image payload.', 'wal_bytes / wal_records'), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'wal_bytes'), deltaAt(r, i, 'wal_records')) }
 	]);
-	pushWal({ key: 'wal_bytes_per_record', label: 'WAL / Record', kind: 'bytes', title: 'Avg WAL bytes per record', category: 'derived', series: walBytesPerRecordSeries });
+	pushWal({ key: 'wal_bytes_per_record', label: 'WAL / Record', description: walDerivedDescription('Average WAL bytes per record; rising values indicate larger WAL records or more full-page-image payload.', 'wal_bytes / wal_records'), kind: 'bytes', title: 'Avg WAL bytes per record', category: 'derived', series: walBytesPerRecordSeries }, WAL_GROUP.efficiency);
+
+	const walBytesPerTxSeries = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'bytes / tx', description: walDerivedDescription('WAL volume normalized by database transaction count; useful for comparing write amplification across runs.', 'wal_bytes / transactions'), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'wal_bytes'), transactionsAt(r, i)) }
+	]);
+	pushWal({ key: 'wal_bytes_per_tx', label: 'WAL / Tx', description: walDerivedDescription('WAL volume normalized by database transaction count; useful for comparing write amplification across runs.', 'wal_bytes / transactions'), kind: 'bytes', title: 'WAL bytes per transaction', category: 'derived', series: walBytesPerTxSeries }, WAL_GROUP.efficiency);
+
+	const walRecordsPerTxSeries = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'records / tx', description: walDerivedDescription('WAL record count normalized by transaction count; helps separate many small records from large WAL payloads.', 'wal_records / transactions'), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'wal_records'), transactionsAt(r, i)) }
+	]);
+	pushWal({ key: 'wal_records_per_tx', label: 'Records / Tx', description: walDerivedDescription('WAL record count normalized by transaction count; helps separate many small records from large WAL payloads.', 'wal_records / transactions'), kind: 'count', title: 'WAL records per transaction', category: 'derived', series: walRecordsPerTxSeries }, WAL_GROUP.efficiency);
+
+	const walBuffersFullPerMbSeries = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'buffers full / MiB', description: walDerivedDescription('WAL buffer-full events normalized by WAL volume; high values suggest WAL buffer pressure relative to generated WAL.', 'wal_buffers_full / wal_bytes'), seriesValueAt: (r, i) => {
+			const value = safeRatio(deltaAt(r, i, 'wal_buffers_full'), deltaAt(r, i, 'wal_bytes'));
+			return value === null ? null : value * 1024 * 1024;
+		} }
+	]);
+	pushWal({ key: 'wal_buffers_full_per_mb', label: 'Buffers Full / MiB', description: walDerivedDescription('WAL buffer-full events normalized by WAL volume; high values suggest WAL buffer pressure relative to generated WAL.', 'wal_buffers_full / wal_bytes'), kind: 'count', title: 'WAL buffer-full events per MiB generated', category: 'derived', series: walBuffersFullPerMbSeries }, WAL_GROUP.buffers);
+
+	const walBytesPerRowWrittenSeries = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'bytes / row written', description: walDerivedDescription('WAL bytes per row change (insert + update + delete); captures write amplification at the row level independently of transaction batch size — a useful design comparison metric.', 'wal_bytes / (tup_inserted + tup_updated + tup_deleted)'), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'wal_bytes'), rowsWrittenAt(r, i)) }
+	]);
+	pushWal({ key: 'wal_bytes_per_row_written', label: 'WAL / Row Written', description: walDerivedDescription('WAL bytes per row change (insert + update + delete); captures write amplification at the row level independently of transaction batch size — a useful design comparison metric.', 'wal_bytes / (tup_inserted + tup_updated + tup_deleted)'), kind: 'bytes', title: 'WAL bytes per row written', category: 'derived', series: walBytesPerRowWrittenSeries }, WAL_GROUP.efficiency);
+
+	const walBuffersFullPerKTxSeries = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'buffers full / 1k tx', description: walDerivedDescription('WAL buffer-full events per 1000 transactions; removes run-duration bias for cross-run comparison — a design with a higher value sustains more WAL buffer pressure per unit of work.', '(wal_buffers_full / transactions) × 1000'), seriesValueAt: (r, i) => {
+			const value = safeRatio(deltaAt(r, i, 'wal_buffers_full'), transactionsAt(r, i));
+			return value === null ? null : value * 1000;
+		} }
+	]);
+	pushWal({ key: 'wal_buffers_full_per_k_tx', label: 'Buffers Full / 1k Tx', description: walDerivedDescription('WAL buffer-full events per 1000 transactions; removes run-duration bias for cross-run comparison — a design with a higher value sustains more WAL buffer pressure per unit of work.', '(wal_buffers_full / transactions) × 1000'), kind: 'count', title: 'WAL buffer-full events per 1000 transactions', category: 'derived', series: walBuffersFullPerKTxSeries }, WAL_GROUP.buffers);
 
 	return {
 		key: 'wal',
 		label: 'WAL',
 		status: 'ok',
-		summary: [
-			metricCard('wal_bytes', 'WAL Bytes', 'bytes', walBytes),
-			metricCard('wal_bytes_per_sec', 'WAL Rate', 'bytes', safeRatio(walBytes, elapsedSeconds(rows))),
-			metricCard('wal_bytes_per_tx', 'WAL / Tx', 'bytes', safeRatio(walBytes, transactions)),
-			metricCard('fpi_ratio', 'FPI Ratio', 'percent', safeRatio(walFpi, walRecords)),
-			metricCard('wal_buffers_full', 'WAL Buffers Full', 'count', walBuffersFull)
-		],
+		summary: [],
 		chartTitle: walChartMetrics[0]?.title ?? 'WAL metrics over time',
 		chartSeries: walChartMetrics[0]?.series ?? [],
 		chartMetrics: walChartMetrics,
@@ -1174,7 +1263,13 @@ function buildWalSection(rows: SnapshotRow[], runStartMs: number, transactions: 
 			{ metric: 'WAL records', value: walRecords, kind: 'count' },
 			{ metric: 'Full page images', value: walFpi, kind: 'count' },
 			{ metric: 'FPI ratio', value: safeRatio(walFpi, walRecords), kind: 'percent' },
-			{ metric: 'WAL buffers full', value: walBuffersFull, kind: 'count' }
+			{ metric: 'WAL bytes / tx', value: walBytesPerTx, kind: 'bytes' },
+			{ metric: 'WAL records / tx', value: walRecordsPerTx, kind: 'count' },
+			{ metric: 'WAL bytes / row written', value: walBytesPerRowWritten, kind: 'bytes' },
+			{ metric: 'WAL rate', value: walRate, kind: 'bytes' },
+			{ metric: 'WAL buffers full', value: walBuffersFull, kind: 'count' },
+			{ metric: 'WAL buffers full / MiB', value: walBuffersFullPerMb, kind: 'count' },
+			{ metric: 'WAL buffers full / 1k tx', value: walBuffersFullPerKTx, kind: 'count' }
 		]),
 		tableSnapshots: buildMetricTableSnapshots(rows, runStartMs, (snapshotRows, index) =>
 			makeMetricRows([
@@ -1186,16 +1281,49 @@ function buildWalSection(rows: SnapshotRow[], runStartMs: number, transactions: 
 					value: safeRatio(deltaAt(snapshotRows, index, 'wal_fpi'), deltaAt(snapshotRows, index, 'wal_records')),
 					kind: 'percent'
 				},
-				{ metric: 'WAL buffers full', value: deltaAt(snapshotRows, index, 'wal_buffers_full'), kind: 'count' }
+				{ metric: 'WAL bytes / tx', value: safeRatio(deltaAt(snapshotRows, index, 'wal_bytes'), transactionsAt(snapshotRows, index)), kind: 'bytes' },
+				{ metric: 'WAL records / tx', value: safeRatio(deltaAt(snapshotRows, index, 'wal_records'), transactionsAt(snapshotRows, index)), kind: 'count' },
+				{ metric: 'WAL bytes / row written', value: safeRatio(deltaAt(snapshotRows, index, 'wal_bytes'), rowsWrittenAt(snapshotRows, index)), kind: 'bytes' },
+				{ metric: 'WAL rate', value: safeRatio(deltaAt(snapshotRows, index, 'wal_bytes'), elapsedSecondsAt(snapshotRows, index)), kind: 'bytes' },
+				{ metric: 'WAL buffers full', value: deltaAt(snapshotRows, index, 'wal_buffers_full'), kind: 'count' },
+				{
+					metric: 'WAL buffers full / MiB',
+					value: (() => {
+						const value = safeRatio(deltaAt(snapshotRows, index, 'wal_buffers_full'), deltaAt(snapshotRows, index, 'wal_bytes'));
+						return value === null ? null : value * 1024 * 1024;
+					})(),
+					kind: 'count'
+				},
+				{
+					metric: 'WAL buffers full / 1k tx',
+					value: (() => {
+						const value = safeRatio(deltaAt(snapshotRows, index, 'wal_buffers_full'), transactionsAt(snapshotRows, index));
+						return value === null ? null : value * 1000;
+					})(),
+					kind: 'count'
+				}
 			])
 		)
 	};
 }
 
-function buildBgwriterSection(rows: SnapshotRow[], runStartMs: number): TelemetrySection {
+function buildBgwriterSection(rows: SnapshotRow[], runStartMs: number, databaseRows: SnapshotRow[]): TelemetrySection {
 	const buffersClean = delta(rows, 'buffers_clean');
 	const maxwrittenClean = delta(rows, 'maxwritten_clean');
 	const buffersAlloc = delta(rows, 'buffers_alloc');
+	const throttleRatio = safeRatio(maxwrittenClean, buffersClean);
+	const allocCoverage = safeRatio(buffersClean, buffersAlloc);
+	const transactions = sum([delta(databaseRows, 'xact_commit'), delta(databaseRows, 'xact_rollback')]);
+	const blksHit = delta(databaseRows, 'blks_hit');
+	const blksRead = delta(databaseRows, 'blks_read');
+	const totalCacheAccess = sum([blksHit, blksRead]);
+	const buffersAllocPerTx = safeRatio(buffersAlloc, transactions);
+	const buffersCleanPerTx = safeRatio(buffersClean, transactions);
+	const allocPerCacheAccess = safeRatio(buffersAlloc, totalCacheAccess);
+	const throttlePerKTx = (() => {
+		const value = safeRatio(maxwrittenClean, transactions);
+		return value === null ? null : value * 1000;
+	})();
 
 	if (rows.length === 0) {
 		return {
@@ -1213,37 +1341,138 @@ function buildBgwriterSection(rows: SnapshotRow[], runStartMs: number): Telemetr
 		};
 	}
 
+	const bgwChartMetrics: TelemetryChartMetric[] = [];
+	const BGW_GROUP = {
+		output: 'Buffer Output',
+		throttle: 'Throttle',
+		efficiency: 'Efficiency',
+		workload: 'Workload Shape'
+	} as const;
+	const transactionsAt = (bgwRows: SnapshotRow[], bgwIndex: number): number | null => {
+		if (databaseRows.length === 0) return null;
+		const bgwTs = toMs(String(bgwRows[bgwIndex]?._collected_at ?? ''));
+		let txIndex = -1;
+		for (let index = 0; index < databaseRows.length; index++) {
+			const txTs = toMs(String(databaseRows[index]._collected_at));
+			if (bgwTs !== null && txTs !== null && txTs <= bgwTs) txIndex = index;
+		}
+		if (txIndex < 0) txIndex = Math.min(bgwIndex, databaseRows.length - 1);
+		return sumDeltaAt(databaseRows, txIndex, ['xact_commit', 'xact_rollback']);
+	};
+	const cacheAccessAt = (bgwRows: SnapshotRow[], bgwIndex: number): number | null => {
+		if (databaseRows.length === 0) return null;
+		const bgwTs = toMs(String(bgwRows[bgwIndex]?._collected_at ?? ''));
+		let dbIndex = -1;
+		for (let index = 0; index < databaseRows.length; index++) {
+			const dbTs = toMs(String(databaseRows[index]._collected_at));
+			if (bgwTs !== null && dbTs !== null && dbTs <= bgwTs) dbIndex = index;
+		}
+		if (dbIndex < 0) dbIndex = Math.min(bgwIndex, databaseRows.length - 1);
+		return sumDeltaAt(databaseRows, dbIndex, ['blks_hit', 'blks_read']);
+	};
+	const PG_STAT_BGWRITER_DOCS = {
+		buffers_clean: 'Number of buffers written by the background writer.',
+		maxwritten_clean: 'Number of times the background writer stopped a cleaning scan because it had written too many buffers.',
+		buffers_alloc: 'Number of buffers allocated.'
+	} as const;
+	const bgwSource = (columns: string[]) => `Source: pg_stat_bgwriter.${columns.join(', pg_stat_bgwriter.')}.`;
+	const bgwRateDescription = (description: string, columns: string[]) => `${description} Shown as a per second delta. ${bgwSource(columns)}`;
+	const bgwRawDescription = (description: string, columns: string[]) => `${description} Raw view shows the cumulative delta since the first selected sample. ${bgwSource(columns)}`;
+	const bgwDerivedDescription = (description: string, uses: string) => `${description} Uses: ${uses}.`;
+	const pushBgw = (m: TelemetryChartMetric | null, group: string) => {
+		if (m && (m.series.length > 0 || (m.rawSeries?.length ?? 0) > 0)) bgwChartMetrics.push({ ...m, group });
+	};
+
+	const buffersCleanRate = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'buffers clean/s', description: bgwRateDescription(PG_STAT_BGWRITER_DOCS.buffers_clean, ['buffers_clean']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'buffers_clean'), elapsedSecondsAt(r, i)) }
+	]);
+	const buffersCleanRaw = buildMetricSeries(rows, runStartMs, [
+		{ label: 'buffers clean', description: bgwRawDescription(PG_STAT_BGWRITER_DOCS.buffers_clean, ['buffers_clean']), valueFn: (row) => toNumber(row.buffers_clean) }
+	]);
+	pushBgw({ key: 'buffers_clean', label: 'Buffers Clean', description: bgwRateDescription(PG_STAT_BGWRITER_DOCS.buffers_clean, ['buffers_clean']), kind: 'count', title: 'BGWriter buffer writes over time', category: 'raw', series: buffersCleanRate, rawSeries: buffersCleanRaw }, BGW_GROUP.output);
+
+	const buffersAllocRate = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'buffers alloc/s', description: bgwRateDescription(PG_STAT_BGWRITER_DOCS.buffers_alloc, ['buffers_alloc']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'buffers_alloc'), elapsedSecondsAt(r, i)) }
+	]);
+	const buffersAllocRaw = buildMetricSeries(rows, runStartMs, [
+		{ label: 'buffers alloc', description: bgwRawDescription(PG_STAT_BGWRITER_DOCS.buffers_alloc, ['buffers_alloc']), valueFn: (row) => toNumber(row.buffers_alloc) }
+	]);
+	pushBgw({ key: 'buffers_alloc', label: 'Buffers Alloc', description: bgwRateDescription(PG_STAT_BGWRITER_DOCS.buffers_alloc, ['buffers_alloc']), kind: 'count', title: 'Buffer allocations over time', category: 'raw', series: buffersAllocRate, rawSeries: buffersAllocRaw }, BGW_GROUP.output);
+
+	const maxwrittenCleanRate = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'maxwritten clean/s', description: bgwRateDescription(PG_STAT_BGWRITER_DOCS.maxwritten_clean, ['maxwritten_clean']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'maxwritten_clean'), elapsedSecondsAt(r, i)) }
+	]);
+	const maxwrittenCleanRaw = buildMetricSeries(rows, runStartMs, [
+		{ label: 'maxwritten clean', description: bgwRawDescription(PG_STAT_BGWRITER_DOCS.maxwritten_clean, ['maxwritten_clean']), valueFn: (row) => toNumber(row.maxwritten_clean) }
+	]);
+	pushBgw({ key: 'maxwritten_clean', label: 'Maxwritten Clean', description: bgwRateDescription(PG_STAT_BGWRITER_DOCS.maxwritten_clean, ['maxwritten_clean']), kind: 'count', title: 'BGWriter throttle events over time', category: 'raw', series: maxwrittenCleanRate, rawSeries: maxwrittenCleanRaw }, BGW_GROUP.throttle);
+
+	const throttleRatioSeries = buildDerivedSeries(rows, runStartMs, [
+		{
+			label: 'throttle ratio',
+			description: bgwDerivedDescription('Share of BGWriter cleaning scans cut short by bgwriter_lru_maxpages; high values indicate BGWriter is frequently throttled and backends may be evicting pages themselves.', 'maxwritten_clean / buffers_clean'),
+			seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'maxwritten_clean'), deltaAt(r, i, 'buffers_clean'))
+		}
+	]);
+	pushBgw({ key: 'throttle_ratio', label: 'Throttle Ratio', description: bgwDerivedDescription('Share of BGWriter cleaning scans cut short by bgwriter_lru_maxpages; high values indicate BGWriter is frequently throttled and backends may be evicting pages themselves.', 'maxwritten_clean / buffers_clean'), kind: 'percent', title: 'BGWriter throttle ratio over time', category: 'derived', series: throttleRatioSeries }, BGW_GROUP.throttle);
+
+	const allocCoverageSeries = buildDerivedSeries(rows, runStartMs, [
+		{
+			label: 'alloc coverage',
+			description: bgwDerivedDescription('Fraction of buffer allocations pre-cleaned by the BGWriter; low values suggest backends are bearing most of the eviction cost (victim eviction), adding latency to queries.', 'buffers_clean / buffers_alloc'),
+			seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'buffers_clean'), deltaAt(r, i, 'buffers_alloc'))
+		}
+	]);
+	pushBgw({ key: 'alloc_coverage', label: 'Alloc Coverage', description: bgwDerivedDescription('Fraction of buffer allocations pre-cleaned by the BGWriter; low values suggest backends are bearing most of the eviction cost (victim eviction), adding latency to queries.', 'buffers_clean / buffers_alloc'), kind: 'percent', title: 'BGWriter alloc coverage over time', category: 'derived', series: allocCoverageSeries }, BGW_GROUP.efficiency);
+
+	const buffersAllocPerTxSeries = buildDerivedSeries(rows, runStartMs, [
+		{
+			label: 'buffers alloc / tx',
+			description: bgwDerivedDescription('New shared buffer page allocations per transaction; lower values indicate a more cache-resident working set that will scale better under higher concurrency.', 'buffers_alloc / transactions'),
+			seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'buffers_alloc'), transactionsAt(r, i))
+		}
+	]);
+	pushBgw({ key: 'buffers_alloc_per_tx', label: 'Alloc / Tx', description: bgwDerivedDescription('New shared buffer page allocations per transaction; lower values indicate a more cache-resident working set that will scale better under higher concurrency.', 'buffers_alloc / transactions'), kind: 'count', title: 'Buffer allocations per transaction over time', category: 'derived', series: buffersAllocPerTxSeries }, BGW_GROUP.workload);
+
+	const buffersCleanPerTxSeries = buildDerivedSeries(rows, runStartMs, [
+		{
+			label: 'buffers clean / tx',
+			description: bgwDerivedDescription('BGWriter proactive buffer writes per transaction; a design with higher values is dirtying more pages per unit of work, which also predicts more checkpoint write pressure.', 'buffers_clean / transactions'),
+			seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'buffers_clean'), transactionsAt(r, i))
+		}
+	]);
+	pushBgw({ key: 'buffers_clean_per_tx', label: 'Clean / Tx', description: bgwDerivedDescription('BGWriter proactive buffer writes per transaction; a design with higher values is dirtying more pages per unit of work, which also predicts more checkpoint write pressure.', 'buffers_clean / transactions'), kind: 'count', title: 'BGWriter buffer writes per transaction over time', category: 'derived', series: buffersCleanPerTxSeries }, BGW_GROUP.workload);
+
+	const allocPerCacheAccessSeries = buildDerivedSeries(rows, runStartMs, [
+		{
+			label: 'alloc / cache access',
+			description: bgwDerivedDescription('Fraction of buffer accesses that required a new page allocation (i.e. a cold-page miss); high values indicate the working set frequently exceeds shared_buffers and increasing it may help.', 'buffers_alloc / (blks_hit + blks_read)'),
+			seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'buffers_alloc'), cacheAccessAt(r, i))
+		}
+	]);
+	pushBgw({ key: 'alloc_per_cache_access', label: 'Alloc / Cache Access', description: bgwDerivedDescription('Fraction of buffer accesses that required a new page allocation (i.e. a cold-page miss); high values indicate the working set frequently exceeds shared_buffers and increasing it may help.', 'buffers_alloc / (blks_hit + blks_read)'), kind: 'percent', title: 'Buffer allocations per cache access over time', category: 'derived', series: allocPerCacheAccessSeries }, BGW_GROUP.workload);
+
+	const throttlePerKTxSeries = buildDerivedSeries(rows, runStartMs, [
+		{
+			label: 'throttle events / 1k tx',
+			description: bgwDerivedDescription('BGWriter throttle events per 1000 transactions; removes run-duration bias for cross-run comparison — a design with higher values puts more cleaning pressure on the BGWriter per unit of work.', '(maxwritten_clean / transactions) × 1000'),
+			seriesValueAt: (r, i) => {
+				const value = safeRatio(deltaAt(r, i, 'maxwritten_clean'), transactionsAt(r, i));
+				return value === null ? null : value * 1000;
+			}
+		}
+	]);
+	pushBgw({ key: 'throttle_per_k_tx', label: 'Throttle / 1k Tx', description: bgwDerivedDescription('BGWriter throttle events per 1000 transactions; removes run-duration bias for cross-run comparison — a design with higher values puts more cleaning pressure on the BGWriter per unit of work.', '(maxwritten_clean / transactions) × 1000'), kind: 'count', title: 'BGWriter throttle events per 1000 transactions over time', category: 'derived', series: throttlePerKTxSeries }, BGW_GROUP.workload);
+
 	return {
 		key: 'bgwriter',
 		label: 'BGWriter',
 		status: 'ok',
-		summary: [
-			metricCard('buffers_clean', 'Buffers Clean', 'count', buffersClean),
-			metricCard('maxwritten_clean', 'Maxwritten Clean', 'count', maxwrittenClean),
-			metricCard('buffers_alloc', 'Buffers Alloc', 'count', buffersAlloc),
-			metricCard('stats_reset', 'Stats Reset', 'text', latestText(rows, 'stats_reset'))
-		],
-		chartTitle: 'Background writer activity over time',
-		chartSeries: buildMetricSeries(rows, runStartMs, [
-			{ label: 'buffers clean', valueFn: (row) => toNumber(row.buffers_clean) },
-			{ label: 'buffers alloc', valueFn: (row) => toNumber(row.buffers_alloc) },
-			{ label: 'maxwritten clean', valueFn: (row) => toNumber(row.maxwritten_clean) }
-		]),
-		chartMetrics: ([
-			{
-				key: 'bgwriter_buffers',
-				label: 'Buffers',
-				kind: 'count' as TelemetryValueKind,
-				title: 'Background writer buffer activity over time',
-				category: 'raw' as const,
-				series: buildMetricSeries(rows, runStartMs, [
-					{ label: 'buffers clean', valueFn: (row) => toNumber(row.buffers_clean) },
-					{ label: 'buffers alloc', valueFn: (row) => toNumber(row.buffers_alloc) },
-					{ label: 'maxwritten clean', valueFn: (row) => toNumber(row.maxwritten_clean) }
-				])
-			}
-		] as TelemetryChartMetric[]).filter((m) => m.series.length > 0),
-		defaultChartMetricKey: 'bgwriter_buffers',
+		summary: [],
+		chartTitle: bgwChartMetrics[0]?.title ?? 'Background writer activity over time',
+		chartSeries: bgwChartMetrics[0]?.series ?? [],
+		chartMetrics: bgwChartMetrics,
+		defaultChartMetricKey: 'buffers_clean',
 		tableTitle: 'BGWriter metrics',
 		tableColumns: [
 			{ key: 'metric', label: 'Metric', kind: 'text' },
@@ -1251,15 +1480,27 @@ function buildBgwriterSection(rows: SnapshotRow[], runStartMs: number): Telemetr
 		],
 		tableRows: makeMetricRows([
 			{ metric: 'Buffers clean', value: buffersClean, kind: 'count' },
-			{ metric: 'Maxwritten clean', value: maxwrittenClean, kind: 'count' },
 			{ metric: 'Buffers alloc', value: buffersAlloc, kind: 'count' },
+			{ metric: 'Maxwritten clean', value: maxwrittenClean, kind: 'count' },
+			{ metric: 'Throttle ratio', value: throttleRatio, kind: 'percent' },
+			{ metric: 'Alloc coverage', value: allocCoverage, kind: 'percent' },
+			{ metric: 'Buffers alloc / tx', value: buffersAllocPerTx, kind: 'count' },
+			{ metric: 'Buffers clean / tx', value: buffersCleanPerTx, kind: 'count' },
+			{ metric: 'Alloc / cache access', value: allocPerCacheAccess, kind: 'percent' },
+			{ metric: 'Throttle / 1k tx', value: throttlePerKTx, kind: 'count' },
 			{ metric: 'Stats reset', value: latestText(rows, 'stats_reset'), kind: 'text' }
 		]),
 		tableSnapshots: buildMetricTableSnapshots(rows, runStartMs, (snapshotRows, index) =>
 			makeMetricRows([
 				{ metric: 'Buffers clean', value: deltaAt(snapshotRows, index, 'buffers_clean'), kind: 'count' },
-				{ metric: 'Maxwritten clean', value: deltaAt(snapshotRows, index, 'maxwritten_clean'), kind: 'count' },
 				{ metric: 'Buffers alloc', value: deltaAt(snapshotRows, index, 'buffers_alloc'), kind: 'count' },
+				{ metric: 'Maxwritten clean', value: deltaAt(snapshotRows, index, 'maxwritten_clean'), kind: 'count' },
+				{ metric: 'Throttle ratio', value: safeRatio(deltaAt(snapshotRows, index, 'maxwritten_clean'), deltaAt(snapshotRows, index, 'buffers_clean')), kind: 'percent' },
+				{ metric: 'Alloc coverage', value: safeRatio(deltaAt(snapshotRows, index, 'buffers_clean'), deltaAt(snapshotRows, index, 'buffers_alloc')), kind: 'percent' },
+				{ metric: 'Buffers alloc / tx', value: safeRatio(deltaAt(snapshotRows, index, 'buffers_alloc'), transactionsAt(snapshotRows, index)), kind: 'count' },
+				{ metric: 'Buffers clean / tx', value: safeRatio(deltaAt(snapshotRows, index, 'buffers_clean'), transactionsAt(snapshotRows, index)), kind: 'count' },
+				{ metric: 'Alloc / cache access', value: safeRatio(deltaAt(snapshotRows, index, 'buffers_alloc'), cacheAccessAt(snapshotRows, index)), kind: 'percent' },
+				{ metric: 'Throttle / 1k tx', value: (() => { const v = safeRatio(deltaAt(snapshotRows, index, 'maxwritten_clean'), transactionsAt(snapshotRows, index)); return v === null ? null : v * 1000; })(), kind: 'count' },
 				{ metric: 'Stats reset', value: snapshotRows[index].stats_reset == null ? null : String(snapshotRows[index].stats_reset), kind: 'text' }
 			])
 		)
@@ -1350,7 +1591,7 @@ function buildArchiverSection(rows: SnapshotRow[], runStartMs: number): Telemetr
 	};
 }
 
-function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySection {
+function buildIoSection(rows: SnapshotRow[], runStartMs: number, databaseRows: SnapshotRow[]): TelemetrySection {
 	if (rows.length === 0) {
 		return {
 			key: 'io',
@@ -1374,7 +1615,8 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 		buffer: 'Buffer Pressure',
 		sync: 'Writeback & Sync',
 		growth: 'Relation Growth',
-		mix: 'I/O Mix'
+		mix: 'I/O Mix',
+		workload: 'Workload Shape'
 	} as const;
 	const PG_STAT_IO_DOCS = {
 		reads: 'Number of read operations.',
@@ -1874,6 +2116,99 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 			})
 			.filter((s): s is TelemetrySeries => s !== null);
 	})();
+	// Aggregate cross-database derived metrics — sum a field across all IO groups at each timestamp,
+	// then normalise by a database-level denominator aligned by timestamp.
+	const sortedDbRows = [...databaseRows].sort((a, b) => (toMs(String(a._collected_at)) ?? 0) - (toMs(String(b._collected_at)) ?? 0));
+	const buildIoCrossDbSeries = (
+		ioField: string,
+		denominatorAtTs: (ts: string) => number | null,
+		label: string,
+		description: string,
+		colorIdx: number
+	): TelemetrySeries[] => {
+		const tsMap = new Map<string, SnapshotRow[]>();
+		for (const row of rows) {
+			const ts = String(row._collected_at);
+			if (!tsMap.has(ts)) tsMap.set(ts, []);
+			tsMap.get(ts)!.push(row);
+		}
+		const sortedTs = [...tsMap.keys()].sort();
+		if (sortedTs.length < 2) return [];
+		const baseRows = tsMap.get(sortedTs[0])!;
+		const baseTotal = sum(baseRows.map((r) => toNumber(r[ioField]))) ?? 0;
+		const points = sortedTs
+			.map((ts) => {
+				const tsRows = tsMap.get(ts)!;
+				const t = relTime(tsRows[0], runStartMs);
+				if (t === null) return null;
+				const currentTotal = sum(tsRows.map((r) => toNumber(r[ioField]))) ?? 0;
+				const value = safeRatio(currentTotal - baseTotal, denominatorAtTs(ts));
+				if (value === null || !Number.isFinite(value)) return null;
+				return { t, v: value } as TelemetrySeriesPoint;
+			})
+			.filter((p): p is TelemetrySeriesPoint => p !== null);
+		if (points.length === 0) return [];
+		return [{ label, color: COLORS[colorIdx % COLORS.length], points, description }];
+	};
+	const dbDeltaAtTs = (ts: string, fields: string[]): number | null => {
+		if (sortedDbRows.length === 0) return null;
+		const tsMs = toMs(ts);
+		let dbIdx = -1;
+		for (let i = 0; i < sortedDbRows.length; i++) {
+			const dbTs = toMs(String(sortedDbRows[i]._collected_at));
+			if (tsMs !== null && dbTs !== null && dbTs <= tsMs) dbIdx = i;
+		}
+		if (dbIdx < 0) dbIdx = 0;
+		return sumDeltaAt(sortedDbRows, dbIdx, fields);
+	};
+	const ioCrossDbDesc = (description: string, uses: string) => `${description} Uses: ${uses}.`;
+	const ioWorkloadMetrics: TelemetryChartMetric[] = [];
+	const pushIoWorkload = (m: TelemetryChartMetric) => { if (m.series.length > 0) ioWorkloadMetrics.push(m); };
+
+	pushIoWorkload({
+		key: 'io_read_bytes_per_tx',
+		label: 'Read Bytes / Tx',
+		description: ioCrossDbDesc('Physical read bytes per transaction, aggregated across all IO groups; a design with better index coverage reads fewer bytes per unit of work.', 'Σ read_bytes / transactions'),
+		kind: 'bytes',
+		title: 'Physical read bytes per transaction over time',
+		group: IO_GROUP.workload,
+		category: 'derived',
+		series: buildIoCrossDbSeries('read_bytes', (ts) => dbDeltaAtTs(ts, ['xact_commit', 'xact_rollback']), 'read bytes / tx', ioCrossDbDesc('Physical read bytes per transaction, aggregated across all IO groups; a design with better index coverage reads fewer bytes per unit of work.', 'Σ read_bytes / transactions'), 0)
+	});
+
+	pushIoWorkload({
+		key: 'io_read_bytes_per_row_fetched',
+		label: 'Read Bytes / Row Fetched',
+		description: ioCrossDbDesc('Physical read bytes per row delivered to queries; captures read amplification from page layout, index coverage, and heap fetch overhead — the most direct IO comparison metric for table designs.', 'Σ read_bytes / tup_fetched'),
+		kind: 'bytes',
+		title: 'Physical read bytes per row fetched over time',
+		group: IO_GROUP.workload,
+		category: 'derived',
+		series: buildIoCrossDbSeries('read_bytes', (ts) => dbDeltaAtTs(ts, ['tup_fetched']), 'read bytes / row fetched', ioCrossDbDesc('Physical read bytes per row delivered to queries; captures read amplification from page layout, index coverage, and heap fetch overhead — the most direct IO comparison metric for table designs.', 'Σ read_bytes / tup_fetched'), 1)
+	});
+
+	pushIoWorkload({
+		key: 'io_read_time_ratio',
+		label: 'Read Time / Active Time',
+		description: ioCrossDbDesc('Fraction of active query execution time spent waiting on reads; directly answers "is IO hurting query performance?" rather than just how much IO volume there is.', 'Σ read_time / active_time'),
+		kind: 'percent',
+		title: 'IO read time as a fraction of active query time over time',
+		group: IO_GROUP.workload,
+		category: 'derived',
+		series: buildIoCrossDbSeries('read_time', (ts) => dbDeltaAtTs(ts, ['active_time']), 'read time / active time', ioCrossDbDesc('Fraction of active query execution time spent waiting on reads; directly answers "is IO hurting query performance?" rather than just how much IO volume there is.', 'Σ read_time / active_time'), 2)
+	});
+
+	pushIoWorkload({
+		key: 'io_evictions_per_tx',
+		label: 'Evictions / Tx',
+		description: ioCrossDbDesc('Buffer evictions per transaction, aggregated across all IO groups; workload-normalised buffer churn for cross-run comparison independent of run duration.', 'Σ evictions / transactions'),
+		kind: 'count',
+		title: 'Buffer evictions per transaction over time',
+		group: IO_GROUP.workload,
+		category: 'derived',
+		series: buildIoCrossDbSeries('evictions', (ts) => dbDeltaAtTs(ts, ['xact_commit', 'xact_rollback']), 'evictions / tx', ioCrossDbDesc('Buffer evictions per transaction, aggregated across all IO groups; workload-normalised buffer churn for cross-run comparison independent of run duration.', 'Σ evictions / transactions'), 3)
+	});
+
 	const allChartMetrics: TelemetryChartMetric[] = [
 		...chartMetrics,
 		...(ioTimeMixSeries.length > 0
@@ -1887,7 +2222,8 @@ function buildIoSection(rows: SnapshotRow[], runStartMs: number): TelemetrySecti
 				category: 'derived' as const,
 				series: ioTimeMixSeries
 			}]
-			: [])
+			: []),
+		...ioWorkloadMetrics
 	];
 
 	return {
@@ -4278,12 +4614,12 @@ export function buildRunTelemetry(db: Database.Database, runId: number, phases?:
 	const statioUserSequenceRows = fetchRows(db, 'snap_pg_statio_user_sequences', runId, selectedPhases);
 
 	const databaseSection = buildDatabaseSection(databaseRows, runStartMs);
-	const walSection = buildWalSection(walRows, runStartMs, toNumber(databaseSection.summary.find((card) => card.key === 'transactions')?.value));
+	const walSection = buildWalSection(walRows, runStartMs, databaseRows);
 	const sections: TelemetrySection[] = [
 		databaseSection,
-		buildIoSection(ioRows, runStartMs),
+		buildIoSection(ioRows, runStartMs, databaseRows),
 		walSection,
-		buildBgwriterSection(bgwriterRows, runStartMs),
+		buildBgwriterSection(bgwriterRows, runStartMs, databaseRows),
 		buildCheckpointerSection(checkpointerRows, runStartMs),
 		buildArchiverSection(archiverRows, runStartMs),
 		buildUserTablesSection(userTableRows, runStartMs),
@@ -4306,13 +4642,14 @@ export function buildRunTelemetry(db: Database.Database, runId: number, phases?:
 	const databaseTempBytes = delta(databaseRows, 'temp_bytes');
 	const databaseTps = safeRatio(databaseTransactions, elapsedSeconds(databaseRows));
 	const databaseBufferHitRatio = safeRatio(delta(databaseRows, 'blks_hit'), sum([delta(databaseRows, 'blks_hit'), delta(databaseRows, 'blks_read')]));
+	const walBytes = delta(walRows, 'wal_bytes');
 
 	const heroCards: TelemetryCard[] = [
 		metricCard('transactions', 'Transactions', 'count', databaseTransactions),
 		metricCard('db_tps', 'DB-stat TPS', 'tps', databaseTps),
 		metricCard('buffer_hit_ratio', 'Buffer Hit Ratio', 'percent', databaseBufferHitRatio),
-		metricCard('wal_bytes', 'WAL Bytes', 'bytes', walSection.summary.find((card) => card.key === 'wal_bytes')?.value ?? null),
-		metricCard('wal_per_tx', 'WAL / Tx', 'bytes', walSection.summary.find((card) => card.key === 'wal_bytes_per_tx')?.value ?? null),
+		metricCard('wal_bytes', 'WAL Bytes', 'bytes', walBytes),
+		metricCard('wal_per_tx', 'WAL / Tx', 'bytes', safeRatio(walBytes, databaseTransactions)),
 		metricCard('temp_bytes', 'Temp Bytes', 'bytes', databaseTempBytes),
 		metricCard('temp_bytes_per_tx', 'Temp / Tx', 'bytes', safeRatio(databaseTempBytes, databaseTransactions)),
 		metricCard('requested_checkpoints', 'Requested Checkpoints', 'count', sections.find((section) => section.key === 'checkpointer')?.summary.find((card) => card.key === 'num_requested')?.value ?? null),

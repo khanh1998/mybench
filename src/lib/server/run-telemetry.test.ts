@@ -433,12 +433,10 @@ describe('buildRunTelemetry', () => {
 		expect(database?.tableRows.find((row) => row.metric === 'I/O time / active time')?.value).toBeCloseTo(100 / 1400);
 	});
 
-	it('adds explainer text to hero and summary cards', () => {
+	it('adds explainer text to hero cards', () => {
 		const telemetry = buildRunTelemetry(db, 1, ['bench']);
 		const heroTransactions = telemetry.heroCards.find((card) => card.key === 'transactions');
-		const walPerTx = telemetry.sections
-			.find((section) => section.key === 'wal')
-			?.summary.find((card) => card.key === 'wal_bytes_per_tx');
+		const walPerTx = telemetry.heroCards.find((card) => card.key === 'wal_per_tx');
 
 		expect(heroTransactions?.infoText).toContain('Commits plus rollbacks');
 		expect(walPerTx?.infoText).toContain('Average WAL volume per transaction');
@@ -481,20 +479,31 @@ describe('buildRunTelemetry', () => {
 		expect(wal?.chartSeries.map((series) => series.label)).toEqual([
 			'wal bytes/s'
 		]);
-		expect(wal?.summary.map((card) => card.key)).toEqual([
+		expect(wal?.summary).toEqual([]);
+		expect(wal?.chartMetrics?.map((metric) => metric.key)).toEqual(expect.arrayContaining([
 			'wal_bytes',
-			'wal_bytes_per_sec',
-			'wal_bytes_per_tx',
+			'wal_counts',
+			'wal_buffers_full',
 			'fpi_ratio',
-			'wal_buffers_full'
-		]);
-		expect(wal?.tableRows).toEqual([
+			'wal_bytes_per_record',
+			'wal_bytes_per_tx',
+			'wal_records_per_tx',
+			'wal_buffers_full_per_mb'
+		]));
+		expect(wal?.chartMetrics?.find((metric) => metric.key === 'wal_bytes')?.group).toBe('WAL Volume');
+		expect(wal?.chartMetrics?.find((metric) => metric.key === 'fpi_ratio')?.group).toBe('Record Shape');
+		expect(wal?.chartMetrics?.find((metric) => metric.key === 'wal_buffers_full_per_mb')?.group).toBe('Buffer Pressure');
+		expect(wal?.chartMetrics?.find((metric) => metric.key === 'wal_bytes_per_tx')?.group).toBe('Efficiency');
+		expect(wal?.chartMetrics?.find((metric) => metric.key === 'wal_bytes')?.description).toContain('Source: pg_stat_wal.wal_bytes');
+		expect(wal?.chartMetrics?.find((metric) => metric.key === 'wal_bytes_per_tx')?.description).toContain('Uses: wal_bytes / transactions');
+		expect(wal?.tableRows).toEqual(expect.arrayContaining([
 			expect.objectContaining({ metric: 'WAL bytes', value: 1200 }),
 			expect.objectContaining({ metric: 'WAL records', value: 40 }),
 			expect.objectContaining({ metric: 'Full page images', value: 8 }),
 			expect.objectContaining({ metric: 'FPI ratio', value: 0.2 }),
+			expect.objectContaining({ metric: 'WAL bytes / tx', value: 1200 / 22 }),
 			expect.objectContaining({ metric: 'WAL buffers full', value: 3 })
-		]);
+		]));
 		expect(database?.tableSnapshots).toHaveLength(2);
 		expect(database?.tableSnapshots?.[0]?.rows.find((row) => row.metric === 'Transactions')?.value).toBe(0);
 		expect(database?.tableSnapshots?.[1]?.rows.find((row) => row.metric === 'Transactions')?.value).toBe(22);
