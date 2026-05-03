@@ -2833,6 +2833,12 @@ function buildUserIndexesSection(rows: SnapshotRow[], runStartMs: number): Telem
 	};
 }
 
+const PG_STATIO_USER_TABLES_DOCS = 'https://www.postgresql.org/docs/current/monitoring-stats.html#MONITORING-PG-STATIO-USER-TABLES-VIEW';
+const stutRateDesc = (col: string) =>
+	`Rate of ${col} per second. [PG docs](${PG_STATIO_USER_TABLES_DOCS})`;
+const stutDerivedDesc = (formula: string) =>
+	`Uses: ${formula}. [PG docs](${PG_STATIO_USER_TABLES_DOCS})`;
+
 function buildStatioUserTablesSection(rows: SnapshotRow[], runStartMs: number): TelemetrySection {
 	if (rows.length === 0) {
 		return {
@@ -2871,9 +2877,9 @@ function buildStatioUserTablesSection(rows: SnapshotRow[], runStartMs: number): 
 			heapReads,
 			heapHits,
 			heapHitRatio: safeRatio(heapHits, sum([heapHits, heapReads])),
-			toasts: toastReads,
 			toastReads,
 			toastHits,
+			toastHitRatio: safeRatio(toastHits, sum([toastHits, toastReads])),
 			idxReads,
 			idxHits,
 			idxHitRatio: safeRatio(idxHits, sum([idxHits, idxReads])),
@@ -2884,79 +2890,134 @@ function buildStatioUserTablesSection(rows: SnapshotRow[], runStartMs: number): 
 	});
 	const topTables = topEntries(entries, (entry) => entry.heapActivity);
 	const chartMetrics = buildGroupedMetricCharts(entries, runStartMs, [
+		// Heap
 		{
 			key: 'heap_activity',
 			label: 'Heap Activity',
+			description: stutRateDesc('heap_blks_read + heap_blks_hit — total heap block accesses (disk + cache)'),
 			kind: 'count',
-			title: 'Top tables by heap activity over time',
+			title: 'Top tables by heap block activity rate over time',
+			group: 'Heap',
 			category: 'raw',
 			scoreFn: (entry) => entry.heapActivity,
 			seriesValueAt: (groupRows, index) => safeRatio(sumDeltaAt(groupRows, index, ['heap_blks_read', 'heap_blks_hit']), elapsedSecondsAt(groupRows, index)),
 			rawSeriesValueAt: (groupRows, index) => sumDeltaAt(groupRows, index, ['heap_blks_read', 'heap_blks_hit'])
 		},
 		{
-			key: 'heap_hits',
-			label: 'Heap Hits',
-			kind: 'count',
-			title: 'Top tables by heap hits over time',
-			category: 'raw',
-			scoreFn: (entry) => entry.heapHits,
-			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'heap_blks_hit'), elapsedSecondsAt(groupRows, index)),
-			rawSeriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'heap_blks_hit')
-		},
-		{
 			key: 'heap_reads',
 			label: 'Heap Reads',
+			description: stutRateDesc('heap_blks_read — heap blocks read from disk (not found in shared_buffers)'),
 			kind: 'count',
-			title: 'Top tables by heap reads over time',
+			title: 'Top tables by heap block read rate over time',
+			group: 'Heap',
 			category: 'raw',
 			scoreFn: (entry) => entry.heapReads,
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'heap_blks_read'), elapsedSecondsAt(groupRows, index)),
 			rawSeriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'heap_blks_read')
 		},
 		{
-			key: 'toast_reads',
-			label: 'TOAST Reads',
+			key: 'heap_hits',
+			label: 'Heap Hits',
+			description: stutRateDesc('heap_blks_hit — heap blocks served from shared_buffers (no disk I/O)'),
 			kind: 'count',
-			title: 'Top tables by TOAST reads over time',
+			title: 'Top tables by heap block hit rate over time',
+			group: 'Heap',
 			category: 'raw',
-			scoreFn: (entry) => entry.toasts,
-			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'toast_blks_read'), elapsedSecondsAt(groupRows, index)),
-			rawSeriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'toast_blks_read')
+			scoreFn: (entry) => entry.heapHits,
+			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'heap_blks_hit'), elapsedSecondsAt(groupRows, index)),
+			rawSeriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'heap_blks_hit')
 		},
+		// Index
 		{
 			key: 'idx_blks_read',
 			label: 'Idx Blocks Read',
+			description: stutRateDesc('idx_blks_read — index blocks read from disk for this table\'s indexes'),
 			kind: 'count',
-			title: 'Top tables by index block reads over time',
+			title: 'Top tables by index block read rate over time',
+			group: 'Index',
 			category: 'raw',
 			scoreFn: (entry) => entry.idxReads,
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'idx_blks_read'), elapsedSecondsAt(groupRows, index)),
 			rawSeriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'idx_blks_read')
 		},
 		{
+			key: 'idx_blks_hit',
+			label: 'Idx Blocks Hit',
+			description: stutRateDesc('idx_blks_hit — index blocks served from shared_buffers for this table\'s indexes'),
+			kind: 'count',
+			title: 'Top tables by index block hit rate over time',
+			group: 'Index',
+			category: 'raw',
+			scoreFn: (entry) => entry.idxHits,
+			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'idx_blks_hit'), elapsedSecondsAt(groupRows, index)),
+			rawSeriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'idx_blks_hit')
+		},
+		// TOAST
+		{
+			key: 'toast_reads',
+			label: 'TOAST Reads',
+			description: stutRateDesc('toast_blks_read — TOAST table blocks read from disk; non-zero means large out-of-line values are being accessed'),
+			kind: 'count',
+			title: 'Top tables by TOAST block read rate over time',
+			group: 'TOAST',
+			category: 'raw',
+			scoreFn: (entry) => entry.toastReads,
+			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'toast_blks_read'), elapsedSecondsAt(groupRows, index)),
+			rawSeriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'toast_blks_read')
+		},
+		{
+			key: 'toast_hits',
+			label: 'TOAST Hits',
+			description: stutRateDesc('toast_blks_hit — TOAST table blocks served from shared_buffers'),
+			kind: 'count',
+			title: 'Top tables by TOAST block hit rate over time',
+			group: 'TOAST',
+			category: 'raw',
+			scoreFn: (entry) => entry.toastHits,
+			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'toast_blks_hit'), elapsedSecondsAt(groupRows, index)),
+			rawSeriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'toast_blks_hit')
+		},
+		// Cache Efficiency
+		{
 			key: 'heap_hit_ratio',
-			label: '⟳ Heap Hit Ratio',
+			label: 'Heap Hit Ratio',
+			description: stutDerivedDesc('heap_blks_hit / (heap_blks_hit + heap_blks_read) — fraction of heap accesses served from shared_buffers; low = table causes frequent disk I/O'),
 			kind: 'percent',
-			title: 'Top tables by heap hit ratio over time',
+			title: 'Top tables by heap cache hit ratio over time',
+			group: 'Cache Efficiency',
 			category: 'derived',
 			scoreFn: (entry) => entry.heapHitRatio,
 			seriesValueAt: (groupRows, index) => ratioAt(groupRows, index, 'heap_blks_hit', ['heap_blks_hit', 'heap_blks_read'])
 		},
 		{
 			key: 'idx_hit_ratio',
-			label: '⟳ Idx Hit Ratio',
+			label: 'Idx Hit Ratio',
+			description: stutDerivedDesc('idx_blks_hit / (idx_blks_hit + idx_blks_read) — fraction of index block accesses served from shared_buffers for this table\'s indexes'),
 			kind: 'percent',
-			title: 'Per-table index cache hit ratio over time',
+			title: 'Top tables by index cache hit ratio over time',
+			group: 'Cache Efficiency',
 			category: 'derived',
 			scoreFn: (entry) => entry.idxHitRatio,
 			seriesValueAt: (groupRows, index) => ratioAt(groupRows, index, 'idx_blks_hit', ['idx_blks_hit', 'idx_blks_read'])
 		},
 		{
-			key: 'overall_hit_ratio',
-			label: '⟳ Overall Hit Ratio',
+			key: 'toast_hit_ratio',
+			label: 'TOAST Hit Ratio',
+			description: stutDerivedDesc('toast_blks_hit / (toast_blks_hit + toast_blks_read) — fraction of TOAST accesses served from cache; low = large column values spilling to disk frequently'),
 			kind: 'percent',
-			title: 'Combined cache hit ratio across heap + index + TOAST blocks per table over time',
+			title: 'Top tables by TOAST cache hit ratio over time',
+			group: 'Cache Efficiency',
+			category: 'derived',
+			scoreFn: (entry) => entry.toastHitRatio,
+			seriesValueAt: (groupRows, index) => ratioAt(groupRows, index, 'toast_blks_hit', ['toast_blks_hit', 'toast_blks_read'])
+		},
+		{
+			key: 'overall_hit_ratio',
+			label: 'Overall Hit Ratio',
+			description: stutDerivedDesc('(heap_blks_hit + idx_blks_hit + toast_blks_hit + tidx_blks_hit) / total block accesses — combined cache hit ratio across all block types for this table'),
+			kind: 'percent',
+			title: 'Top tables by overall cache hit ratio over time',
+			group: 'Cache Efficiency',
 			category: 'derived',
 			scoreFn: (entry) => entry.overallHitRatio,
 			seriesValueAt: (groupRows, index) => {
@@ -2971,14 +3032,8 @@ function buildStatioUserTablesSection(rows: SnapshotRow[], runStartMs: number): 
 		key: 'statio_user_tables',
 		label: 'Statio User Tables',
 		status: 'ok',
-		summary: [
-			metricCard('heap_activity', 'Heap Activity', 'count', sum(entries.map((entry) => entry.heapActivity))),
-			metricCard('heap_hits', 'Heap Hits', 'count', sum(entries.map((entry) => entry.heapHits))),
-			metricCard('heap_reads', 'Heap Reads', 'count', sum(entries.map((entry) => entry.heapReads))),
-			metricCard('heap_hit_ratio', 'Heap Hit Ratio', 'percent', safeRatio(sum(entries.map((entry) => entry.heapHitRatio)), entries.length || null)),
-			metricCard('toast_reads', 'TOAST Reads', 'count', sum(entries.map((entry) => entry.toasts)))
-		],
-		chartTitle: chartMetrics[0]?.title ?? 'Top tables by heap activity over time',
+		summary: [],
+		chartTitle: chartMetrics[0]?.title ?? 'Top tables by heap block activity rate over time',
 		chartSeries: chartMetrics[0]?.series ?? [],
 		chartMetrics,
 		defaultChartMetricKey: chartMetrics[0]?.key,
@@ -2986,27 +3041,44 @@ function buildStatioUserTablesSection(rows: SnapshotRow[], runStartMs: number): 
 		tableColumns: [
 			{ key: 'table', label: 'Table', kind: 'text' },
 			{ key: 'heap_activity', label: 'Heap Activity', kind: 'count' },
-			{ key: 'heap_hits', label: 'Heap Hits', kind: 'count' },
-			{ key: 'heap_reads', label: 'Heap Reads', kind: 'count' },
 			{ key: 'heap_hit_ratio', label: 'Heap Hit Ratio', kind: 'percent' },
-			{ key: 'toast_reads', label: 'TOAST Reads', kind: 'count' }
+			{ key: 'idx_blks_read', label: 'Idx Reads', kind: 'count' },
+			{ key: 'idx_hit_ratio', label: 'Idx Hit Ratio', kind: 'percent' },
+			{ key: 'toast_reads', label: 'TOAST Reads', kind: 'count' },
+			{ key: 'toast_hit_ratio', label: 'TOAST Hit Ratio', kind: 'percent' },
+			{ key: 'overall_hit_ratio', label: 'Overall Hit Ratio', kind: 'percent' }
 		],
 		tableRows: topTables.map((entry) => ({
 			table: entry.label,
 			heap_activity: entry.heapActivity,
-			heap_hits: entry.heapHits,
-			heap_reads: entry.heapReads,
 			heap_hit_ratio: entry.heapHitRatio,
-			toast_reads: entry.toasts
+			idx_blks_read: entry.idxReads,
+			idx_hit_ratio: entry.idxHitRatio,
+			toast_reads: entry.toastReads,
+			toast_hit_ratio: entry.toastHitRatio,
+			overall_hit_ratio: entry.overallHitRatio
 		})),
-		tableSnapshots: buildGroupedTableSnapshots(topTables, runStartMs, (entry, index) => ({
-			table: entry.label,
-			heap_activity: sumDeltaAt(entry.rows, index, ['heap_blks_read', 'heap_blks_hit']),
-			heap_hits: deltaAt(entry.rows, index, 'heap_blks_hit'),
-			heap_reads: deltaAt(entry.rows, index, 'heap_blks_read'),
-			heap_hit_ratio: ratioAt(entry.rows, index, 'heap_blks_hit', ['heap_blks_hit', 'heap_blks_read']),
-			toast_reads: deltaAt(entry.rows, index, 'toast_blks_read')
-		}))
+		tableSnapshots: buildGroupedTableSnapshots(topTables, runStartMs, (entry, index) => {
+			const heapHits = deltaAt(entry.rows, index, 'heap_blks_hit');
+			const heapReads = deltaAt(entry.rows, index, 'heap_blks_read');
+			const idxReads = deltaAt(entry.rows, index, 'idx_blks_read');
+			const toastReads = deltaAt(entry.rows, index, 'toast_blks_read');
+			const toastHits = deltaAt(entry.rows, index, 'toast_blks_hit');
+			return {
+				table: entry.label,
+				heap_activity: sum([heapReads, heapHits]),
+				heap_hit_ratio: ratioAt(entry.rows, index, 'heap_blks_hit', ['heap_blks_hit', 'heap_blks_read']),
+				idx_blks_read: idxReads,
+				idx_hit_ratio: ratioAt(entry.rows, index, 'idx_blks_hit', ['idx_blks_hit', 'idx_blks_read']),
+				toast_reads: toastReads,
+				toast_hit_ratio: safeRatio(toastHits, sum([toastHits, toastReads])),
+				overall_hit_ratio: (() => {
+					const hits = sumDeltaAt(entry.rows, index, ['heap_blks_hit', 'idx_blks_hit', 'toast_blks_hit', 'tidx_blks_hit']);
+					const reads = sumDeltaAt(entry.rows, index, ['heap_blks_read', 'idx_blks_read', 'toast_blks_read', 'tidx_blks_read']);
+					return safeRatio(hits, sum([hits, reads]));
+				})()
+			};
+		})
 	};
 }
 
@@ -3136,6 +3208,12 @@ function buildStatioUserIndexesSection(rows: SnapshotRow[], runStartMs: number):
 	};
 }
 
+const PG_STATIO_USER_SEQUENCES_DOCS = 'https://www.postgresql.org/docs/current/monitoring-stats.html#MONITORING-PG-STATIO-USER-SEQUENCES-VIEW';
+const stusRateDesc = (col: string) =>
+	`Rate of ${col} per second. [PG docs](${PG_STATIO_USER_SEQUENCES_DOCS})`;
+const stusDerivedDesc = (formula: string) =>
+	`Uses: ${formula}. [PG docs](${PG_STATIO_USER_SEQUENCES_DOCS})`;
+
 function buildStatioUserSequencesSection(rows: SnapshotRow[], runStartMs: number): TelemetrySection {
 	if (rows.length === 0) {
 		return {
@@ -3172,38 +3250,42 @@ function buildStatioUserSequencesSection(rows: SnapshotRow[], runStartMs: number
 		{
 			key: 'sequence_activity',
 			label: 'Sequence Activity',
+			description: stusRateDesc('blks_read + blks_hit — total sequence block accesses; high rate means nextval() is called frequently'),
 			kind: 'count',
-			title: 'Top sequences by block activity over time',
+			title: 'Top sequences by total block activity rate over time',
 			category: 'raw',
 			scoreFn: (entry) => entry.sequenceActivity,
 			seriesValueAt: (groupRows, index) => safeRatio(sumDeltaAt(groupRows, index, ['blks_read', 'blks_hit']), elapsedSecondsAt(groupRows, index)),
 			rawSeriesValueAt: (groupRows, index) => sumDeltaAt(groupRows, index, ['blks_read', 'blks_hit'])
 		},
 		{
-			key: 'sequence_hits',
-			label: 'Sequence Hits',
-			kind: 'count',
-			title: 'Top sequences by block hits over time',
-			category: 'raw',
-			scoreFn: (entry) => entry.sequenceHits,
-			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'blks_hit'), elapsedSecondsAt(groupRows, index)),
-			rawSeriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'blks_hit')
-		},
-		{
 			key: 'sequence_reads',
 			label: 'Sequence Reads',
+			description: stusRateDesc('blks_read — sequence blocks read from disk; sequences are usually cached in shared_buffers so disk reads indicate cache pressure'),
 			kind: 'count',
-			title: 'Top sequences by block reads over time',
+			title: 'Top sequences by block read rate over time',
 			category: 'raw',
 			scoreFn: (entry) => entry.sequenceReads,
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'blks_read'), elapsedSecondsAt(groupRows, index)),
 			rawSeriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'blks_read')
 		},
 		{
+			key: 'sequence_hits',
+			label: 'Sequence Hits',
+			description: stusRateDesc('blks_hit — sequence blocks served from shared_buffers; well-used sequences should have near-100% hit ratio'),
+			kind: 'count',
+			title: 'Top sequences by block hit rate over time',
+			category: 'raw',
+			scoreFn: (entry) => entry.sequenceHits,
+			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'blks_hit'), elapsedSecondsAt(groupRows, index)),
+			rawSeriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'blks_hit')
+		},
+		{
 			key: 'sequence_hit_ratio',
-			label: '⟳ Sequence Hit Ratio',
+			label: 'Hit Ratio',
+			description: stusDerivedDesc('blks_hit / (blks_hit + blks_read) — fraction of sequence accesses served from shared_buffers; should be near 100% for active sequences; low value indicates unusual cache pressure'),
 			kind: 'percent',
-			title: 'Top sequences by hit ratio over time',
+			title: 'Top sequences by cache hit ratio over time',
 			category: 'derived',
 			scoreFn: (entry) => entry.sequenceHitRatio,
 			seriesValueAt: (groupRows, index) => ratioAt(groupRows, index, 'blks_hit', ['blks_hit', 'blks_read'])
@@ -3214,36 +3296,31 @@ function buildStatioUserSequencesSection(rows: SnapshotRow[], runStartMs: number
 		key: 'statio_user_sequences',
 		label: 'Statio User Sequences',
 		status: 'ok',
-		summary: [
-			metricCard('sequence_activity', 'Sequence Activity', 'count', sum(entries.map((entry) => entry.sequenceActivity))),
-			metricCard('sequence_hits', 'Sequence Hits', 'count', sum(entries.map((entry) => entry.sequenceHits))),
-			metricCard('sequence_reads', 'Sequence Reads', 'count', sum(entries.map((entry) => entry.sequenceReads))),
-			metricCard('sequence_hit_ratio', 'Sequence Hit Ratio', 'percent', safeRatio(sum(entries.map((entry) => entry.sequenceHitRatio)), entries.length || null))
-		],
-		chartTitle: chartMetrics[0]?.title ?? 'Top sequences by block activity over time',
+		summary: [],
+		chartTitle: chartMetrics[0]?.title ?? 'Top sequences by total block activity rate over time',
 		chartSeries: chartMetrics[0]?.series ?? [],
 		chartMetrics,
 		defaultChartMetricKey: chartMetrics[0]?.key,
 		tableTitle: 'Top sequences by block activity',
 		tableColumns: [
 			{ key: 'sequence', label: 'Sequence', kind: 'text' },
-			{ key: 'sequence_activity', label: 'Sequence Activity', kind: 'count' },
-			{ key: 'sequence_hits', label: 'Sequence Hits', kind: 'count' },
-			{ key: 'sequence_reads', label: 'Sequence Reads', kind: 'count' },
-			{ key: 'sequence_hit_ratio', label: 'Sequence Hit Ratio', kind: 'percent' }
+			{ key: 'sequence_activity', label: 'Activity', kind: 'count' },
+			{ key: 'sequence_reads', label: 'Reads', kind: 'count' },
+			{ key: 'sequence_hits', label: 'Hits', kind: 'count' },
+			{ key: 'sequence_hit_ratio', label: 'Hit Ratio', kind: 'percent' }
 		],
 		tableRows: topSequences.map((entry) => ({
 			sequence: entry.label,
 			sequence_activity: entry.sequenceActivity,
-			sequence_hits: entry.sequenceHits,
 			sequence_reads: entry.sequenceReads,
+			sequence_hits: entry.sequenceHits,
 			sequence_hit_ratio: entry.sequenceHitRatio
 		})),
 		tableSnapshots: buildGroupedTableSnapshots(topSequences, runStartMs, (entry, index) => ({
 			sequence: entry.label,
 			sequence_activity: sumDeltaAt(entry.rows, index, ['blks_read', 'blks_hit']),
-			sequence_hits: deltaAt(entry.rows, index, 'blks_hit'),
 			sequence_reads: deltaAt(entry.rows, index, 'blks_read'),
+			sequence_hits: deltaAt(entry.rows, index, 'blks_hit'),
 			sequence_hit_ratio: ratioAt(entry.rows, index, 'blks_hit', ['blks_hit', 'blks_read'])
 		}))
 	};
