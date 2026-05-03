@@ -3010,6 +3010,12 @@ function buildStatioUserTablesSection(rows: SnapshotRow[], runStartMs: number): 
 	};
 }
 
+const PG_STATIO_USER_INDEXES_DOCS = 'https://www.postgresql.org/docs/current/monitoring-stats.html#MONITORING-PG-STATIO-USER-INDEXES-VIEW';
+const stiRateDesc = (col: string) =>
+	`Rate of ${col} per second. [PG docs](${PG_STATIO_USER_INDEXES_DOCS})`;
+const stiDerivedDesc = (formula: string) =>
+	`Uses: ${formula}. [PG docs](${PG_STATIO_USER_INDEXES_DOCS})`;
+
 function buildStatioUserIndexesSection(rows: SnapshotRow[], runStartMs: number): TelemetrySection {
 	if (rows.length === 0) {
 		return {
@@ -3038,6 +3044,7 @@ function buildStatioUserIndexesSection(rows: SnapshotRow[], runStartMs: number):
 			rows: bucket,
 			idxReads,
 			idxHits,
+			idxActivity: sum([idxReads, idxHits]),
 			idxHitRatio: safeRatio(idxHits, sum([idxHits, idxReads]))
 		};
 	});
@@ -3046,8 +3053,9 @@ function buildStatioUserIndexesSection(rows: SnapshotRow[], runStartMs: number):
 		{
 			key: 'idx_blks_read',
 			label: 'Idx Blocks Read',
+			description: stiRateDesc('idx_blks_read — index blocks read from disk (not found in shared_buffers)'),
 			kind: 'count',
-			title: 'Top indexes by block reads over time',
+			title: 'Top indexes by block read rate over time',
 			category: 'raw',
 			scoreFn: (entry) => entry.idxReads,
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'idx_blks_read'), elapsedSecondsAt(groupRows, index)),
@@ -3056,18 +3064,34 @@ function buildStatioUserIndexesSection(rows: SnapshotRow[], runStartMs: number):
 		{
 			key: 'idx_blks_hit',
 			label: 'Idx Blocks Hit',
+			description: stiRateDesc('idx_blks_hit — index blocks served from shared_buffers (no disk I/O)'),
 			kind: 'count',
-			title: 'Top indexes by index block hits (from shared buffers) over time',
+			title: 'Top indexes by block hit rate over time',
 			category: 'raw',
 			scoreFn: (entry) => entry.idxHits,
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'idx_blks_hit'), elapsedSecondsAt(groupRows, index)),
 			rawSeriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'idx_blks_hit')
 		},
 		{
+			key: 'idx_blks_activity',
+			label: 'Idx Block Activity',
+			description: stiDerivedDesc('idx_blks_read + idx_blks_hit — total index block accesses; useful for ranking indexes by overall buffer pressure regardless of hit ratio'),
+			kind: 'count',
+			title: 'Top indexes by total block activity over time',
+			category: 'derived',
+			scoreFn: (entry) => entry.idxActivity,
+			seriesValueAt: (groupRows, index) => {
+				const reads = deltaAt(groupRows, index, 'idx_blks_read');
+				const hits = deltaAt(groupRows, index, 'idx_blks_hit');
+				return safeRatio(sum([reads, hits]), elapsedSecondsAt(groupRows, index));
+			}
+		},
+		{
 			key: 'idx_hit_ratio',
-			label: '⟳ Idx Hit Ratio',
+			label: 'Idx Hit Ratio',
+			description: stiDerivedDesc('idx_blks_hit / (idx_blks_hit + idx_blks_read) — fraction of index block accesses served from shared_buffers; low = index causes frequent disk I/O, consider increasing shared_buffers'),
 			kind: 'percent',
-			title: 'Top indexes by hit ratio over time',
+			title: 'Top indexes by cache hit ratio over time',
 			category: 'derived',
 			scoreFn: (entry) => entry.idxHitRatio,
 			seriesValueAt: (groupRows, index) => ratioAt(groupRows, index, 'idx_blks_hit', ['idx_blks_hit', 'idx_blks_read'])
@@ -3078,12 +3102,8 @@ function buildStatioUserIndexesSection(rows: SnapshotRow[], runStartMs: number):
 		key: 'statio_user_indexes',
 		label: 'Statio User Indexes',
 		status: 'ok',
-		summary: [
-			metricCard('index_reads', 'Index Block Reads', 'count', sum(entries.map((entry) => entry.idxReads))),
-			metricCard('index_hits', 'Index Block Hits', 'count', sum(entries.map((entry) => entry.idxHits))),
-			metricCard('index_hit_ratio', 'Index Hit Ratio', 'percent', safeRatio(sum(entries.map((entry) => entry.idxHitRatio)), entries.length || null))
-		],
-		chartTitle: chartMetrics[0]?.title ?? 'Top indexes by block reads over time',
+		summary: [],
+		chartTitle: chartMetrics[0]?.title ?? 'Top indexes by block read rate over time',
 		chartSeries: chartMetrics[0]?.series ?? [],
 		chartMetrics,
 		defaultChartMetricKey: chartMetrics[0]?.key,
@@ -3092,20 +3112,27 @@ function buildStatioUserIndexesSection(rows: SnapshotRow[], runStartMs: number):
 			{ key: 'index', label: 'Index', kind: 'text' },
 			{ key: 'idx_blks_read', label: 'Idx Blocks Read', kind: 'count' },
 			{ key: 'idx_blks_hit', label: 'Idx Blocks Hit', kind: 'count' },
-			{ key: 'idx_hit_ratio', label: 'Idx Hit Ratio', kind: 'percent' }
+			{ key: 'idx_blks_activity', label: 'Total Activity', kind: 'count' },
+			{ key: 'idx_hit_ratio', label: 'Hit Ratio', kind: 'percent' }
 		],
 		tableRows: topIndexes.map((entry) => ({
 			index: entry.label,
 			idx_blks_read: entry.idxReads,
 			idx_blks_hit: entry.idxHits,
+			idx_blks_activity: entry.idxActivity,
 			idx_hit_ratio: entry.idxHitRatio
 		})),
-		tableSnapshots: buildGroupedTableSnapshots(topIndexes, runStartMs, (entry, index) => ({
-			index: entry.label,
-			idx_blks_read: deltaAt(entry.rows, index, 'idx_blks_read'),
-			idx_blks_hit: deltaAt(entry.rows, index, 'idx_blks_hit'),
-			idx_hit_ratio: ratioAt(entry.rows, index, 'idx_blks_hit', ['idx_blks_hit', 'idx_blks_read'])
-		}))
+		tableSnapshots: buildGroupedTableSnapshots(topIndexes, runStartMs, (entry, index) => {
+			const reads = deltaAt(entry.rows, index, 'idx_blks_read');
+			const hits = deltaAt(entry.rows, index, 'idx_blks_hit');
+			return {
+				index: entry.label,
+				idx_blks_read: reads,
+				idx_blks_hit: hits,
+				idx_blks_activity: sum([reads, hits]),
+				idx_hit_ratio: ratioAt(entry.rows, index, 'idx_blks_hit', ['idx_blks_hit', 'idx_blks_read'])
+			};
+		})
 	};
 }
 
