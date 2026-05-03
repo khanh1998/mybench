@@ -2649,6 +2649,14 @@ function buildUserTablesSection(rows: SnapshotRow[], runStartMs: number): Teleme
 	};
 }
 
+const PG_STAT_USER_INDEXES_DOCS = 'https://www.postgresql.org/docs/current/monitoring-stats.html#MONITORING-PG-STAT-USER-INDEXES-VIEW';
+const uiRateDesc = (col: string) =>
+	`Rate of ${col} per second. [PG docs](${PG_STAT_USER_INDEXES_DOCS})`;
+const uiRawDesc = (col: string) =>
+	`Cumulative delta of ${col} since the baseline snapshot. [PG docs](${PG_STAT_USER_INDEXES_DOCS})`;
+const uiDerivedDesc = (formula: string) =>
+	`Uses: ${formula}. [PG docs](${PG_STAT_USER_INDEXES_DOCS})`;
+
 function buildUserIndexesSection(rows: SnapshotRow[], runStartMs: number): TelemetrySection {
 	if (rows.length === 0) {
 		return {
@@ -2680,26 +2688,35 @@ function buildUserIndexesSection(rows: SnapshotRow[], runStartMs: number): Telem
 			idxRead,
 			idxFetch,
 			selectivity: safeRatio(idxFetch, idxRead),
+			tuplesPerScan: safeRatio(idxRead, idxScans),
+			fetchPerScan: safeRatio(idxFetch, idxScans),
+			deadTupleRatio: safeRatio((idxRead ?? 0) - (idxFetch ?? 0), idxRead),
 			unused: (idxScans ?? 0) === 0
 		};
 	});
 	const topIndexes = topEntries(entries, (entry) => entry.idxScans);
 	const chartMetrics = buildGroupedMetricCharts(entries, runStartMs, [
+		// Usage
 		{
 			key: 'idx_scans',
 			label: 'Idx Scans',
+			description: uiRateDesc('idx_scan — number of index scans initiated on this index'),
 			kind: 'count',
-			title: 'Top indexes by scans over time',
+			title: 'Top indexes by scan rate over time',
+			group: 'Usage',
 			category: 'raw',
 			scoreFn: (entry) => entry.idxScans,
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'idx_scan'), elapsedSecondsAt(groupRows, index)),
 			rawSeriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'idx_scan')
 		},
+		// Throughput
 		{
 			key: 'idx_tup_read',
 			label: 'Tuples Read',
+			description: uiRateDesc('idx_tup_read — index entries returned by scans (includes dead/invisible tuples)'),
 			kind: 'count',
-			title: 'Top indexes by tuples read over time',
+			title: 'Top indexes by tuples read rate over time',
+			group: 'Throughput',
 			category: 'raw',
 			scoreFn: (entry) => entry.idxRead,
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'idx_tup_read'), elapsedSecondsAt(groupRows, index)),
@@ -2707,22 +2724,64 @@ function buildUserIndexesSection(rows: SnapshotRow[], runStartMs: number): Telem
 		},
 		{
 			key: 'idx_tup_fetch',
-			label: 'Tuples Fetch',
+			label: 'Tuples Fetched',
+			description: uiRateDesc('idx_tup_fetch — live table rows fetched via simple index scans'),
 			kind: 'count',
-			title: 'Top indexes by tuples fetched over time',
+			title: 'Top indexes by tuples fetched rate over time',
+			group: 'Throughput',
 			category: 'raw',
 			scoreFn: (entry) => entry.idxFetch,
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'idx_tup_fetch'), elapsedSecondsAt(groupRows, index)),
 			rawSeriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'idx_tup_fetch')
 		},
+		// Efficiency
 		{
 			key: 'selectivity',
-			label: '⟳ Selectivity',
+			label: 'Selectivity',
+			description: uiDerivedDesc('idx_tup_fetch / idx_tup_read — fraction of index entries that led to a live heap fetch; high = precise index, low = many dead/invisible tuples visited'),
 			kind: 'percent',
 			title: 'Top indexes by selectivity over time',
+			group: 'Efficiency',
 			category: 'derived',
 			scoreFn: (entry) => entry.selectivity,
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'idx_tup_fetch'), deltaAt(groupRows, index, 'idx_tup_read'))
+		},
+		{
+			key: 'tuples_per_scan',
+			label: 'Tuples per Scan',
+			description: uiDerivedDesc('idx_tup_read / idx_scan — average index entries read per scan; high = broad/range queries or low-selectivity index'),
+			kind: 'count',
+			title: 'Top indexes by tuples read per scan over time',
+			group: 'Efficiency',
+			category: 'derived',
+			scoreFn: (entry) => entry.tuplesPerScan,
+			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'idx_tup_read'), deltaAt(groupRows, index, 'idx_scan'))
+		},
+		{
+			key: 'fetch_per_scan',
+			label: 'Fetch per Scan',
+			description: uiDerivedDesc('idx_tup_fetch / idx_scan — average live rows returned per scan; lower than tuples_per_scan indicates MVCC overhead or dead tuples'),
+			kind: 'count',
+			title: 'Top indexes by live rows fetched per scan over time',
+			group: 'Efficiency',
+			category: 'derived',
+			scoreFn: (entry) => entry.fetchPerScan,
+			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'idx_tup_fetch'), deltaAt(groupRows, index, 'idx_scan'))
+		},
+		{
+			key: 'dead_tuple_ratio',
+			label: 'Dead Tuple Ratio',
+			description: uiDerivedDesc('(idx_tup_read - idx_tup_fetch) / idx_tup_read — fraction of index reads that did not yield a live heap row; high value indicates table bloat or MVCC churn, VACUUM recommended'),
+			kind: 'percent',
+			title: 'Top indexes by dead tuple ratio over time',
+			group: 'Efficiency',
+			category: 'derived',
+			scoreFn: (entry) => entry.deadTupleRatio,
+			seriesValueAt: (groupRows, index) => {
+				const read = deltaAt(groupRows, index, 'idx_tup_read');
+				const fetch = deltaAt(groupRows, index, 'idx_tup_fetch');
+				return safeRatio((read ?? 0) - (fetch ?? 0), read);
+			}
 		}
 	]);
 
@@ -2730,13 +2789,8 @@ function buildUserIndexesSection(rows: SnapshotRow[], runStartMs: number): Telem
 		key: 'user_indexes',
 		label: 'User Indexes',
 		status: 'ok',
-		summary: [
-			metricCard('total_index_scans', 'Index Scans', 'count', sum(entries.map((entry) => entry.idxScans))),
-			metricCard('tuples_read', 'Tuples Read', 'count', sum(entries.map((entry) => entry.idxRead))),
-			metricCard('tuples_fetched', 'Tuples Fetched', 'count', sum(entries.map((entry) => entry.idxFetch))),
-			metricCard('unused_indexes', 'Unused Indexes', 'count', entries.filter((entry) => entry.unused).length)
-		],
-		chartTitle: chartMetrics[0]?.title ?? 'Top indexes by scans over time',
+		summary: [],
+		chartTitle: chartMetrics[0]?.title ?? 'Top indexes by scan rate over time',
 		chartSeries: chartMetrics[0]?.series ?? [],
 		chartMetrics,
 		defaultChartMetricKey: chartMetrics[0]?.key,
@@ -2745,8 +2799,10 @@ function buildUserIndexesSection(rows: SnapshotRow[], runStartMs: number): Telem
 			{ key: 'index', label: 'Index', kind: 'text' },
 			{ key: 'idx_scans', label: 'Idx Scans', kind: 'count' },
 			{ key: 'idx_tup_read', label: 'Tuples Read', kind: 'count' },
-			{ key: 'idx_tup_fetch', label: 'Tuples Fetch', kind: 'count' },
+			{ key: 'idx_tup_fetch', label: 'Tuples Fetched', kind: 'count' },
 			{ key: 'selectivity', label: 'Selectivity', kind: 'percent' },
+			{ key: 'tuples_per_scan', label: 'Tuples/Scan', kind: 'count' },
+			{ key: 'dead_tuple_ratio', label: 'Dead Tuple Ratio', kind: 'percent' },
 			{ key: 'unused', label: 'Unused', kind: 'flag' }
 		],
 		tableRows: topIndexes.map((entry) => ({
@@ -2755,16 +2811,22 @@ function buildUserIndexesSection(rows: SnapshotRow[], runStartMs: number): Telem
 			idx_tup_read: entry.idxRead,
 			idx_tup_fetch: entry.idxFetch,
 			selectivity: entry.selectivity,
+			tuples_per_scan: entry.tuplesPerScan,
+			dead_tuple_ratio: entry.deadTupleRatio,
 			unused: entry.unused
 		})),
 		tableSnapshots: buildGroupedTableSnapshots(topIndexes, runStartMs, (entry, index) => {
 			const idxScans = deltaAt(entry.rows, index, 'idx_scan');
+			const idxRead = deltaAt(entry.rows, index, 'idx_tup_read');
+			const idxFetch = deltaAt(entry.rows, index, 'idx_tup_fetch');
 			return {
 				index: entry.label,
 				idx_scans: idxScans,
-				idx_tup_read: deltaAt(entry.rows, index, 'idx_tup_read'),
-				idx_tup_fetch: deltaAt(entry.rows, index, 'idx_tup_fetch'),
-				selectivity: safeRatio(deltaAt(entry.rows, index, 'idx_tup_fetch'), deltaAt(entry.rows, index, 'idx_tup_read')),
+				idx_tup_read: idxRead,
+				idx_tup_fetch: idxFetch,
+				selectivity: safeRatio(idxFetch, idxRead),
+				tuples_per_scan: safeRatio(idxRead, idxScans),
+				dead_tuple_ratio: safeRatio((idxRead ?? 0) - (idxFetch ?? 0), idxRead),
 				unused: (idxScans ?? 0) === 0
 			};
 		})
