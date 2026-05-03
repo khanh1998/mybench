@@ -1524,38 +1524,39 @@ function buildArchiverSection(rows: SnapshotRow[], runStartMs: number): Telemetr
 		};
 	}
 
+	const archivedCount = delta(rows, 'archived_count');
+	const failedCount = delta(rows, 'failed_count');
+
 	return {
 		key: 'archiver',
 		label: 'Archiver',
 		status: 'ok',
-		summary: [
-			metricCard('archived_count', 'Archived Segments', 'count', delta(rows, 'archived_count')),
-			metricCard('failed_count', 'Archive Failures', 'count', delta(rows, 'failed_count')),
-			metricCard('last_archived_time', 'Last Archived At', 'text', latestText(rows, 'last_archived_time')),
-			metricCard('last_failed_time', 'Last Failure At', 'text', latestText(rows, 'last_failed_time'))
-		],
+		summary: [],
 		chartTitle: 'Archived WAL segments over time',
-		chartSeries: [
-			...buildMetricSeries(rows, runStartMs, [
-				{ label: 'archived', valueFn: (row) => toNumber(row.archived_count) },
-				{ label: 'failed', valueFn: (row) => toNumber(row.failed_count) }
-			])
-		],
+		chartSeries: buildDerivedSeries(rows, runStartMs, [
+			{ label: 'archived/s', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'archived_count'), elapsedSecondsAt(r, i)) }
+		]),
 		chartMetrics: ([
 			{
 				key: 'archive_counts',
 				label: 'Archive Counts',
+				description: 'Number of WAL segments archived and failed. Raw view shows cumulative delta. Source: pg_stat_archiver.archived_count, pg_stat_archiver.failed_count.',
 				kind: 'count' as TelemetryValueKind,
 				title: 'WAL segments archived and failed over time',
 				category: 'raw' as const,
-				series: buildMetricSeries(rows, runStartMs, [
+				series: buildDerivedSeries(rows, runStartMs, [
+					{ label: 'archived/s', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'archived_count'), elapsedSecondsAt(r, i)) },
+					{ label: 'failed/s', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'failed_count'), elapsedSecondsAt(r, i)) }
+				]),
+				rawSeries: buildMetricSeries(rows, runStartMs, [
 					{ label: 'archived', valueFn: (row) => toNumber(row.archived_count) },
 					{ label: 'failed', valueFn: (row) => toNumber(row.failed_count) }
 				])
 			},
 			{
 				key: 'failure_rate',
-				label: '⟳ Failure Rate',
+				label: 'Failure Rate',
+				description: 'Share of archive attempts that failed; any non-zero value warrants investigation as archive failures can cause WAL accumulation and eventually halt the database. Uses: failed_count / (archived_count + failed_count).',
 				kind: 'percent' as TelemetryValueKind,
 				title: 'Archive failure rate over time',
 				category: 'derived' as const,
@@ -2991,11 +2992,30 @@ function buildStatioUserSequencesSection(rows: SnapshotRow[], runStartMs: number
 	};
 }
 
-function buildCheckpointerSection(rows: SnapshotRow[], runStartMs: number): TelemetrySection {
+function buildCheckpointerSection(rows: SnapshotRow[], runStartMs: number, databaseRows: SnapshotRow[]): TelemetrySection {
 	const numTimed = delta(rows, 'num_timed');
 	const numRequested = delta(rows, 'num_requested');
+	const totalCheckpoints = sum([numTimed, numRequested]);
 	const writeTime = delta(rows, 'write_time');
 	const syncTime = delta(rows, 'sync_time');
+	const buffersWritten = delta(rows, 'buffers_written');
+	const slruWritten = delta(rows, 'slru_written');
+	const restartpointsDone = delta(rows, 'restartpoints_done');
+	const checkpointPressure = safeRatio(numRequested, totalCheckpoints);
+	const avgWriteTimePerCkpt = safeRatio(writeTime, totalCheckpoints);
+	const avgSyncTimePerCkpt = safeRatio(syncTime, totalCheckpoints);
+	const avgTotalIoPerCkpt = safeRatio(sum([writeTime, syncTime]), totalCheckpoints);
+	const syncWriteRatio = safeRatio(syncTime, writeTime);
+	const buffersPerCkpt = safeRatio(buffersWritten, totalCheckpoints);
+	const writeTimePerBuffer = safeRatio(writeTime, buffersWritten);
+	const restartpointRatio = safeRatio(restartpointsDone, sum([totalCheckpoints, restartpointsDone]));
+	const transactions = sum([delta(databaseRows, 'xact_commit'), delta(databaseRows, 'xact_rollback')]);
+	const checkpointsPerKTx = (() => {
+		const value = safeRatio(totalCheckpoints, transactions);
+		return value === null ? null : value * 1000;
+	})();
+	const buffersWrittenPerTx = safeRatio(buffersWritten, transactions);
+	const writeTimePerTx = safeRatio(writeTime, transactions);
 
 	if (rows.length === 0) {
 		return {
@@ -3013,103 +3033,161 @@ function buildCheckpointerSection(rows: SnapshotRow[], runStartMs: number): Tele
 		};
 	}
 
+	const ckptChartMetrics: TelemetryChartMetric[] = [];
+	const CKPT_GROUP = {
+		frequency: 'Frequency',
+		writeIo: 'Write I/O',
+		sync: 'Sync',
+		pressure: 'Pressure',
+		workload: 'Workload Shape'
+	} as const;
+	const PG_STAT_CHECKPOINTER_DOCS = {
+		num_timed: 'Number of scheduled checkpoints that have been performed.',
+		num_requested: 'Number of requested checkpoints that have been performed.',
+		restartpoints_timed: 'Number of scheduled restartpoints that have been performed.',
+		restartpoints_req: 'Number of requested restartpoints performed.',
+		restartpoints_done: 'Number of restartpoints that have been performed.',
+		write_time: 'Total amount of time spent in the portion of checkpoint processing where files are written to disk, in milliseconds.',
+		sync_time: 'Total amount of time spent in the portion of checkpoint processing where files are synchronized to disk, in milliseconds.',
+		buffers_written: 'Number of buffers written during checkpoints and restartpoints.',
+		slru_written: 'Number of SLRU pages written during checkpoints and restartpoints.'
+	} as const;
+	const ckptSource = (columns: string[]) => `Source: pg_stat_checkpointer.${columns.join(', pg_stat_checkpointer.')}.`;
+	const ckptRateDescription = (description: string, columns: string[]) => `${description} Shown as a per second delta. ${ckptSource(columns)}`;
+	const ckptRawDescription = (description: string, columns: string[]) => `${description} Raw view shows the cumulative delta since the first selected sample. ${ckptSource(columns)}`;
+	const ckptDerivedDescription = (description: string, uses: string) => `${description} Uses: ${uses}.`;
+	const pushCkpt = (m: TelemetryChartMetric | null, group: string) => {
+		if (m && (m.series.length > 0 || (m.rawSeries?.length ?? 0) > 0)) ckptChartMetrics.push({ ...m, group });
+	};
+	const totalCheckpointsAt = (r: SnapshotRow[], i: number) => sum([deltaAt(r, i, 'num_requested'), deltaAt(r, i, 'num_timed')]);
+	const transactionsAt = (ckptRows: SnapshotRow[], ckptIndex: number): number | null => {
+		if (databaseRows.length === 0) return null;
+		const ckptTs = toMs(String(ckptRows[ckptIndex]?._collected_at ?? ''));
+		let txIndex = -1;
+		for (let index = 0; index < databaseRows.length; index++) {
+			const txTs = toMs(String(databaseRows[index]._collected_at));
+			if (ckptTs !== null && txTs !== null && txTs <= ckptTs) txIndex = index;
+		}
+		if (txIndex < 0) txIndex = Math.min(ckptIndex, databaseRows.length - 1);
+		return sumDeltaAt(databaseRows, txIndex, ['xact_commit', 'xact_rollback']);
+	};
+
+	// Frequency
+	const ckptCountsRate = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'requested/s', description: ckptRateDescription(PG_STAT_CHECKPOINTER_DOCS.num_requested, ['num_requested']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'num_requested'), elapsedSecondsAt(r, i)) },
+		{ label: 'timed/s', description: ckptRateDescription(PG_STAT_CHECKPOINTER_DOCS.num_timed, ['num_timed']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'num_timed'), elapsedSecondsAt(r, i)) }
+	]);
+	const ckptCountsRaw = buildMetricSeries(rows, runStartMs, [
+		{ label: 'requested', description: ckptRawDescription(PG_STAT_CHECKPOINTER_DOCS.num_requested, ['num_requested']), valueFn: (row) => toNumber(row.num_requested) },
+		{ label: 'timed', description: ckptRawDescription(PG_STAT_CHECKPOINTER_DOCS.num_timed, ['num_timed']), valueFn: (row) => toNumber(row.num_timed) }
+	]);
+	pushCkpt({ key: 'checkpoint_counts', label: 'Checkpoints', description: 'Requested and timed checkpoint counts from pg_stat_checkpointer.', kind: 'count', title: 'Checkpoint counts over time', category: 'raw', series: ckptCountsRate, rawSeries: ckptCountsRaw }, CKPT_GROUP.frequency);
+
+	const restartpointsRate = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'restartpoints done/s', description: ckptRateDescription(PG_STAT_CHECKPOINTER_DOCS.restartpoints_done, ['restartpoints_done']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'restartpoints_done'), elapsedSecondsAt(r, i)) }
+	]);
+	const restartpointsRaw = buildMetricSeries(rows, runStartMs, [
+		{ label: 'restartpoints done', description: ckptRawDescription(PG_STAT_CHECKPOINTER_DOCS.restartpoints_done, ['restartpoints_done']), valueFn: (row) => toNumber(row.restartpoints_done) },
+		{ label: 'restartpoints timed', description: ckptRawDescription(PG_STAT_CHECKPOINTER_DOCS.restartpoints_timed, ['restartpoints_timed']), valueFn: (row) => toNumber(row.restartpoints_timed) },
+		{ label: 'restartpoints req', description: ckptRawDescription(PG_STAT_CHECKPOINTER_DOCS.restartpoints_req, ['restartpoints_req']), valueFn: (row) => toNumber(row.restartpoints_req) }
+	]);
+	pushCkpt({ key: 'restartpoints', label: 'Restartpoints', description: ckptRawDescription('Restartpoints performed (standby-equivalent of checkpoints).', ['restartpoints_done', 'restartpoints_timed', 'restartpoints_req']), kind: 'count', title: 'Restartpoints over time', category: 'raw', series: restartpointsRate, rawSeries: restartpointsRaw }, CKPT_GROUP.frequency);
+
+	// Write I/O
+	const writeTimeRate = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'write time (ms)/s', description: ckptRateDescription(PG_STAT_CHECKPOINTER_DOCS.write_time, ['write_time']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'write_time'), elapsedSecondsAt(r, i)) }
+	]);
+	const writeTimeRaw = buildMetricSeries(rows, runStartMs, [
+		{ label: 'write time (ms)', description: ckptRawDescription(PG_STAT_CHECKPOINTER_DOCS.write_time, ['write_time']), valueFn: (row) => toNumber(row.write_time) }
+	]);
+	pushCkpt({ key: 'checkpoint_write_time', label: 'Write Time', description: ckptRateDescription(PG_STAT_CHECKPOINTER_DOCS.write_time, ['write_time']), kind: 'duration_ms', title: 'Checkpoint write time over time', category: 'raw', series: writeTimeRate, rawSeries: writeTimeRaw }, CKPT_GROUP.writeIo);
+
+	const buffersWrittenRate = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'buffers written/s', description: ckptRateDescription(PG_STAT_CHECKPOINTER_DOCS.buffers_written, ['buffers_written']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'buffers_written'), elapsedSecondsAt(r, i)) }
+	]);
+	const buffersWrittenRaw = buildMetricSeries(rows, runStartMs, [
+		{ label: 'buffers written', description: ckptRawDescription(PG_STAT_CHECKPOINTER_DOCS.buffers_written, ['buffers_written']), valueFn: (row) => toNumber(row.buffers_written) },
+		{ label: 'slru written', description: ckptRawDescription(PG_STAT_CHECKPOINTER_DOCS.slru_written, ['slru_written']), valueFn: (row) => toNumber(row.slru_written) }
+	]);
+	pushCkpt({ key: 'checkpoint_buffers', label: 'Buffers Written', description: ckptRateDescription(PG_STAT_CHECKPOINTER_DOCS.buffers_written, ['buffers_written', 'slru_written']), kind: 'count', title: 'Checkpoint buffers written over time', category: 'raw', series: buffersWrittenRate, rawSeries: buffersWrittenRaw }, CKPT_GROUP.writeIo);
+
+	// Sync
+	const syncTimeRate = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'sync time (ms)/s', description: ckptRateDescription(PG_STAT_CHECKPOINTER_DOCS.sync_time, ['sync_time']), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'sync_time'), elapsedSecondsAt(r, i)) }
+	]);
+	const syncTimeRaw = buildMetricSeries(rows, runStartMs, [
+		{ label: 'sync time (ms)', description: ckptRawDescription(PG_STAT_CHECKPOINTER_DOCS.sync_time, ['sync_time']), valueFn: (row) => toNumber(row.sync_time) }
+	]);
+	pushCkpt({ key: 'checkpoint_sync_time', label: 'Sync Time', description: ckptRateDescription(PG_STAT_CHECKPOINTER_DOCS.sync_time, ['sync_time']), kind: 'duration_ms', title: 'Checkpoint sync time over time', category: 'raw', series: syncTimeRate, rawSeries: syncTimeRaw }, CKPT_GROUP.sync);
+
+	// Pressure (derived)
+	const pressureSeries = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'pressure (% forced)', description: ckptDerivedDescription('Share of checkpoints that were forced (requested) rather than scheduled; high values indicate write pressure is causing checkpoints to be demanded before their scheduled time.', 'num_requested / (num_requested + num_timed)'), seriesValueAt: (r, i) => ratioAt(r, i, 'num_requested', ['num_requested', 'num_timed']) }
+	]);
+	pushCkpt({ key: 'checkpoint_pressure', label: 'Pressure', description: ckptDerivedDescription('Share of checkpoints that were forced (requested) rather than scheduled; high values indicate write pressure is causing checkpoints to be demanded before their scheduled time.', 'num_requested / (num_requested + num_timed)'), kind: 'percent', title: 'Checkpoint pressure (% forced) over time', category: 'derived', series: pressureSeries }, CKPT_GROUP.pressure);
+
+	const avgWriteTimeSeries = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'avg write time (ms)', description: ckptDerivedDescription('Average time spent writing dirty buffers per checkpoint; high values indicate the disk write path is becoming a bottleneck during checkpoints.', 'write_time / (num_requested + num_timed)'), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'write_time'), totalCheckpointsAt(r, i)) }
+	]);
+	pushCkpt({ key: 'checkpoint_avg_write_ms', label: 'Avg Write Time', description: ckptDerivedDescription('Average time spent writing dirty buffers per checkpoint; high values indicate the disk write path is becoming a bottleneck during checkpoints.', 'write_time / (num_requested + num_timed)'), kind: 'duration_ms', title: 'Avg write time per checkpoint over time', category: 'derived', series: avgWriteTimeSeries }, CKPT_GROUP.pressure);
+
+	const avgSyncTimeSeries = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'avg sync time (ms)', description: ckptDerivedDescription('Average time spent flushing dirty buffers to durable storage per checkpoint; high values indicate fsync or storage flush latency.', 'sync_time / (num_requested + num_timed)'), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'sync_time'), totalCheckpointsAt(r, i)) }
+	]);
+	pushCkpt({ key: 'checkpoint_avg_sync_ms', label: 'Avg Sync Time', description: ckptDerivedDescription('Average time spent flushing dirty buffers to durable storage per checkpoint; high values indicate fsync or storage flush latency.', 'sync_time / (num_requested + num_timed)'), kind: 'duration_ms', title: 'Avg sync time per checkpoint over time', category: 'derived', series: avgSyncTimeSeries }, CKPT_GROUP.pressure);
+
+	const avgTotalIoSeries = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'avg total I/O (ms)', description: ckptDerivedDescription('Average total I/O time (write + sync) per checkpoint; the combined cost of a checkpoint flush cycle.', '(write_time + sync_time) / (num_requested + num_timed)'), seriesValueAt: (r, i) => safeRatio(sum([deltaAt(r, i, 'write_time'), deltaAt(r, i, 'sync_time')]), totalCheckpointsAt(r, i)) }
+	]);
+	pushCkpt({ key: 'checkpoint_avg_total_io_ms', label: 'Avg Total I/O', description: ckptDerivedDescription('Average total I/O time (write + sync) per checkpoint; the combined cost of a checkpoint flush cycle.', '(write_time + sync_time) / (num_requested + num_timed)'), kind: 'duration_ms', title: 'Avg total I/O time per checkpoint over time', category: 'derived', series: avgTotalIoSeries }, CKPT_GROUP.pressure);
+
+	const buffersPerCkptSeries = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'buffers / checkpoint', description: ckptDerivedDescription('Average dirty buffers flushed per checkpoint; rising values mean checkpoints are growing larger, increasing their I/O impact and duration.', 'buffers_written / (num_requested + num_timed)'), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'buffers_written'), totalCheckpointsAt(r, i)) }
+	]);
+	pushCkpt({ key: 'checkpoint_buffers_per_ckpt', label: 'Buffers / Ckpt', description: ckptDerivedDescription('Average dirty buffers flushed per checkpoint; rising values mean checkpoints are growing larger, increasing their I/O impact and duration.', 'buffers_written / (num_requested + num_timed)'), kind: 'count', title: 'Buffers written per checkpoint over time', category: 'derived', series: buffersPerCkptSeries }, CKPT_GROUP.pressure);
+
+	const writeTimePerBufferSeries = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'write time / buffer (ms)', description: ckptDerivedDescription('Write time per buffer flushed during checkpoints; high values suggest storage throughput limits under checkpoint load regardless of checkpoint size.', 'write_time / buffers_written'), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'write_time'), deltaAt(r, i, 'buffers_written')) }
+	]);
+	pushCkpt({ key: 'checkpoint_write_time_per_buffer', label: 'Write Time / Buffer', description: ckptDerivedDescription('Write time per buffer flushed during checkpoints; high values suggest storage throughput limits under checkpoint load regardless of checkpoint size.', 'write_time / buffers_written'), kind: 'duration_ms', title: 'Checkpoint write time per buffer over time', category: 'derived', series: writeTimePerBufferSeries }, CKPT_GROUP.writeIo);
+
+	const syncWriteRatioSeries = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'sync / write time ratio', description: ckptDerivedDescription('Sync time relative to write time; a ratio > 1 means flushing to durable storage takes longer than writing — often indicates OS page-cache pressure or slow fsync.', 'sync_time / write_time'), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'sync_time'), deltaAt(r, i, 'write_time')) }
+	]);
+	pushCkpt({ key: 'checkpoint_sync_write_ratio', label: 'Sync/Write Ratio', description: ckptDerivedDescription('Sync time relative to write time; a ratio > 1 means flushing to durable storage takes longer than writing — often indicates OS page-cache pressure or slow fsync.', 'sync_time / write_time'), kind: 'count', title: 'Sync vs write time ratio over time', category: 'derived', series: syncWriteRatioSeries }, CKPT_GROUP.sync);
+
+	const restartpointRatioSeries = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'restartpoint share', description: ckptDerivedDescription('Share of checkpoint-like flush events that were restartpoints rather than checkpoints; non-zero values indicate the server is operating as a standby.', 'restartpoints_done / (checkpoints + restartpoints_done)'), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'restartpoints_done'), sum([totalCheckpointsAt(r, i), deltaAt(r, i, 'restartpoints_done')])) }
+	]);
+	pushCkpt({ key: 'restartpoint_ratio', label: 'Restartpoint Share', description: ckptDerivedDescription('Share of checkpoint-like flush events that were restartpoints rather than checkpoints; non-zero values indicate the server is operating as a standby.', 'restartpoints_done / (checkpoints + restartpoints_done)'), kind: 'percent', title: 'Restartpoints as share of total flush events', category: 'derived', series: restartpointRatioSeries }, CKPT_GROUP.frequency);
+
+	// Workload Shape (cross-database)
+	const checkpointsPerKTxSeries = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'checkpoints / 1k tx', description: ckptDerivedDescription('Checkpoints per 1000 transactions; normalises checkpoint frequency by workload intensity for cross-run comparison independent of run duration.', '(total_checkpoints / transactions) × 1000'), seriesValueAt: (r, i) => {
+			const value = safeRatio(totalCheckpointsAt(r, i), transactionsAt(r, i));
+			return value === null ? null : value * 1000;
+		} }
+	]);
+	pushCkpt({ key: 'checkpoints_per_k_tx', label: 'Checkpoints / 1k Tx', description: ckptDerivedDescription('Checkpoints per 1000 transactions; normalises checkpoint frequency by workload intensity for cross-run comparison independent of run duration.', '(total_checkpoints / transactions) × 1000'), kind: 'count', title: 'Checkpoints per 1000 transactions over time', category: 'derived', series: checkpointsPerKTxSeries }, CKPT_GROUP.workload);
+
+	const buffersWrittenPerTxSeries = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'buffers written / tx', description: ckptDerivedDescription('Checkpoint buffer writes per transaction; measures checkpoint write volume per unit of work — complements BGWriter buffers clean/tx to give a full picture of background write pressure.', 'buffers_written / transactions'), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'buffers_written'), transactionsAt(r, i)) }
+	]);
+	pushCkpt({ key: 'checkpoint_buffers_per_tx', label: 'Buffers Written / Tx', description: ckptDerivedDescription('Checkpoint buffer writes per transaction; measures checkpoint write volume per unit of work — complements BGWriter buffers clean/tx to give a full picture of background write pressure.', 'buffers_written / transactions'), kind: 'count', title: 'Checkpoint buffers written per transaction over time', category: 'derived', series: buffersWrittenPerTxSeries }, CKPT_GROUP.workload);
+
+	const writeTimePerTxSeries = buildDerivedSeries(rows, runStartMs, [
+		{ label: 'write time (ms) / tx', description: ckptDerivedDescription('Checkpoint write time per transaction; the per-unit-of-work I/O cost of checkpoints — a design that generates more dirty pages per transaction will have a higher value here.', 'write_time / transactions'), seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'write_time'), transactionsAt(r, i)) }
+	]);
+	pushCkpt({ key: 'checkpoint_write_time_per_tx', label: 'Write Time / Tx', description: ckptDerivedDescription('Checkpoint write time per transaction; the per-unit-of-work I/O cost of checkpoints — a design that generates more dirty pages per transaction will have a higher value here.', 'write_time / transactions'), kind: 'duration_ms', title: 'Checkpoint write time per transaction over time', category: 'derived', series: writeTimePerTxSeries }, CKPT_GROUP.workload);
+
 	return {
 		key: 'checkpointer',
 		label: 'Checkpointer',
 		status: 'ok',
-		summary: [
-			metricCard('num_requested', 'Requested Checkpoints', 'count', numRequested),
-			metricCard('num_timed', 'Timed Checkpoints', 'count', numTimed),
-			metricCard('checkpoint_pressure', 'Checkpoint Pressure', 'percent',
-				safeRatio(numRequested, sum([numRequested, numTimed]))),
-			metricCard('avg_checkpoint_write_ms', 'Avg Write Time / Checkpoint', 'duration_ms',
-				safeRatio(writeTime, sum([numRequested, numTimed]))),
-			metricCard('write_time', 'Write Time', 'duration_ms', writeTime),
-			metricCard('sync_time', 'Sync Time', 'duration_ms', syncTime)
-		],
-		chartTitle: 'Checkpoint activity over time',
-		chartSeries: buildMetricSeries(rows, runStartMs, [
-			{ label: 'requested', valueFn: (row) => toNumber(row.num_requested) },
-			{ label: 'timed', valueFn: (row) => toNumber(row.num_timed) },
-			{ label: 'buffers written', valueFn: (row) => toNumber(row.buffers_written) },
-			{ label: 'write time (ms)', valueFn: (row) => toNumber(row.write_time) },
-			{ label: 'sync time (ms)', valueFn: (row) => toNumber(row.sync_time) }
-		]),
-		chartMetrics: ([
-			{
-				key: 'checkpoint_counts',
-				label: 'Checkpoints',
-				kind: 'count' as TelemetryValueKind,
-				title: 'Checkpoint counts over time',
-				category: 'raw' as const,
-				series: buildMetricSeries(rows, runStartMs, [
-					{ label: 'requested', valueFn: (row) => toNumber(row.num_requested) },
-					{ label: 'timed', valueFn: (row) => toNumber(row.num_timed) }
-				])
-			},
-			{
-				key: 'checkpoint_buffers',
-				label: 'Buffers Written',
-				kind: 'count',
-				title: 'Checkpoint buffers written over time',
-				category: 'raw',
-				series: buildMetricSeries(rows, runStartMs, [
-					{ label: 'buffers written', valueFn: (row) => toNumber(row.buffers_written) },
-					{ label: 'slru written', valueFn: (row) => toNumber(row.slru_written) }
-				])
-			},
-			{
-				key: 'checkpoint_time',
-				label: 'I/O Time',
-				kind: 'duration_ms',
-				title: 'Checkpoint I/O time over time',
-				category: 'raw',
-				series: buildMetricSeries(rows, runStartMs, [
-					{ label: 'write time (ms)', valueFn: (row) => toNumber(row.write_time) },
-					{ label: 'sync time (ms)', valueFn: (row) => toNumber(row.sync_time) }
-				])
-			},
-			{
-				key: 'checkpoint_pressure',
-				label: '⟳ Pressure',
-				kind: 'percent',
-				title: 'Checkpoint pressure (% forced) over time',
-				category: 'derived',
-				series: buildDerivedSeries(rows, runStartMs, [
-					{ label: 'pressure (% forced)', seriesValueAt: (r, i) => ratioAt(r, i, 'num_requested', ['num_requested', 'num_timed']) }
-				])
-			},
-			{
-				key: 'checkpoint_avg_write_ms',
-				label: '⟳ Avg Write Time',
-				kind: 'duration_ms',
-				title: 'Avg write time per checkpoint over time',
-				category: 'derived',
-				series: buildDerivedSeries(rows, runStartMs, [
-					{ label: 'avg write time (ms)', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'write_time'), sum([deltaAt(r, i, 'num_requested'), deltaAt(r, i, 'num_timed')])) }
-				])
-			},
-			{
-				key: 'checkpoint_buffers_per_ckpt',
-				label: '⟳ Buffers / Ckpt',
-				kind: 'count',
-				title: 'Buffers written per checkpoint over time',
-				category: 'derived',
-				series: buildDerivedSeries(rows, runStartMs, [
-					{ label: 'buffers / checkpoint', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'buffers_written'), sum([deltaAt(r, i, 'num_requested'), deltaAt(r, i, 'num_timed')])) }
-				])
-			},
-			{
-				key: 'checkpoint_sync_write_ratio',
-				label: '⟳ Sync/Write Ratio',
-				kind: 'percent',
-				title: 'Sync vs write time ratio over time',
-				category: 'derived',
-				series: buildDerivedSeries(rows, runStartMs, [
-					{ label: 'sync / write time ratio', seriesValueAt: (r, i) => safeRatio(deltaAt(r, i, 'sync_time'), deltaAt(r, i, 'write_time')) }
-				])
-			}
-		] as TelemetryChartMetric[]).filter((m) => m.series.length > 0),
+		summary: [],
+		chartTitle: ckptChartMetrics[0]?.title ?? 'Checkpoint activity over time',
+		chartSeries: ckptChartMetrics[0]?.series ?? [],
+		chartMetrics: ckptChartMetrics,
 		defaultChartMetricKey: 'checkpoint_counts',
 		tableTitle: 'Checkpointer metrics',
 		tableColumns: [
@@ -3119,24 +3197,48 @@ function buildCheckpointerSection(rows: SnapshotRow[], runStartMs: number): Tele
 		tableRows: makeMetricRows([
 			{ metric: 'Requested checkpoints', value: numRequested, kind: 'count' },
 			{ metric: 'Timed checkpoints', value: numTimed, kind: 'count' },
+			{ metric: 'Checkpoint pressure', value: checkpointPressure, kind: 'percent' },
 			{ metric: 'Timed restartpoints', value: delta(rows, 'restartpoints_timed'), kind: 'count' },
 			{ metric: 'Requested restartpoints', value: delta(rows, 'restartpoints_req'), kind: 'count' },
-			{ metric: 'Restartpoints done', value: delta(rows, 'restartpoints_done'), kind: 'count' },
+			{ metric: 'Restartpoints done', value: restartpointsDone, kind: 'count' },
+			{ metric: 'Restartpoint share', value: restartpointRatio, kind: 'percent' },
 			{ metric: 'Write time (ms)', value: writeTime, kind: 'duration_ms' },
 			{ metric: 'Sync time (ms)', value: syncTime, kind: 'duration_ms' },
-			{ metric: 'Buffers written', value: delta(rows, 'buffers_written'), kind: 'count' },
+			{ metric: 'Sync/write ratio', value: syncWriteRatio, kind: 'count' },
+			{ metric: 'Buffers written', value: buffersWritten, kind: 'count' },
+			{ metric: 'SLRU written', value: slruWritten, kind: 'count' },
+			{ metric: 'Avg write time / ckpt (ms)', value: avgWriteTimePerCkpt, kind: 'duration_ms' },
+			{ metric: 'Avg sync time / ckpt (ms)', value: avgSyncTimePerCkpt, kind: 'duration_ms' },
+			{ metric: 'Avg total I/O / ckpt (ms)', value: avgTotalIoPerCkpt, kind: 'duration_ms' },
+			{ metric: 'Buffers / checkpoint', value: buffersPerCkpt, kind: 'count' },
+			{ metric: 'Write time / buffer (ms)', value: writeTimePerBuffer, kind: 'duration_ms' },
+			{ metric: 'Checkpoints / 1k tx', value: checkpointsPerKTx, kind: 'count' },
+			{ metric: 'Buffers written / tx', value: buffersWrittenPerTx, kind: 'count' },
+			{ metric: 'Write time / tx (ms)', value: writeTimePerTx, kind: 'duration_ms' },
 			{ metric: 'Stats reset', value: latestText(rows, 'stats_reset'), kind: 'text' }
 		]),
 		tableSnapshots: buildMetricTableSnapshots(rows, runStartMs, (snapshotRows, index) =>
 			makeMetricRows([
 				{ metric: 'Requested checkpoints', value: deltaAt(snapshotRows, index, 'num_requested'), kind: 'count' },
 				{ metric: 'Timed checkpoints', value: deltaAt(snapshotRows, index, 'num_timed'), kind: 'count' },
+				{ metric: 'Checkpoint pressure', value: ratioAt(snapshotRows, index, 'num_requested', ['num_requested', 'num_timed']), kind: 'percent' },
 				{ metric: 'Timed restartpoints', value: deltaAt(snapshotRows, index, 'restartpoints_timed'), kind: 'count' },
 				{ metric: 'Requested restartpoints', value: deltaAt(snapshotRows, index, 'restartpoints_req'), kind: 'count' },
 				{ metric: 'Restartpoints done', value: deltaAt(snapshotRows, index, 'restartpoints_done'), kind: 'count' },
+				{ metric: 'Restartpoint share', value: safeRatio(deltaAt(snapshotRows, index, 'restartpoints_done'), sum([totalCheckpointsAt(snapshotRows, index), deltaAt(snapshotRows, index, 'restartpoints_done')])), kind: 'percent' },
 				{ metric: 'Write time (ms)', value: deltaAt(snapshotRows, index, 'write_time'), kind: 'duration_ms' },
 				{ metric: 'Sync time (ms)', value: deltaAt(snapshotRows, index, 'sync_time'), kind: 'duration_ms' },
+				{ metric: 'Sync/write ratio', value: safeRatio(deltaAt(snapshotRows, index, 'sync_time'), deltaAt(snapshotRows, index, 'write_time')), kind: 'count' },
 				{ metric: 'Buffers written', value: deltaAt(snapshotRows, index, 'buffers_written'), kind: 'count' },
+				{ metric: 'SLRU written', value: deltaAt(snapshotRows, index, 'slru_written'), kind: 'count' },
+				{ metric: 'Avg write time / ckpt (ms)', value: safeRatio(deltaAt(snapshotRows, index, 'write_time'), totalCheckpointsAt(snapshotRows, index)), kind: 'duration_ms' },
+				{ metric: 'Avg sync time / ckpt (ms)', value: safeRatio(deltaAt(snapshotRows, index, 'sync_time'), totalCheckpointsAt(snapshotRows, index)), kind: 'duration_ms' },
+				{ metric: 'Avg total I/O / ckpt (ms)', value: safeRatio(sum([deltaAt(snapshotRows, index, 'write_time'), deltaAt(snapshotRows, index, 'sync_time')]), totalCheckpointsAt(snapshotRows, index)), kind: 'duration_ms' },
+				{ metric: 'Buffers / checkpoint', value: safeRatio(deltaAt(snapshotRows, index, 'buffers_written'), totalCheckpointsAt(snapshotRows, index)), kind: 'count' },
+				{ metric: 'Write time / buffer (ms)', value: safeRatio(deltaAt(snapshotRows, index, 'write_time'), deltaAt(snapshotRows, index, 'buffers_written')), kind: 'duration_ms' },
+				{ metric: 'Checkpoints / 1k tx', value: (() => { const v = safeRatio(totalCheckpointsAt(snapshotRows, index), transactionsAt(snapshotRows, index)); return v === null ? null : v * 1000; })(), kind: 'count' },
+				{ metric: 'Buffers written / tx', value: safeRatio(deltaAt(snapshotRows, index, 'buffers_written'), transactionsAt(snapshotRows, index)), kind: 'count' },
+				{ metric: 'Write time / tx (ms)', value: safeRatio(deltaAt(snapshotRows, index, 'write_time'), transactionsAt(snapshotRows, index)), kind: 'duration_ms' },
 				{ metric: 'Stats reset', value: snapshotRows[index].stats_reset == null ? null : String(snapshotRows[index].stats_reset), kind: 'text' }
 			])
 		)
@@ -4620,7 +4722,7 @@ export function buildRunTelemetry(db: Database.Database, runId: number, phases?:
 		buildIoSection(ioRows, runStartMs, databaseRows),
 		walSection,
 		buildBgwriterSection(bgwriterRows, runStartMs, databaseRows),
-		buildCheckpointerSection(checkpointerRows, runStartMs),
+		buildCheckpointerSection(checkpointerRows, runStartMs, databaseRows),
 		buildArchiverSection(archiverRows, runStartMs),
 		buildUserTablesSection(userTableRows, runStartMs),
 		buildUserIndexesSection(userIndexRows, runStartMs),
