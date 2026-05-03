@@ -2293,53 +2293,178 @@ function buildUserTablesSection(rows: SnapshotRow[], runStartMs: number): Teleme
 		};
 	}
 
+	const PG_STAT_USER_TABLES_DOCS = {
+		seq_scan: 'Number of sequential scans initiated on this table.',
+		seq_tup_read: 'Number of live rows fetched by sequential scans.',
+		idx_scan: 'Number of index scans initiated on this table.',
+		idx_tup_fetch: 'Number of live rows fetched by index scans.',
+		n_tup_ins: 'Number of rows inserted.',
+		n_tup_upd: 'Number of rows updated (includes HOT updated rows).',
+		n_tup_del: 'Number of rows deleted.',
+		n_tup_hot_upd: 'Number of rows HOT updated (i.e., with no separate index update required).',
+		n_tup_newpage_upd: 'Number of rows updated where the successor version goes onto a new heap page, leaving behind an old version with a t_ctid field pointing to a different page. Tracked only when track_io_timing is enabled (PG16+).',
+		n_dead_tup: 'Estimated number of dead rows.',
+		n_live_tup: 'Estimated number of live rows.',
+		vacuum_count: 'Number of times this table has been manually vacuumed (not counting VACUUM FULL).',
+		autovacuum_count: 'Number of times this table has been vacuumed by the autovacuum daemon.',
+		analyze_count: 'Number of times this table has been manually analyzed.',
+		autoanalyze_count: 'Number of times this table has been analyzed by the autovacuum daemon.',
+		total_vacuum_time: 'Total time spent by manual vacuums on this table, in milliseconds (PG16+).',
+		total_autovacuum_time: 'Total time spent by autovacuum on this table, in milliseconds (PG16+).',
+		total_analyze_time: 'Total time spent by manual analyzes on this table, in milliseconds (PG16+).',
+		total_autoanalyze_time: 'Total time spent by autoanalyze on this table, in milliseconds (PG16+).'
+	} as const;
+	const utSource = (columns: string[]) => `Source: pg_stat_user_tables.${columns.join(', pg_stat_user_tables.')}.`;
+	const utRateDesc = (description: string, columns: string[]) => `${description} Shown as a per second delta. ${utSource(columns)}`;
+	const utRawDesc = (description: string, columns: string[]) => `${description} Raw view shows the cumulative delta since the first selected sample. ${utSource(columns)}`;
+	const utDerivedDesc = (description: string, uses: string) => `${description} Uses: ${uses}.`;
+
+	const UT_GROUP = {
+		writes: 'Writes',
+		reads: 'Reads',
+		bloat: 'Bloat',
+		maintenance: 'Maintenance'
+	} as const;
+
 	const grouped = groupRows(rows, (row) => String(row.relname ?? 'unknown'));
 	const entries = [...grouped.entries()].map(([relname, bucket]) => {
-		const writes = sum([delta(bucket, 'n_tup_ins'), delta(bucket, 'n_tup_upd'), delta(bucket, 'n_tup_del')]);
+		const inserts = delta(bucket, 'n_tup_ins');
+		const updates = delta(bucket, 'n_tup_upd');
+		const deletions = delta(bucket, 'n_tup_del');
+		const writes = sum([inserts, updates, deletions]);
 		const seqScans = delta(bucket, 'seq_scan');
 		const idxScans = delta(bucket, 'idx_scan');
 		const hotUpdates = delta(bucket, 'n_tup_hot_upd');
-		const updates = delta(bucket, 'n_tup_upd');
 		const seqTupRead = delta(bucket, 'seq_tup_read');
 		const idxTupFetch = delta(bucket, 'idx_tup_fetch');
 		const newpageUpd = delta(bucket, 'n_tup_newpage_upd');
-		const vacuumActivity = sum([delta(bucket, 'vacuum_count'), delta(bucket, 'autovacuum_count')]);
+		const vacuumRuns = sum([delta(bucket, 'vacuum_count'), delta(bucket, 'autovacuum_count')]);
+		const analyzeRuns = sum([delta(bucket, 'analyze_count'), delta(bucket, 'autoanalyze_count')]);
+		const vacuumTime = sum([delta(bucket, 'total_vacuum_time'), delta(bucket, 'total_autovacuum_time')]);
+		const deadTupleGrowth = (() => {
+			const first = toNumber(bucket[0].n_dead_tup);
+			const last = toNumber(bucket[bucket.length - 1].n_dead_tup);
+			if (first === null || last === null) return null;
+			return last - first;
+		})();
 		return {
 			key: relname,
 			label: relname,
 			rows: bucket,
 			writes,
-			seqScanRatio: safeRatio(seqScans, sum([seqScans, idxScans])),
-			hotRatio: safeRatio(hotUpdates, updates),
-			deadTupleGrowth: (() => {
-				const first = toNumber(bucket[0].n_dead_tup);
-				const last = toNumber(bucket[bucket.length - 1].n_dead_tup);
-				if (first === null || last === null) return null;
-				return last - first;
-			})(),
+			inserts,
+			updates,
+			deletions,
+			seqScans,
+			idxScans,
+			hotUpdates,
 			seqTupRead,
 			idxTupFetch,
 			newpageUpd,
-			vacuumActivity
+			vacuumRuns,
+			analyzeRuns,
+			vacuumTime,
+			deadTupleGrowth,
+			seqScanRatio: safeRatio(seqScans, sum([seqScans, idxScans])),
+			hotRatio: safeRatio(hotUpdates, updates),
+			deleteRatio: safeRatio(deletions, writes),
+			rowsPerSeqScan: safeRatio(seqTupRead, seqScans),
+			rowsPerIdxScan: safeRatio(idxTupFetch, idxScans),
+			avgVacuumTime: safeRatio(vacuumTime, vacuumRuns)
 		};
 	});
 	const topTables = topEntries(entries, (entry) => entry.writes);
 	const chartMetrics = buildGroupedMetricCharts(entries, runStartMs, [
+		// Writes
 		{
 			key: 'writes',
 			label: 'Writes',
+			description: utRateDesc('Total row writes (inserts + updates + deletes) per table.', ['n_tup_ins', 'n_tup_upd', 'n_tup_del']),
 			kind: 'count',
 			title: 'Top tables by writes over time',
+			group: UT_GROUP.writes,
 			category: 'raw',
 			scoreFn: (entry) => entry.writes,
 			seriesValueAt: (groupRows, index) => safeRatio(sumDeltaAt(groupRows, index, ['n_tup_ins', 'n_tup_upd', 'n_tup_del']), elapsedSecondsAt(groupRows, index)),
 			rawSeriesValueAt: (groupRows, index) => sumDeltaAt(groupRows, index, ['n_tup_ins', 'n_tup_upd', 'n_tup_del'])
 		},
 		{
+			key: 'write_breakdown',
+			label: 'Write Breakdown',
+			description: utRateDesc('Inserts, updates, and deletes shown separately per table; useful for identifying which write type dominates and predicting dead tuple accumulation.', ['n_tup_ins', 'n_tup_upd', 'n_tup_del']),
+			kind: 'count',
+			title: 'Top tables by write type over time',
+			group: UT_GROUP.writes,
+			category: 'raw',
+			scoreFn: (entry) => entry.writes,
+			seriesValueAt: (groupRows, index) => safeRatio(sumDeltaAt(groupRows, index, ['n_tup_ins', 'n_tup_upd', 'n_tup_del']), elapsedSecondsAt(groupRows, index)),
+			rawSeriesValueAt: (groupRows, index) => sumDeltaAt(groupRows, index, ['n_tup_ins', 'n_tup_upd', 'n_tup_del'])
+		},
+		{
+			key: 'hot_update_ratio',
+			label: 'HOT Update Ratio',
+			description: utDerivedDesc('Share of updates that were HOT (Heap-Only Tuple) updates, which avoid index writes and reduce bloat; low values on update-heavy tables indicate poor fillfactor or wide index coverage forcing full-page rewrites.', 'n_tup_hot_upd / n_tup_upd'),
+			kind: 'percent',
+			title: 'HOT update ratio per table over time',
+			group: UT_GROUP.writes,
+			category: 'derived',
+			scoreFn: (entry) => entry.hotRatio,
+			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'n_tup_hot_upd'), deltaAt(groupRows, index, 'n_tup_upd'))
+		},
+		{
+			key: 'newpage_update_ratio',
+			label: 'New-Page Update Ratio',
+			description: utDerivedDesc('Share of updates where the new tuple version moved to a different heap page; high values indicate update bloat and poor fillfactor configuration (PG16+).', 'n_tup_newpage_upd / n_tup_upd'),
+			kind: 'percent',
+			title: 'New-page update ratio per table over time (PG16+)',
+			group: UT_GROUP.writes,
+			category: 'derived',
+			scoreFn: (entry) => entry.newpageUpd,
+			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'n_tup_newpage_upd'), deltaAt(groupRows, index, 'n_tup_upd'))
+		},
+		{
+			key: 'delete_ratio',
+			label: 'Delete Ratio',
+			description: utDerivedDesc('Fraction of row writes that are deletes; high values mean the table accumulates dead tuples quickly relative to its write volume, increasing vacuum pressure.', 'n_tup_del / (n_tup_ins + n_tup_upd + n_tup_del)'),
+			kind: 'percent',
+			title: 'Delete ratio per table over time',
+			group: UT_GROUP.writes,
+			category: 'derived',
+			scoreFn: (entry) => entry.deleteRatio,
+			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'n_tup_del'), sumDeltaAt(groupRows, index, ['n_tup_ins', 'n_tup_upd', 'n_tup_del']))
+		},
+		// Reads
+		{
+			key: 'seq_scans',
+			label: 'Seq Scans',
+			description: utRateDesc(PG_STAT_USER_TABLES_DOCS.seq_scan, ['seq_scan']),
+			kind: 'count',
+			title: 'Top tables by sequential scan count over time',
+			group: UT_GROUP.reads,
+			category: 'raw',
+			scoreFn: (entry) => entry.seqScans,
+			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'seq_scan'), elapsedSecondsAt(groupRows, index)),
+			rawSeriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'seq_scan')
+		},
+		{
+			key: 'idx_scans',
+			label: 'Idx Scans',
+			description: utRateDesc(PG_STAT_USER_TABLES_DOCS.idx_scan, ['idx_scan']),
+			kind: 'count',
+			title: 'Top tables by index scan count over time',
+			group: UT_GROUP.reads,
+			category: 'raw',
+			scoreFn: (entry) => entry.idxScans,
+			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'idx_scan'), elapsedSecondsAt(groupRows, index)),
+			rawSeriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'idx_scan')
+		},
+		{
 			key: 'seq_tup_read',
 			label: 'Seq Tuples Read',
+			description: utRateDesc(PG_STAT_USER_TABLES_DOCS.seq_tup_read, ['seq_tup_read']),
 			kind: 'count',
 			title: 'Top tables by rows returned from sequential scans over time',
+			group: UT_GROUP.reads,
 			category: 'raw',
 			scoreFn: (entry) => entry.seqTupRead,
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'seq_tup_read'), elapsedSecondsAt(groupRows, index)),
@@ -2348,46 +2473,79 @@ function buildUserTablesSection(rows: SnapshotRow[], runStartMs: number): Teleme
 		{
 			key: 'idx_tup_fetch',
 			label: 'Idx Tuples Fetched',
+			description: utRateDesc(PG_STAT_USER_TABLES_DOCS.idx_tup_fetch, ['idx_tup_fetch']),
 			kind: 'count',
 			title: 'Top tables by rows fetched via index scans over time',
+			group: UT_GROUP.reads,
 			category: 'raw',
 			scoreFn: (entry) => entry.idxTupFetch,
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'idx_tup_fetch'), elapsedSecondsAt(groupRows, index)),
 			rawSeriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'idx_tup_fetch')
 		},
 		{
+			key: 'seq_scan_ratio',
+			label: 'Seq Scan Ratio',
+			description: utDerivedDesc('Share of all scans that were sequential; high values on large tables indicate missing or unused indexes.', 'seq_scan / (seq_scan + idx_scan)'),
+			kind: 'percent',
+			title: 'Sequential scan ratio per table over time',
+			group: UT_GROUP.reads,
+			category: 'derived',
+			scoreFn: (entry) => entry.seqScanRatio,
+			seriesValueAt: (groupRows, index) => ratioAt(groupRows, index, 'seq_scan', ['seq_scan', 'idx_scan'])
+		},
+		{
+			key: 'index_scan_ratio',
+			label: 'Index Scan Ratio',
+			description: utDerivedDesc('Share of all scans that used an index; complement of seq scan ratio — higher is generally better for selective queries.', 'idx_scan / (seq_scan + idx_scan)'),
+			kind: 'percent',
+			title: 'Index scan ratio per table over time',
+			group: UT_GROUP.reads,
+			category: 'derived',
+			scoreFn: (entry) => safeRatio(entry.idxScans, sum([entry.seqScans, entry.idxScans])),
+			seriesValueAt: (groupRows, index) => ratioAt(groupRows, index, 'idx_scan', ['seq_scan', 'idx_scan'])
+		},
+		{
+			key: 'rows_per_seq_scan',
+			label: 'Rows / Seq Scan',
+			description: utDerivedDesc('Average rows returned per sequential scan; large values on large tables suggest the scan is reading most of the table — a strong indicator of a missing index.', 'seq_tup_read / seq_scan'),
+			kind: 'count',
+			title: 'Average rows returned per sequential scan over time',
+			group: UT_GROUP.reads,
+			category: 'derived',
+			scoreFn: (entry) => entry.rowsPerSeqScan,
+			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'seq_tup_read'), deltaAt(groupRows, index, 'seq_scan'))
+		},
+		{
+			key: 'rows_per_idx_scan',
+			label: 'Rows / Idx Scan',
+			description: utDerivedDesc('Average rows fetched per index scan; low values (near 1) indicate highly selective index lookups; rising values suggest the query is scanning broad index ranges or the index is becoming less selective.', 'idx_tup_fetch / idx_scan'),
+			kind: 'count',
+			title: 'Average rows fetched per index scan over time',
+			group: UT_GROUP.reads,
+			category: 'derived',
+			scoreFn: (entry) => entry.rowsPerIdxScan,
+			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'idx_tup_fetch'), deltaAt(groupRows, index, 'idx_scan'))
+		},
+		// Bloat
+		{
 			key: 'dead_tuple_growth',
 			label: 'Dead Tuple Growth',
+			description: utRateDesc(PG_STAT_USER_TABLES_DOCS.n_dead_tup + ' Shown as rate of accumulation. High rates relative to vacuum activity indicate autovacuum cannot keep up.', ['n_dead_tup']),
 			kind: 'count',
-			title: 'Top tables by dead tuple growth over time',
+			title: 'Dead tuple accumulation rate per table over time',
+			group: UT_GROUP.bloat,
 			category: 'raw',
 			scoreFn: (entry) => entry.deadTupleGrowth,
 			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'n_dead_tup'), elapsedSecondsAt(groupRows, index)),
 			rawSeriesValueAt: (groupRows, index) => deltaAt(groupRows, index, 'n_dead_tup')
 		},
 		{
-			key: 'seq_scan_ratio',
-			label: '⟳ Seq Scan Ratio',
-			kind: 'percent',
-			title: 'Top tables by seq scan ratio over time',
-			category: 'derived',
-			scoreFn: (entry) => entry.seqScanRatio,
-			seriesValueAt: (groupRows, index) => ratioAt(groupRows, index, 'seq_scan', ['seq_scan', 'idx_scan'])
-		},
-		{
-			key: 'hot_update_ratio',
-			label: '⟳ HOT Update Ratio',
-			kind: 'percent',
-			title: 'Top tables by HOT update ratio over time',
-			category: 'derived',
-			scoreFn: (entry) => entry.hotRatio,
-			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'n_tup_hot_upd'), deltaAt(groupRows, index, 'n_tup_upd'))
-		},
-		{
 			key: 'dead_tuple_ratio',
-			label: '⟳ Dead Tuple Ratio',
+			label: 'Dead Tuple Ratio',
+			description: utDerivedDesc('Dead rows as a fraction of total (live + dead) rows; rising values indicate autovacuum is falling behind and bloat is accumulating.', 'n_dead_tup / (n_live_tup + n_dead_tup)'),
 			kind: 'percent',
-			title: 'Dead tuple ratio over time (dead / total rows) — autovacuum backlog indicator',
+			title: 'Dead tuple ratio per table over time',
+			group: UT_GROUP.bloat,
 			category: 'derived',
 			scoreFn: (entry) => entry.deadTupleGrowth,
 			seriesValueAt: (groupRows, index) => {
@@ -2398,41 +2556,53 @@ function buildUserTablesSection(rows: SnapshotRow[], runStartMs: number): Teleme
 				return total > 0 ? dead / total : 0;
 			}
 		},
+		// Maintenance
 		{
-			key: 'index_scan_ratio',
-			label: '⟳ Index Scan Ratio',
-			kind: 'percent',
-			title: 'Index scan ratio over time (idx_scan / total scans) — inverse of seq scan ratio',
-			category: 'derived',
-			scoreFn: (entry) => entry.writes,
-			seriesValueAt: (groupRows, index) => ratioAt(groupRows, index, 'idx_scan', ['seq_scan', 'idx_scan'])
-		},
-		{
-			key: 'vacuum_activity',
-			label: '⟳ Vacuum Activity',
+			key: 'vacuum_counts',
+			label: 'Vacuum Runs',
+			description: utRateDesc('Manual and autovacuum runs per table.', ['vacuum_count', 'autovacuum_count']),
 			kind: 'count',
-			title: 'Vacuum + autovacuum runs per table over time',
-			category: 'derived',
-			scoreFn: (entry) => entry.vacuumActivity,
-			seriesValueAt: (groupRows, index) => sumDeltaAt(groupRows, index, ['vacuum_count', 'autovacuum_count'])
+			title: 'Vacuum and autovacuum runs per table over time',
+			group: UT_GROUP.maintenance,
+			category: 'raw',
+			scoreFn: (entry) => entry.vacuumRuns,
+			seriesValueAt: (groupRows, index) => safeRatio(sumDeltaAt(groupRows, index, ['vacuum_count', 'autovacuum_count']), elapsedSecondsAt(groupRows, index)),
+			rawSeriesValueAt: (groupRows, index) => sumDeltaAt(groupRows, index, ['vacuum_count', 'autovacuum_count'])
 		},
 		{
-			key: 'newpage_update_ratio',
-			label: '⟳ New-Page Update Ratio',
-			kind: 'percent',
-			title: 'Share of updates that moved tuples to a new page (bloat indicator, PG16+)',
-			category: 'derived',
-			scoreFn: (entry) => entry.newpageUpd,
-			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'n_tup_newpage_upd'), deltaAt(groupRows, index, 'n_tup_upd'))
-		},
-		{
-			key: 'rows_per_seq_scan',
-			label: '⟳ Rows / Seq Scan',
+			key: 'analyze_counts',
+			label: 'Analyze Runs',
+			description: utRateDesc('Manual and autoanalyze runs per table; frequent autoanalyzes can indicate high row churn relative to the statistics target.', ['analyze_count', 'autoanalyze_count']),
 			kind: 'count',
-			title: 'Average rows returned per sequential scan over time — large values on large tables suggest missing indexes',
+			title: 'Analyze and autoanalyze runs per table over time',
+			group: UT_GROUP.maintenance,
+			category: 'raw',
+			scoreFn: (entry) => entry.analyzeRuns,
+			seriesValueAt: (groupRows, index) => safeRatio(sumDeltaAt(groupRows, index, ['analyze_count', 'autoanalyze_count']), elapsedSecondsAt(groupRows, index)),
+			rawSeriesValueAt: (groupRows, index) => sumDeltaAt(groupRows, index, ['analyze_count', 'autoanalyze_count'])
+		},
+		{
+			key: 'vacuum_time',
+			label: 'Vacuum Time',
+			description: utRateDesc('Total time spent in manual vacuum and autovacuum per table in milliseconds (PG16+). High values identify tables with the most maintenance overhead.', ['total_vacuum_time', 'total_autovacuum_time']),
+			kind: 'duration_ms',
+			title: 'Total vacuum time per table over time (PG16+)',
+			group: UT_GROUP.maintenance,
+			category: 'raw',
+			scoreFn: (entry) => entry.vacuumTime,
+			seriesValueAt: (groupRows, index) => safeRatio(sumDeltaAt(groupRows, index, ['total_vacuum_time', 'total_autovacuum_time']), elapsedSecondsAt(groupRows, index)),
+			rawSeriesValueAt: (groupRows, index) => sumDeltaAt(groupRows, index, ['total_vacuum_time', 'total_autovacuum_time'])
+		},
+		{
+			key: 'avg_vacuum_time',
+			label: 'Avg Vacuum Time',
+			description: utDerivedDesc('Average time per vacuum run (manual + autovacuum); rising values indicate individual vacuum passes are taking longer, often due to more dead tuples or table growth (PG16+).', '(total_vacuum_time + total_autovacuum_time) / (vacuum_count + autovacuum_count)'),
+			kind: 'duration_ms',
+			title: 'Average vacuum time per run over time (PG16+)',
+			group: UT_GROUP.maintenance,
 			category: 'derived',
-			scoreFn: (entry) => entry.seqTupRead,
-			seriesValueAt: (groupRows, index) => safeRatio(deltaAt(groupRows, index, 'seq_tup_read'), deltaAt(groupRows, index, 'seq_scan'))
+			scoreFn: (entry) => entry.avgVacuumTime,
+			seriesValueAt: (groupRows, index) => safeRatio(sumDeltaAt(groupRows, index, ['total_vacuum_time', 'total_autovacuum_time']), sumDeltaAt(groupRows, index, ['vacuum_count', 'autovacuum_count']))
 		}
 	]);
 
@@ -2440,43 +2610,41 @@ function buildUserTablesSection(rows: SnapshotRow[], runStartMs: number): Teleme
 		key: 'user_tables',
 		label: 'User Tables',
 		status: 'ok',
-		summary: [
-			metricCard('total_writes', 'Total Writes', 'count', sum(entries.map((entry) => entry.writes))),
-			metricCard('avg_seq_ratio', 'Avg Seq Scan Ratio', 'percent', safeRatio(sum(entries.map((entry) => entry.seqScanRatio)), entries.length || null)),
-			metricCard('avg_hot_ratio', 'Avg HOT Ratio', 'percent', safeRatio(sum(entries.map((entry) => entry.hotRatio)), entries.length || null)),
-			metricCard('dead_tuple_growth', 'Dead Tuple Growth', 'count', sum(entries.map((entry) => entry.deadTupleGrowth))),
-			metricCard('dead_tuples_per_1k_writes', 'Dead Tuples / 1k Writes', 'count',
-				safeRatio(
-					(sum(entries.map((entry) => entry.deadTupleGrowth)) ?? 0) * 1000,
-					sum(entries.map((entry) => entry.writes))
-				)
-			)
-		],
+		summary: [],
 		chartTitle: chartMetrics[0]?.title ?? 'Top tables by writes over time',
 		chartSeries: chartMetrics[0]?.series ?? [],
 		chartMetrics,
-		defaultChartMetricKey: chartMetrics[0]?.key,
+		defaultChartMetricKey: 'writes',
 		tableTitle: 'Top tables by writes',
 		tableColumns: [
 			{ key: 'table', label: 'Table', kind: 'text' },
 			{ key: 'writes', label: 'Writes', kind: 'count' },
 			{ key: 'seq_scan_ratio', label: 'Seq Scan Ratio', kind: 'percent' },
 			{ key: 'hot_update_ratio', label: 'HOT Update Ratio', kind: 'percent' },
-			{ key: 'dead_tuple_growth', label: 'Dead Tuple Growth', kind: 'count' }
+			{ key: 'delete_ratio', label: 'Delete Ratio', kind: 'percent' },
+			{ key: 'dead_tuple_growth', label: 'Dead Tuple Growth', kind: 'count' },
+			{ key: 'vacuum_runs', label: 'Vacuum Runs', kind: 'count' },
+			{ key: 'vacuum_time_ms', label: 'Vacuum Time (ms)', kind: 'duration_ms' }
 		],
 		tableRows: topTables.map((entry) => ({
 			table: entry.label,
 			writes: entry.writes,
 			seq_scan_ratio: entry.seqScanRatio,
 			hot_update_ratio: entry.hotRatio,
-			dead_tuple_growth: entry.deadTupleGrowth
+			delete_ratio: entry.deleteRatio,
+			dead_tuple_growth: entry.deadTupleGrowth,
+			vacuum_runs: entry.vacuumRuns,
+			vacuum_time_ms: entry.vacuumTime
 		})),
 		tableSnapshots: buildGroupedTableSnapshots(topTables, runStartMs, (entry, index) => ({
 			table: entry.label,
 			writes: sumDeltaAt(entry.rows, index, ['n_tup_ins', 'n_tup_upd', 'n_tup_del']),
 			seq_scan_ratio: ratioAt(entry.rows, index, 'seq_scan', ['seq_scan', 'idx_scan']),
 			hot_update_ratio: safeRatio(deltaAt(entry.rows, index, 'n_tup_hot_upd'), deltaAt(entry.rows, index, 'n_tup_upd')),
-			dead_tuple_growth: deltaAt(entry.rows, index, 'n_dead_tup')
+			delete_ratio: safeRatio(deltaAt(entry.rows, index, 'n_tup_del'), sumDeltaAt(entry.rows, index, ['n_tup_ins', 'n_tup_upd', 'n_tup_del'])),
+			dead_tuple_growth: deltaAt(entry.rows, index, 'n_dead_tup'),
+			vacuum_runs: sumDeltaAt(entry.rows, index, ['vacuum_count', 'autovacuum_count']),
+			vacuum_time_ms: sumDeltaAt(entry.rows, index, ['total_vacuum_time', 'total_autovacuum_time'])
 		}))
 	};
 }
