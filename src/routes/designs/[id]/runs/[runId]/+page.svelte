@@ -772,48 +772,71 @@
   />
 {:else if activeTab === 'perf'}
   {#if perfSteps.length > 0}
-    <div class="perf-grid">
+    <div class="perf-steps">
       {#each perfSteps as s}
         {@const warnings = perfWarnings(s)}
         <div class="perf-card">
-          <div class="perf-card-head">
-            <strong>{s.name}</strong>
-            <span class="badge badge-{s.perf?.status ?? 'pending'}">{s.perf?.status}</span>
+          <div class="perf-card-header">
+            <div class="perf-card-title">
+              <span class="perf-step-dot"></span>
+              <span class="perf-step-name">{s.name}</span>
+              <span class="badge badge-{s.perf?.status ?? 'pending'}">{s.perf?.status}</span>
+            </div>
+            <div class="perf-card-meta">
+              <span class="perf-scope-pill perf-scope-{s.perf?.scope ?? 'disabled'}">{scopeLabel(s.perf?.scope ?? 'disabled')}</span>
+              {#if s.perf?.cgroup}<span class="perf-cgroup">{s.perf.cgroup}</span>{/if}
+            </div>
           </div>
-          <div class="perf-scope">{scopeLabel(s.perf?.scope ?? 'disabled')}{#if s.perf?.cgroup} · {s.perf.cgroup}{/if}</div>
+
           {#if warnings.length > 0}
             <div class="perf-warnings">
               {#each warnings as warning}
-                <div>{warning}</div>
+                <div class="perf-warning-row">⚠ {warning}</div>
               {/each}
             </div>
           {/if}
-          {#if s.perf?.command}
-            <div class="detail-label" style="margin-top:10px">Perf command</div>
-            <pre class="detail-pre">{s.perf.command}</pre>
-          {/if}
+
           {#if s.perf?.events.length}
-            <div class="detail-label" style="margin-top:10px">Perf events</div>
-            <table class="perf-events-table">
-              <thead><tr><th>Event</th><th>Total</th><th>/ tx</th><th>Rate / Metric</th><th>Active Time</th><th>Running %</th></tr></thead>
-              <tbody>
-                {#each s.perf.events as event}
-                  {@const displayEvent = displayPerfEvent(s, event)}
+            <div class="perf-events-wrap">
+              <table class="perf-events-table">
+                <thead>
                   <tr>
-                    <td>{event.event_name}</td>
-                    <td>{fmtMetric(event.counter_value, 3)} {event.unit}</td>
-                    <td>{fmtMetric(event.per_transaction, 3)}</td>
-                    <td>{fmtDerivedMetric(displayEvent)}</td>
-                    <td>{fmtDurationSecs(displayEvent.runtime_secs)}</td>
-                    <td>{fmtMetric(displayEvent.percent_running, 2)}</td>
+                    <th class="col-event">Event</th>
+                    <th class="col-num">Total</th>
+                    <th class="col-num">Per Tx</th>
+                    <th class="col-num">Derived</th>
+                    <th class="col-num">Sampled For</th>
+                    <th class="col-num">Coverage</th>
                   </tr>
-                {/each}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {#each s.perf.events as event}
+                    {@const displayEvent = displayPerfEvent(s, event)}
+                    <tr>
+                      <td class="col-event"><code class="event-name">{event.event_name}</code></td>
+                      <td class="col-num">{fmtMetric(event.counter_value, 3)}{#if event.unit} <span class="unit">{event.unit}</span>{/if}</td>
+                      <td class="col-num">{fmtMetric(event.per_transaction, 3)}</td>
+                      <td class="col-num">{fmtDerivedMetric(displayEvent)}</td>
+                      <td class="col-num">{fmtDurationSecs(displayEvent.runtime_secs)}</td>
+                      <td class="col-num">{fmtMetric(displayEvent.percent_running, 2)}{#if displayEvent.percent_running !== null}<span class="unit">%</span>{/if}</td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+          {/if}
+
+          {#if s.perf?.command}
+            <details class="perf-detail-toggle">
+              <summary class="perf-detail-summary">Perf command</summary>
+              <pre class="detail-pre perf-detail-pre">{s.perf.command}</pre>
+            </details>
           {/if}
           {#if s.perf?.raw_error}
-            <div class="detail-label" style="margin-top:10px">Perf raw output</div>
-            <pre class="detail-pre">{s.perf.raw_error}</pre>
+            <details class="perf-detail-toggle">
+              <summary class="perf-detail-summary">Raw output</summary>
+              <pre class="detail-pre perf-detail-pre">{s.perf.raw_error}</pre>
+            </details>
           {/if}
         </div>
       {/each}
@@ -863,21 +886,38 @@
   .detail-block { padding: 8px 12px; background: #f8f8f8; border-top: 1px solid #eee; }
   .detail-label { font-size: 10px; font-weight: 700; color: #888; text-transform: uppercase; margin-bottom: 4px; }
   .detail-pre { margin: 0; font-size: 12px; white-space: pre-wrap; word-break: break-all; background: #1e1e1e; color: #d4d4d4; padding: 8px; border-radius: 4px; max-height: 200px; overflow-y: auto; }
-  .perf-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; }
-  .perf-card { border: 1px solid #eee; border-radius: 6px; padding: 10px; background: #fafafa; }
-  .perf-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
-  .perf-scope { font-size: 11px; color: #666; margin-bottom: 8px; }
-  .perf-warnings {
-    margin-top: 10px;
-    padding: 8px;
-    background: #fff8e8;
-    border: 1px solid #f3dfaa;
-    border-radius: 4px;
-    color: #7a4f00;
-    font-size: 12px;
-  }
+  /* Perf tab */
+  .perf-steps { display: flex; flex-direction: column; gap: 12px; }
+  .perf-card { background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; padding: 16px 18px; }
+  .perf-card-header { margin-bottom: 12px; }
+  .perf-card-title { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .perf-step-dot { width: 8px; height: 8px; border-radius: 50%; background: #0066cc; flex-shrink: 0; }
+  .perf-step-name { font-size: 14px; font-weight: 700; color: #222; }
+  .perf-card-meta { display: flex; align-items: center; gap: 8px; padding-left: 16px; }
+  .perf-scope-pill { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 10px; white-space: nowrap; }
+  .perf-scope-postgres_cgroup { background: #e8f0ff; color: #0044bb; }
+  .perf-scope-system { background: #f0e8ff; color: #6600aa; }
+  .perf-scope-disabled { background: #f0f0f0; color: #888; }
+  .perf-cgroup { font-size: 11px; color: #999; font-family: monospace; }
+  .perf-warnings { margin-bottom: 12px; padding: 8px 12px; background: #fff8e8; border: 1px solid #f3dfaa; border-radius: 6px; color: #7a4f00; font-size: 12px; display: flex; flex-direction: column; gap: 4px; }
+  .perf-warning-row { display: flex; align-items: flex-start; gap: 6px; }
+  .perf-events-wrap { margin-bottom: 10px; border: 1px solid #e8e8e8; border-radius: 6px; overflow: hidden; }
   .perf-events-table { width: 100%; font-size: 12px; border-collapse: collapse; background: #fff; }
-  .perf-events-table th, .perf-events-table td { padding: 4px 6px; border-bottom: 1px solid #eee; text-align: left; }
+  .perf-events-table thead tr { background: #f5f7fa; }
+  .perf-events-table th { padding: 7px 10px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: #888; white-space: nowrap; }
+  .perf-events-table td { padding: 7px 10px; border-top: 1px solid #f0f0f0; color: #333; }
+  .perf-events-table tbody tr:hover { background: #f8f9fc; }
+  .col-event { text-align: left; }
+  .col-num { text-align: right; }
+  .event-name { font-family: monospace; font-size: 12px; background: #f0f4ff; color: #0044bb; padding: 1px 6px; border-radius: 3px; }
+  .unit { color: #bbb; font-size: 11px; margin-left: 1px; }
+  .perf-detail-toggle { margin-top: 6px; }
+  .perf-detail-toggle + .perf-detail-toggle { margin-top: 4px; }
+  .perf-detail-summary { font-size: 11px; font-weight: 700; color: #999; text-transform: uppercase; letter-spacing: 0.03em; cursor: pointer; user-select: none; padding: 3px 0; list-style: none; display: flex; align-items: center; gap: 5px; }
+  .perf-detail-summary::-webkit-details-marker { display: none; }
+  .perf-detail-summary::before { content: '▶'; font-size: 8px; transition: transform 0.15s; color: #bbb; }
+  details[open] > .perf-detail-summary::before { transform: rotate(90deg); }
+  .perf-detail-pre { margin-top: 6px; }
   .cursor { animation: blink 1s step-end infinite; }
   @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
 
