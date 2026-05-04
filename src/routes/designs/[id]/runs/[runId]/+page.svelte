@@ -380,6 +380,71 @@
     return 'Unavailable';
   }
 
+  const PERF_GROUP_ORDER = ['CPU', 'Memory', 'Branch', 'Scheduler', 'Other'] as const;
+  type PerfGroup = (typeof PERF_GROUP_ORDER)[number];
+
+  interface PerfDisplayRow extends StepPerfEvent {
+    group: PerfGroup;
+    isComputed: boolean;
+    isHot: boolean;
+  }
+
+  function perfEventGroup(name: string): PerfGroup {
+    const n = name.toLowerCase();
+    if (/cache|llc|tlb/.test(n)) return 'Memory';
+    if (/branch/.test(n)) return 'Branch';
+    if (/context.switch|migration|fault/.test(n)) return 'Scheduler';
+    if (/cycle|instruction|clock/.test(n)) return 'CPU';
+    return 'Other';
+  }
+
+  function buildPerfRows(step: StepResult): Map<PerfGroup, PerfDisplayRow[]> {
+    const events = (step.perf?.events ?? []).map((e) => displayPerfEvent(step, e));
+    const findVal = (name: string) => events.find((e) => e.event_name === name)?.counter_value ?? null;
+
+    const baseRows: PerfDisplayRow[] = events.map((event) => ({
+      ...event,
+      group: perfEventGroup(event.event_name),
+      isComputed: false,
+      isHot: false
+    }));
+
+    const perTxValues = baseRows
+      .map((r) => r.per_transaction)
+      .filter((v): v is number => v !== null && v > 0);
+    if (perTxValues.length >= 3) {
+      perTxValues.sort((a, b) => a - b);
+      const threshold = perTxValues[Math.floor(perTxValues.length * 0.75)];
+      for (const row of baseRows) {
+        row.isHot = row.per_transaction !== null && row.per_transaction > 0 && row.per_transaction >= threshold;
+      }
+    }
+
+    const computed: PerfDisplayRow[] = [];
+    const cycles = findVal('cpu-cycles') ?? findVal('cycles');
+    const instructions = findVal('instructions');
+    if (cycles && cycles > 0 && instructions !== null) {
+      computed.push({ event_name: 'ipc', counter_value: instructions / cycles, unit: 'insn/cycle', runtime_secs: null, percent_running: null, per_transaction: null, derived_value: null, derived_unit: '', group: 'CPU', isComputed: true, isHot: false });
+    }
+    const cacheRefs = findVal('cache-references');
+    const cacheMisses = findVal('cache-misses');
+    if (cacheRefs && cacheRefs > 0 && cacheMisses !== null) {
+      computed.push({ event_name: 'cache-miss-rate', counter_value: (cacheMisses / cacheRefs) * 100, unit: '%', runtime_secs: null, percent_running: null, per_transaction: null, derived_value: null, derived_unit: '', group: 'Memory', isComputed: true, isHot: false });
+    }
+    const branchInstr = findVal('branch-instructions') ?? findVal('branches');
+    const branchMisses = findVal('branch-misses');
+    if (branchInstr && branchInstr > 0 && branchMisses !== null) {
+      computed.push({ event_name: 'branch-miss-rate', counter_value: (branchMisses / branchInstr) * 100, unit: '%', runtime_secs: null, percent_running: null, per_transaction: null, derived_value: null, derived_unit: '', group: 'Branch', isComputed: true, isHot: false });
+    }
+
+    const grouped = new Map<PerfGroup, PerfDisplayRow[]>();
+    for (const g of PERF_GROUP_ORDER) {
+      const rows = [...baseRows, ...computed].filter((r) => r.group === g);
+      if (rows.length) grouped.set(g, rows);
+    }
+    return grouped;
+  }
+
   async function startEditingName() {
     nameEdit = run?.name ?? '';
     editingName = true;
@@ -797,6 +862,7 @@
           {/if}
 
           {#if s.perf?.events.length}
+            {@const groupedRows = buildPerfRows(s)}
             <div class="perf-events-wrap">
               <table class="perf-events-table">
                 <thead>
@@ -810,16 +876,25 @@
                   </tr>
                 </thead>
                 <tbody>
-                  {#each s.perf.events as event}
-                    {@const displayEvent = displayPerfEvent(s, event)}
-                    <tr>
-                      <td class="col-event"><code class="event-name">{event.event_name}</code></td>
-                      <td class="col-num">{fmtMetric(event.counter_value, 3)}{#if event.unit} <span class="unit">{event.unit}</span>{/if}</td>
-                      <td class="col-num">{fmtMetric(event.per_transaction, 3)}</td>
-                      <td class="col-num">{fmtDerivedMetric(displayEvent)}</td>
-                      <td class="col-num">{fmtDurationSecs(displayEvent.runtime_secs)}</td>
-                      <td class="col-num">{fmtMetric(displayEvent.percent_running, 2)}{#if displayEvent.percent_running !== null}<span class="unit">%</span>{/if}</td>
-                    </tr>
+                  {#each PERF_GROUP_ORDER as group}
+                    {#if groupedRows.has(group)}
+                      <tr class="perf-group-header"><td colspan="6">{group}</td></tr>
+                      {#each groupedRows.get(group) ?? [] as row}
+                        <tr class:perf-hot={row.isHot} class:perf-computed={row.isComputed}>
+                          <td class="col-event">
+                            <code class="event-name" class:event-computed={row.isComputed}>{row.event_name}</code>
+                            {#if row.isHot}<span class="hot-badge">↑ hot</span>{/if}
+                          </td>
+                          <td class="col-num">{fmtMetric(row.counter_value, 3)}{#if row.unit} <span class="unit">{row.unit}</span>{/if}</td>
+                          <td class="col-num">{row.isComputed ? '—' : fmtMetric(row.per_transaction, 3)}</td>
+                          <td class="col-num">{row.isComputed ? '—' : fmtDerivedMetric(row)}</td>
+                          <td class="col-num">{row.isComputed ? '—' : fmtDurationSecs(row.runtime_secs)}</td>
+                          <td class="col-num">
+                            {#if !row.isComputed && row.percent_running !== null}{fmtMetric(row.percent_running, 2)}<span class="unit">%</span>{:else}—{/if}
+                          </td>
+                        </tr>
+                      {/each}
+                    {/if}
                   {/each}
                 </tbody>
               </table>
@@ -918,6 +993,12 @@
   .perf-detail-summary::before { content: '▶'; font-size: 8px; transition: transform 0.15s; color: #bbb; }
   details[open] > .perf-detail-summary::before { transform: rotate(90deg); }
   .perf-detail-pre { margin-top: 6px; }
+  .perf-group-header td { background: #f5f7fa; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #888; padding: 4px 10px; }
+  .perf-hot { background: #fffbf0 !important; }
+  .perf-hot .col-event { border-left: 3px solid #f59e0b; padding-left: 7px; }
+  .hot-badge { font-size: 10px; font-weight: 700; color: #b45309; background: #fef3c7; border: 1px solid #fcd34d; border-radius: 3px; padding: 0 4px; margin-left: 5px; vertical-align: middle; }
+  .perf-computed { background: #fafbff !important; }
+  .event-computed { background: #ede9f8 !important; color: #5b21b6 !important; }
   .cursor { animation: blink 1s step-end infinite; }
   @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
 

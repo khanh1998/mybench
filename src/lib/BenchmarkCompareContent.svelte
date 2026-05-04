@@ -229,6 +229,113 @@
     return { max: max > 0 ? max : 1 };
   });
 
+  let perfViewMode = $state<'per_tx' | 'raw'>('per_tx');
+
+  const PERF_NEUTRAL_EVENTS = new Set(['instructions']);
+  const PERF_GROUP_ORDER_CMP = ['CPU', 'Memory', 'Branch', 'Scheduler', 'Other'];
+
+  function perfEventGroupCmp(name: string): string {
+    const n = name.toLowerCase();
+    if (/cache|llc|tlb/.test(n)) return 'Memory';
+    if (/branch/.test(n)) return 'Branch';
+    if (/context.switch|migration|fault/.test(n)) return 'Scheduler';
+    if (/cycle|instruction|clock/.test(n)) return 'CPU';
+    return 'Other';
+  }
+
+  interface PerfAllEventRow {
+    eventName: string;
+    group: string;
+    isComputed: boolean;
+    lowerIsBetter: boolean | null;
+    values: (number | null)[];
+  }
+
+  interface PerfAllEventsStep {
+    stepKey: string;
+    stepLabel: string;
+    hasScopeMismatch: boolean;
+    groups: { name: string; rows: PerfAllEventRow[] }[];
+  }
+
+  const perfAllEventsSteps = $derived((): PerfAllEventsStep[] => {
+    const stepKeys = new Map<string, string>();
+    for (const entry of selectedRunsWithPerf) {
+      for (const perf of entry.perf) {
+        const key = `${perf.step_type ?? 'step'}:${perf.step_name ?? perf.step_id}`;
+        stepKeys.set(key, perf.step_name ?? `Step ${perf.step_id}`);
+      }
+    }
+
+    return [...stepKeys.entries()].map(([stepKey, stepLabel]) => {
+      const scopes = new Set<string>();
+      const eventNames = new Set<string>();
+      for (const entry of selectedRunsWithPerf) {
+        const perf = entry.perf.find((p) => `${p.step_type ?? 'step'}:${p.step_name ?? p.step_id}` === stepKey);
+        if (perf) {
+          scopes.add(perf.scope);
+          for (const e of perf.events) eventNames.add(e.event_name);
+        }
+      }
+
+      const getRaw = (entryPerf: CompareStepPerf | undefined, eventName: string): number | null =>
+        entryPerf?.events.find((e) => e.event_name === eventName)?.counter_value ?? null;
+
+      const baseRows: PerfAllEventRow[] = [...eventNames].map((eventName) => ({
+        eventName,
+        group: perfEventGroupCmp(eventName),
+        isComputed: false,
+        lowerIsBetter: PERF_NEUTRAL_EVENTS.has(eventName) ? null : true,
+        values: selectedRunsWithPerf.map((entry) => {
+          const perf = entry.perf.find((p) => `${p.step_type ?? 'step'}:${p.step_name ?? p.step_id}` === stepKey);
+          const event = perf?.events.find((e) => e.event_name === eventName);
+          return perfViewMode === 'per_tx' ? (event?.per_transaction ?? null) : (event?.counter_value ?? null);
+        })
+      }));
+
+      const computed: PerfAllEventRow[] = [];
+      const cyclesName = eventNames.has('cpu-cycles') ? 'cpu-cycles' : eventNames.has('cycles') ? 'cycles' : null;
+      if (cyclesName && eventNames.has('instructions')) {
+        const values = selectedRunsWithPerf.map((entry) => {
+          const perf = entry.perf.find((p) => `${p.step_type ?? 'step'}:${p.step_name ?? p.step_id}` === stepKey);
+          const c = getRaw(perf, cyclesName);
+          const i = getRaw(perf, 'instructions');
+          return c && c > 0 && i !== null ? i / c : null;
+        });
+        if (values.some((v) => v !== null))
+          computed.push({ eventName: 'ipc', group: 'CPU', isComputed: true, lowerIsBetter: false, values });
+      }
+      if (eventNames.has('cache-references') && eventNames.has('cache-misses')) {
+        const values = selectedRunsWithPerf.map((entry) => {
+          const perf = entry.perf.find((p) => `${p.step_type ?? 'step'}:${p.step_name ?? p.step_id}` === stepKey);
+          const refs = getRaw(perf, 'cache-references');
+          const misses = getRaw(perf, 'cache-misses');
+          return refs && refs > 0 && misses !== null ? (misses / refs) * 100 : null;
+        });
+        if (values.some((v) => v !== null))
+          computed.push({ eventName: 'cache-miss-rate', group: 'Memory', isComputed: true, lowerIsBetter: true, values });
+      }
+      const branchName = eventNames.has('branch-instructions') ? 'branch-instructions' : eventNames.has('branches') ? 'branches' : null;
+      if (branchName && eventNames.has('branch-misses')) {
+        const values = selectedRunsWithPerf.map((entry) => {
+          const perf = entry.perf.find((p) => `${p.step_type ?? 'step'}:${p.step_name ?? p.step_id}` === stepKey);
+          const b = getRaw(perf, branchName);
+          const m = getRaw(perf, 'branch-misses');
+          return b && b > 0 && m !== null ? (m / b) * 100 : null;
+        });
+        if (values.some((v) => v !== null))
+          computed.push({ eventName: 'branch-miss-rate', group: 'Branch', isComputed: true, lowerIsBetter: true, values });
+      }
+
+      const allRows = [...baseRows, ...computed];
+      const groups = PERF_GROUP_ORDER_CMP
+        .map((name) => ({ name, rows: allRows.filter((r) => r.group === name) }))
+        .filter((g) => g.rows.length > 0);
+
+      return { stepKey, stepLabel, hasScopeMismatch: scopes.size > 1, groups };
+    });
+  });
+
   function perfPointX(index: number): number {
     const count = Math.max(selectedRunsWithPerf.length, 1);
     if (count === 1) return 60;
@@ -637,101 +744,126 @@
   {:else if activeCompareTab === 'perf'}
     {#if hasPerfData}
       <section class="card perf-compare-panel">
-        <div class="row section-header compact">
-          <div>
-            <h3 style="margin:0">Perf Compare</h3>
-            <span class="section-note">Pick a raw counter or normalized metric, then compare values across selected runs.</span>
+        <div class="perf-compare-header">
+          <h3 style="margin:0">Perf Compare</h3>
+          <div class="perf-view-toggle">
+            <button class="perf-mode-btn" class:active={perfViewMode === 'per_tx'} onclick={() => perfViewMode = 'per_tx'}>Per Tx</button>
+            <button class="perf-mode-btn" class:active={perfViewMode === 'raw'} onclick={() => perfViewMode = 'raw'}>Raw</button>
           </div>
-          <label class="perf-metric-picker">
-            Metric
-            <select bind:value={selectedPerfMetric}>
-              {#each perfMetricOptions() as option}
-                <option value={option.key}>{option.label}</option>
-              {/each}
-            </select>
-          </label>
         </div>
+        {#if perfViewMode === 'raw'}
+          <p class="perf-raw-note">Raw mode shows absolute counter values — results depend on run duration. Use Per Tx for meaningful comparisons.</p>
+        {/if}
+
+        {#each perfAllEventsSteps() as step}
+          {#if step.hasScopeMismatch}
+            <div class="perf-scope-warning">
+              ⚠ Scope mismatch in "{step.stepLabel}": runs were collected at different scopes (e.g. postgres cgroup vs system-wide) — values may not be directly comparable.
+            </div>
+          {/if}
+          <div class="perf-step-block">
+            {#if perfAllEventsSteps().length > 1}
+              <div class="perf-step-label">{step.stepLabel}</div>
+            {/if}
+            <div class="table-wrap">
+              <table class="perf-all-events-table">
+                <thead>
+                  <tr>
+                    <th class="col-event">Event</th>
+                    {#each selectedRunsWithPerf as entry}
+                      <th class="col-num" style="color:{entry.color}">{entry.label}</th>
+                    {/each}
+                    {#if perfViewMode === 'per_tx'}<th class="col-num">Best</th>{/if}
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each step.groups as group}
+                    <tr class="perf-group-hdr">
+                      <td colspan={selectedRunsWithPerf.length + (perfViewMode === 'per_tx' ? 2 : 1)}>{group.name}</td>
+                    </tr>
+                    {#each group.rows as row}
+                      {@const validValues = row.values.filter((v): v is number => v !== null)}
+                      {@const bestValue = perfViewMode === 'raw' || row.lowerIsBetter === null || validValues.length < 2 ? null :
+                        row.lowerIsBetter ? Math.min(...validValues) : Math.max(...validValues)}
+                      <tr class:perf-cmp-computed={row.isComputed}>
+                        <td class="col-event">
+                          <code class="cmp-event-name" class:cmp-event-computed={row.isComputed}>{row.eventName}</code>
+                          {#if row.isComputed}<span class="cmp-computed-badge">computed</span>{/if}
+                        </td>
+                        {#each row.values as value, i}
+                          {@const isBest = bestValue !== null && value !== null && value === bestValue}
+                          <td class="col-num" class:cmp-cell-best={isBest}>
+                            {formatMetric(value, 3)}{#if row.isComputed && row.eventName.includes('rate')}<span class="cmp-unit">%</span>{/if}
+                            {#if isBest}<span class="cmp-best-dot" style="background:{selectedRunsWithPerf[i]?.color}"></span>{/if}
+                          </td>
+                        {/each}
+                        {#if perfViewMode === 'per_tx'}
+                          <td class="col-num">
+                            {#if bestValue !== null}
+                              {@const bestIndex = row.values.findIndex((v) => v === bestValue)}
+                              {#if bestIndex >= 0}
+                                <span class="winner-badge" style="border-color:{COLORS[bestIndex % COLORS.length]};color:{COLORS[bestIndex % COLORS.length]}">{getRunLabel(selectedRunIds[bestIndex], true)}</span>
+                              {/if}
+                            {:else if row.lowerIsBetter === null}
+                              <span class="perf-no-best">n/a</span>
+                            {/if}
+                          </td>
+                        {/if}
+                      </tr>
+                    {/each}
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        {/each}
 
         {#if selectedPerfOption && perfCompareRows().length > 0}
-          <div class="perf-chart-shell">
-            <svg class="perf-compare-chart" viewBox="0 0 760 280" role="img" aria-label="Perf metric comparison chart">
-              <line x1="60" y1="230" x2="720" y2="230" stroke="#ddd" />
-              <line x1="60" y1="40" x2="60" y2="230" stroke="#ddd" />
-              {#each [0, 0.25, 0.5, 0.75, 1] as tick}
-                {@const y = 230 - tick * 190}
-                <line x1="60" y1={y} x2="720" y2={y} stroke="#f1f1f1" />
-                <text x="52" y={y + 4} text-anchor="end" font-size="10" fill="#777">{formatMetric(perfChartBounds().max * tick, 2)}</text>
-              {/each}
-              {#each selectedRunsWithPerf as entry, index}
-                {@const x = perfPointX(index)}
-                <line x1={x} y1="230" x2={x} y2="236" stroke="#bbb" />
-                <text x={x} y="252" text-anchor="middle" font-size="10" fill={entry.color}>{entry.label}</text>
-              {/each}
-              {#each perfCompareRows() as row, rowIndex}
-                {@const color = COLORS[rowIndex % COLORS.length]}
-                {#if row.values.filter((value) => value !== null).length > 1}
-                  <polyline
-                    points={perfPolyline(row)}
-                    fill="none"
-                    stroke={color}
-                    stroke-width="2"
-                    stroke-linejoin="round"
-                    stroke-linecap="round"
-                  />
-                {/if}
-                {#each row.values as value, index}
-                  {#if value !== null}
-                    <circle cx={perfPointX(index)} cy={perfPointY(value)} r="4" fill={color} />
-                  {/if}
-                {/each}
-              {/each}
-            </svg>
-          </div>
-
-          <div class="perf-legend">
-            {#each perfCompareRows() as row, rowIndex}
-              <span><i style="background:{COLORS[rowIndex % COLORS.length]}"></i>{row.stepLabel}</span>
-            {/each}
-          </div>
-
-          <div class="table-wrap">
-            <table class="perf-compare-table">
-              <thead>
-                <tr>
-                  <th>Step</th>
-                  {#each selectedRunsWithPerf as entry}
-                    <th style="color:{entry.color}">{entry.label}</th>
+          <details class="perf-chart-details">
+            <summary class="perf-chart-summary">Chart drill-down: visualize a single metric</summary>
+            <div class="perf-chart-body">
+              <label class="perf-metric-picker">
+                Metric
+                <select bind:value={selectedPerfMetric}>
+                  {#each perfMetricOptions() as option}
+                    <option value={option.key}>{option.label}</option>
                   {/each}
-                  <th>Best</th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each perfCompareRows() as row}
-                  {@const validValues = row.values.filter((value): value is number => value !== null)}
-                  {@const bestValue = validValues.length ? Math.min(...validValues) : null}
-                  <tr>
-                    <td class="metric-label">{row.stepLabel}</td>
-                    {#each row.values as value}
-                      <td>{formatMetric(value)}</td>
-                    {/each}
-                    <td>
-                      {#if bestValue !== null}
-                        {@const bestIndex = row.values.findIndex((value) => value === bestValue)}
-                        <span
-                          class="winner-badge"
-                          style="border-color:{COLORS[bestIndex % COLORS.length]};color:{COLORS[bestIndex % COLORS.length]}"
-                        >
-                          {getRunLabel(selectedRunIds[bestIndex], true)}
-                        </span>
+                </select>
+              </label>
+              <div class="perf-chart-shell">
+                <svg class="perf-compare-chart" viewBox="0 0 760 280" role="img" aria-label="Perf metric comparison chart">
+                  <line x1="60" y1="230" x2="720" y2="230" stroke="#ddd" />
+                  <line x1="60" y1="40" x2="60" y2="230" stroke="#ddd" />
+                  {#each [0, 0.25, 0.5, 0.75, 1] as tick}
+                    {@const y = 230 - tick * 190}
+                    <line x1="60" y1={y} x2="720" y2={y} stroke="#f1f1f1" />
+                    <text x="52" y={y + 4} text-anchor="end" font-size="10" fill="#777">{formatMetric(perfChartBounds().max * tick, 2)}</text>
+                  {/each}
+                  {#each selectedRunsWithPerf as entry, index}
+                    {@const x = perfPointX(index)}
+                    <line x1={x} y1="230" x2={x} y2="236" stroke="#bbb" />
+                    <text x={x} y="252" text-anchor="middle" font-size="10" fill={entry.color}>{entry.label}</text>
+                  {/each}
+                  {#each perfCompareRows() as row, rowIndex}
+                    {@const color = COLORS[rowIndex % COLORS.length]}
+                    {#if row.values.filter((value) => value !== null).length > 1}
+                      <polyline points={perfPolyline(row)} fill="none" stroke={color} stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
+                    {/if}
+                    {#each row.values as value, index}
+                      {#if value !== null}
+                        <circle cx={perfPointX(index)} cy={perfPointY(value)} r="4" fill={color} />
                       {/if}
-                    </td>
-                  </tr>
+                    {/each}
+                  {/each}
+                </svg>
+              </div>
+              <div class="perf-legend">
+                {#each perfCompareRows() as row, rowIndex}
+                  <span><i style="background:{COLORS[rowIndex % COLORS.length]}"></i>{row.stepLabel}</span>
                 {/each}
-              </tbody>
-            </table>
-          </div>
-        {:else}
-          <div class="empty-state">The selected metric has no comparable values.</div>
+              </div>
+            </div>
+          </details>
         {/if}
       </section>
 
@@ -996,6 +1128,38 @@
   .perf-compare-panel {
     margin-bottom: 12px;
   }
+
+  .perf-compare-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+  .perf-view-toggle { display: flex; border: 1px solid #d0d8f0; border-radius: 6px; overflow: hidden; }
+  .perf-mode-btn { background: none; border: none; padding: 5px 14px; font-size: 12px; font-weight: 600; color: #5577aa; cursor: pointer; }
+  .perf-mode-btn:hover { background: #eef3ff; }
+  .perf-mode-btn.active { background: #0066cc; color: #fff; }
+  .perf-raw-note { font-size: 12px; color: #886600; background: #fffbec; border: 1px solid #f0e0a0; border-radius: 5px; padding: 6px 10px; margin-bottom: 12px; }
+  .perf-scope-warning { font-size: 12px; color: #7a4f00; background: #fff8e8; border: 1px solid #f3dfaa; border-radius: 6px; padding: 8px 12px; margin-bottom: 10px; }
+  .perf-step-block { margin-bottom: 16px; }
+  .perf-step-label { font-size: 12px; font-weight: 700; color: #555; margin-bottom: 6px; }
+  .perf-all-events-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .perf-all-events-table thead tr { background: #f5f7fa; }
+  .perf-all-events-table th { padding: 7px 10px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: #888; }
+  .perf-all-events-table td { padding: 6px 10px; border-top: 1px solid #f0f0f0; color: #333; }
+  .perf-all-events-table tbody tr:hover { background: #f8f9fc; }
+  .perf-all-events-table .col-event { text-align: left; }
+  .perf-all-events-table .col-num { text-align: right; }
+  .perf-group-hdr td { background: #f5f7fa; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #888; padding: 4px 10px; }
+  .perf-cmp-computed { background: #fafbff !important; }
+  .cmp-event-name { font-family: monospace; font-size: 12px; background: #f0f4ff; color: #0044bb; padding: 1px 6px; border-radius: 3px; }
+  .cmp-event-computed { background: #ede9f8 !important; color: #5b21b6 !important; }
+  .cmp-computed-badge { font-size: 10px; font-weight: 600; color: #7c3aed; background: #f5f0ff; border: 1px solid #ddd6fe; border-radius: 3px; padding: 0 4px; margin-left: 5px; }
+  .cmp-cell-best { background: #f0fff4 !important; }
+  .cmp-best-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-left: 4px; vertical-align: middle; }
+  .cmp-unit { color: #aaa; font-size: 11px; }
+  .perf-no-best { color: #bbb; font-size: 11px; }
+  .perf-chart-details { margin-top: 16px; border-top: 1px solid #eee; padding-top: 12px; }
+  .perf-chart-summary { font-size: 12px; font-weight: 600; color: #888; cursor: pointer; user-select: none; list-style: none; display: flex; align-items: center; gap: 5px; }
+  .perf-chart-summary::-webkit-details-marker { display: none; }
+  .perf-chart-summary::before { content: '▶'; font-size: 9px; color: #bbb; transition: transform 0.15s; }
+  details[open] > .perf-chart-summary::before { transform: rotate(90deg); }
+  .perf-chart-body { margin-top: 10px; }
 
   .perf-metric-picker {
     display: flex;
