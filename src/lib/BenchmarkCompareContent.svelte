@@ -23,7 +23,7 @@
   interface PerfMetricOption {
     key: string;
     eventName: string;
-    kind: 'raw' | 'per_tx';
+    kind: 'raw' | 'per_tx' | 'derived';
     label: string;
   }
 
@@ -167,11 +167,15 @@
   const perfMetricOptions = $derived((): PerfMetricOption[] => {
     const eventNames = new Set<string>();
     const perTxnNames = new Set<string>();
+    const derivedNames = new Map<string, string>(); // name -> unit
     for (const entry of selectedRunsWithPerf) {
       for (const perf of entry.perf) {
         for (const event of perf.events) {
           eventNames.add(event.event_name);
           if (event.per_transaction !== null) perTxnNames.add(event.event_name);
+          if (event.derived_value !== null && !derivedNames.has(event.event_name)) {
+            derivedNames.set(event.event_name, event.derived_unit ?? '');
+          }
         }
       }
     }
@@ -180,6 +184,10 @@
       options.push({ key: `raw:${name}`, eventName: name, kind: 'raw', label: `${name} (raw)` });
       if (perTxnNames.has(name)) {
         options.push({ key: `per_tx:${name}`, eventName: name, kind: 'per_tx', label: `${name}/tx` });
+      }
+      if (derivedNames.has(name)) {
+        const unit = derivedNames.get(name);
+        options.push({ key: `derived:${name}`, eventName: name, kind: 'derived', label: unit ? `${name} (${unit})` : `${name} (derived)` });
       }
     }
     return options;
@@ -207,7 +215,9 @@
       values: selectedRunsWithPerf.map((entry) => {
         const perf = entry.perf.find((item) => `${item.step_type ?? 'step'}:${item.step_name ?? item.step_id}` === stepKey);
         const event = perf?.events.find((item) => item.event_name === option.eventName);
-        return option.kind === 'raw' ? (event?.counter_value ?? null) : (event?.per_transaction ?? null);
+        return option.kind === 'raw' ? (event?.counter_value ?? null) :
+               option.kind === 'derived' ? (event?.derived_value ?? null) :
+               (event?.per_transaction ?? null);
       })
     })).filter((row) => row.values.some((value) => value !== null));
   });
@@ -249,6 +259,8 @@
     isComputed: boolean;
     lowerIsBetter: boolean | null;
     values: (number | null)[];
+    derivedValues: (number | null)[];
+    derivedUnit: string;
   }
 
   interface PerfAllEventsStep {
@@ -281,17 +293,24 @@
       const getRaw = (entryPerf: CompareStepPerf | undefined, eventName: string): number | null =>
         entryPerf?.events.find((e) => e.event_name === eventName)?.counter_value ?? null;
 
-      const baseRows: PerfAllEventRow[] = [...eventNames].map((eventName) => ({
-        eventName,
-        group: perfEventGroupCmp(eventName),
-        isComputed: false,
-        lowerIsBetter: PERF_NEUTRAL_EVENTS.has(eventName) ? null : true,
-        values: selectedRunsWithPerf.map((entry) => {
-          const perf = entry.perf.find((p) => `${p.step_type ?? 'step'}:${p.step_name ?? p.step_id}` === stepKey);
-          const event = perf?.events.find((e) => e.event_name === eventName);
-          return perfViewMode === 'per_tx' ? (event?.per_transaction ?? null) : (event?.counter_value ?? null);
-        })
-      }));
+      const baseRows: PerfAllEventRow[] = [...eventNames].map((eventName) => {
+        const perfs = selectedRunsWithPerf.map((entry) =>
+          entry.perf.find((p) => `${p.step_type ?? 'step'}:${p.step_name ?? p.step_id}` === stepKey)
+        );
+        const events = perfs.map((p) => p?.events.find((e) => e.event_name === eventName));
+        const derivedUnit = events.find((e) => e?.derived_unit)?.derived_unit ?? '';
+        return {
+          eventName,
+          group: perfEventGroupCmp(eventName),
+          isComputed: false,
+          lowerIsBetter: PERF_NEUTRAL_EVENTS.has(eventName) ? null : true,
+          values: events.map((event) =>
+            perfViewMode === 'per_tx' ? (event?.per_transaction ?? null) : (event?.counter_value ?? null)
+          ),
+          derivedValues: events.map((event) => event?.derived_value ?? null),
+          derivedUnit
+        };
+      });
 
       const computed: PerfAllEventRow[] = [];
       const cyclesName = eventNames.has('cpu-cycles') ? 'cpu-cycles' : eventNames.has('cycles') ? 'cycles' : null;
@@ -303,7 +322,7 @@
           return c && c > 0 && i !== null ? i / c : null;
         });
         if (values.some((v) => v !== null))
-          computed.push({ eventName: 'ipc', group: 'CPU', isComputed: true, lowerIsBetter: false, values });
+          computed.push({ eventName: 'ipc', group: 'CPU', isComputed: true, lowerIsBetter: false, values, derivedValues: [], derivedUnit: '' });
       }
       if (eventNames.has('cache-references') && eventNames.has('cache-misses')) {
         const values = selectedRunsWithPerf.map((entry) => {
@@ -313,7 +332,7 @@
           return refs && refs > 0 && misses !== null ? (misses / refs) * 100 : null;
         });
         if (values.some((v) => v !== null))
-          computed.push({ eventName: 'cache-miss-rate', group: 'Memory', isComputed: true, lowerIsBetter: true, values });
+          computed.push({ eventName: 'cache-miss-rate', group: 'Memory', isComputed: true, lowerIsBetter: true, values, derivedValues: [], derivedUnit: '' });
       }
       const branchName = eventNames.has('branch-instructions') ? 'branch-instructions' : eventNames.has('branches') ? 'branches' : null;
       if (branchName && eventNames.has('branch-misses')) {
@@ -324,7 +343,7 @@
           return b && b > 0 && m !== null ? (m / b) * 100 : null;
         });
         if (values.some((v) => v !== null))
-          computed.push({ eventName: 'branch-miss-rate', group: 'Branch', isComputed: true, lowerIsBetter: true, values });
+          computed.push({ eventName: 'branch-miss-rate', group: 'Branch', isComputed: true, lowerIsBetter: true, values, derivedValues: [], derivedUnit: '' });
       }
 
       const allRows = [...baseRows, ...computed];
@@ -752,7 +771,52 @@
           </div>
         </div>
         {#if perfViewMode === 'raw'}
-          <p class="perf-raw-note">Raw mode shows absolute counter values — results depend on run duration. Use Per Tx for meaningful comparisons.</p>
+          <p class="perf-raw-note">Raw mode shows absolute counter values — results depend on run duration. Derived shows perf's own computed metric (e.g. GHz, IPC). Use Per Tx for meaningful comparisons.</p>
+        {/if}
+
+        {#if perfCompareRows().length > 0}
+          <div class="perf-chart-section">
+            <label class="perf-metric-picker">
+              Metric
+              <select bind:value={selectedPerfMetric}>
+                {#each perfMetricOptions() as option}
+                  <option value={option.key}>{option.label}</option>
+                {/each}
+              </select>
+            </label>
+            <div class="perf-chart-shell">
+              <svg class="perf-compare-chart" viewBox="0 0 760 280" role="img" aria-label="Perf metric comparison chart">
+                <line x1="60" y1="230" x2="720" y2="230" stroke="#ddd" />
+                <line x1="60" y1="40" x2="60" y2="230" stroke="#ddd" />
+                {#each [0, 0.25, 0.5, 0.75, 1] as tick}
+                  {@const y = 230 - tick * 190}
+                  <line x1="60" y1={y} x2="720" y2={y} stroke="#f1f1f1" />
+                  <text x="52" y={y + 4} text-anchor="end" font-size="10" fill="#777">{formatMetric(perfChartBounds().max * tick, 2)}</text>
+                {/each}
+                {#each selectedRunsWithPerf as entry, index}
+                  {@const x = perfPointX(index)}
+                  <line x1={x} y1="230" x2={x} y2="236" stroke="#bbb" />
+                  <text x={x} y="252" text-anchor="middle" font-size="10" fill={entry.color}>{entry.label}</text>
+                {/each}
+                {#each perfCompareRows() as row, rowIndex}
+                  {@const color = COLORS[rowIndex % COLORS.length]}
+                  {#if row.values.filter((value) => value !== null).length > 1}
+                    <polyline points={perfPolyline(row)} fill="none" stroke={color} stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
+                  {/if}
+                  {#each row.values as value, index}
+                    {#if value !== null}
+                      <circle cx={perfPointX(index)} cy={perfPointY(value)} r="4" fill={color} />
+                    {/if}
+                  {/each}
+                {/each}
+              </svg>
+            </div>
+            <div class="perf-legend">
+              {#each perfCompareRows() as row, rowIndex}
+                <span><i style="background:{COLORS[rowIndex % COLORS.length]}"></i>{row.stepLabel}</span>
+              {/each}
+            </div>
+          </div>
         {/if}
 
         {#each perfAllEventsSteps() as step}
@@ -772,6 +836,7 @@
                     <th class="col-event">Event</th>
                     {#each selectedRunsWithPerf as entry}
                       <th class="col-num" style="color:{entry.color}">{entry.label}</th>
+                      {#if perfViewMode === 'raw'}<th class="col-num cmp-derived-hdr" style="color:{entry.color}">derived</th>{/if}
                     {/each}
                     {#if perfViewMode === 'per_tx'}<th class="col-num">Best</th>{/if}
                   </tr>
@@ -779,7 +844,7 @@
                 <tbody>
                   {#each step.groups as group}
                     <tr class="perf-group-hdr">
-                      <td colspan={selectedRunsWithPerf.length + (perfViewMode === 'per_tx' ? 2 : 1)}>{group.name}</td>
+                      <td colspan={selectedRunsWithPerf.length * (perfViewMode === 'raw' ? 2 : 1) + (perfViewMode === 'per_tx' ? 2 : 1)}>{group.name}</td>
                     </tr>
                     {#each group.rows as row}
                       {@const validValues = row.values.filter((v): v is number => v !== null)}
@@ -796,6 +861,13 @@
                             {formatMetric(value, 3)}{#if row.isComputed && row.eventName.includes('rate')}<span class="cmp-unit">%</span>{/if}
                             {#if isBest}<span class="cmp-best-dot" style="background:{selectedRunsWithPerf[i]?.color}"></span>{/if}
                           </td>
+                          {#if perfViewMode === 'raw'}
+                            <td class="col-num cmp-derived-cell">
+                              {#if !row.isComputed && row.derivedValues[i] !== null}
+                                {formatMetric(row.derivedValues[i], 3)}{#if row.derivedUnit}<span class="cmp-unit"> {row.derivedUnit}</span>{/if}
+                              {:else}—{/if}
+                            </td>
+                          {/if}
                         {/each}
                         {#if perfViewMode === 'per_tx'}
                           <td class="col-num">
@@ -817,54 +889,6 @@
             </div>
           </div>
         {/each}
-
-        {#if selectedPerfOption && perfCompareRows().length > 0}
-          <details class="perf-chart-details">
-            <summary class="perf-chart-summary">Chart drill-down: visualize a single metric</summary>
-            <div class="perf-chart-body">
-              <label class="perf-metric-picker">
-                Metric
-                <select bind:value={selectedPerfMetric}>
-                  {#each perfMetricOptions() as option}
-                    <option value={option.key}>{option.label}</option>
-                  {/each}
-                </select>
-              </label>
-              <div class="perf-chart-shell">
-                <svg class="perf-compare-chart" viewBox="0 0 760 280" role="img" aria-label="Perf metric comparison chart">
-                  <line x1="60" y1="230" x2="720" y2="230" stroke="#ddd" />
-                  <line x1="60" y1="40" x2="60" y2="230" stroke="#ddd" />
-                  {#each [0, 0.25, 0.5, 0.75, 1] as tick}
-                    {@const y = 230 - tick * 190}
-                    <line x1="60" y1={y} x2="720" y2={y} stroke="#f1f1f1" />
-                    <text x="52" y={y + 4} text-anchor="end" font-size="10" fill="#777">{formatMetric(perfChartBounds().max * tick, 2)}</text>
-                  {/each}
-                  {#each selectedRunsWithPerf as entry, index}
-                    {@const x = perfPointX(index)}
-                    <line x1={x} y1="230" x2={x} y2="236" stroke="#bbb" />
-                    <text x={x} y="252" text-anchor="middle" font-size="10" fill={entry.color}>{entry.label}</text>
-                  {/each}
-                  {#each perfCompareRows() as row, rowIndex}
-                    {@const color = COLORS[rowIndex % COLORS.length]}
-                    {#if row.values.filter((value) => value !== null).length > 1}
-                      <polyline points={perfPolyline(row)} fill="none" stroke={color} stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
-                    {/if}
-                    {#each row.values as value, index}
-                      {#if value !== null}
-                        <circle cx={perfPointX(index)} cy={perfPointY(value)} r="4" fill={color} />
-                      {/if}
-                    {/each}
-                  {/each}
-                </svg>
-              </div>
-              <div class="perf-legend">
-                {#each perfCompareRows() as row, rowIndex}
-                  <span><i style="background:{COLORS[rowIndex % COLORS.length]}"></i>{row.stepLabel}</span>
-                {/each}
-              </div>
-            </div>
-          </details>
-        {/if}
       </section>
 
     {:else}
@@ -1154,12 +1178,6 @@
   .cmp-best-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-left: 4px; vertical-align: middle; }
   .cmp-unit { color: #aaa; font-size: 11px; }
   .perf-no-best { color: #bbb; font-size: 11px; }
-  .perf-chart-details { margin-top: 16px; border-top: 1px solid #eee; padding-top: 12px; }
-  .perf-chart-summary { font-size: 12px; font-weight: 600; color: #888; cursor: pointer; user-select: none; list-style: none; display: flex; align-items: center; gap: 5px; }
-  .perf-chart-summary::-webkit-details-marker { display: none; }
-  .perf-chart-summary::before { content: '▶'; font-size: 9px; color: #bbb; transition: transform 0.15s; }
-  details[open] > .perf-chart-summary::before { transform: rotate(90deg); }
-  .perf-chart-body { margin-top: 10px; }
 
   .perf-metric-picker {
     display: flex;
@@ -1214,19 +1232,6 @@
     height: 10px;
     border-radius: 50%;
     display: inline-block;
-  }
-
-  .perf-compare-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 12px;
-  }
-
-  .perf-compare-table th,
-  .perf-compare-table td {
-    text-align: left;
-    padding: 6px 10px;
-    border-bottom: 1px solid #eee;
   }
 
   .empty-state {
