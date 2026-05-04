@@ -181,16 +181,16 @@
     }
     const options: PerfMetricOption[] = [];
     for (const name of [...eventNames].sort()) {
-      options.push({ key: `raw:${name}`, eventName: name, kind: 'raw', label: `${name} (raw)` });
+      options.push({ key: `raw:${name}`, eventName: name, kind: 'raw', label: `${name} (raw count)` });
       if (perTxnNames.has(name)) {
-        options.push({ key: `per_tx:${name}`, eventName: name, kind: 'per_tx', label: `${name}/tx` });
+        options.push({ key: `per_tx:${name}`, eventName: name, kind: 'per_tx', label: `${name} / tx` });
       }
       if (derivedNames.has(name)) {
         const unit = derivedNames.get(name);
         options.push({ key: `derived:${name}`, eventName: name, kind: 'derived', label: unit ? `${name} (${unit})` : `${name} (derived)` });
       }
     }
-    return options;
+    return options.filter((o) => o.kind === perfViewMode);
   });
 
   const selectedPerfOption = $derived(
@@ -239,7 +239,7 @@
     return { max: max > 0 ? max : 1 };
   });
 
-  let perfViewMode = $state<'per_tx' | 'raw'>('per_tx');
+  let perfViewMode = $state<'per_tx' | 'raw' | 'derived'>('per_tx');
 
   const PERF_NEUTRAL_EVENTS = new Set(['instructions']);
   const PERF_GROUP_ORDER_CMP = ['CPU', 'Memory', 'Branch', 'Scheduler', 'Other'];
@@ -259,7 +259,6 @@
     isComputed: boolean;
     lowerIsBetter: boolean | null;
     values: (number | null)[];
-    derivedValues: (number | null)[];
     derivedUnit: string;
   }
 
@@ -305,45 +304,48 @@
           isComputed: false,
           lowerIsBetter: PERF_NEUTRAL_EVENTS.has(eventName) ? null : true,
           values: events.map((event) =>
-            perfViewMode === 'per_tx' ? (event?.per_transaction ?? null) : (event?.counter_value ?? null)
+            perfViewMode === 'per_tx' ? (event?.per_transaction ?? null) :
+            perfViewMode === 'derived' ? (event?.derived_value ?? null) :
+            (event?.counter_value ?? null)
           ),
-          derivedValues: events.map((event) => event?.derived_value ?? null),
           derivedUnit
         };
       });
 
       const computed: PerfAllEventRow[] = [];
-      const cyclesName = eventNames.has('cpu-cycles') ? 'cpu-cycles' : eventNames.has('cycles') ? 'cycles' : null;
-      if (cyclesName && eventNames.has('instructions')) {
-        const values = selectedRunsWithPerf.map((entry) => {
-          const perf = entry.perf.find((p) => `${p.step_type ?? 'step'}:${p.step_name ?? p.step_id}` === stepKey);
-          const c = getRaw(perf, cyclesName);
-          const i = getRaw(perf, 'instructions');
-          return c && c > 0 && i !== null ? i / c : null;
-        });
-        if (values.some((v) => v !== null))
-          computed.push({ eventName: 'ipc', group: 'CPU', isComputed: true, lowerIsBetter: false, values, derivedValues: [], derivedUnit: '' });
-      }
-      if (eventNames.has('cache-references') && eventNames.has('cache-misses')) {
-        const values = selectedRunsWithPerf.map((entry) => {
-          const perf = entry.perf.find((p) => `${p.step_type ?? 'step'}:${p.step_name ?? p.step_id}` === stepKey);
-          const refs = getRaw(perf, 'cache-references');
-          const misses = getRaw(perf, 'cache-misses');
-          return refs && refs > 0 && misses !== null ? (misses / refs) * 100 : null;
-        });
-        if (values.some((v) => v !== null))
-          computed.push({ eventName: 'cache-miss-rate', group: 'Memory', isComputed: true, lowerIsBetter: true, values, derivedValues: [], derivedUnit: '' });
-      }
-      const branchName = eventNames.has('branch-instructions') ? 'branch-instructions' : eventNames.has('branches') ? 'branches' : null;
-      if (branchName && eventNames.has('branch-misses')) {
-        const values = selectedRunsWithPerf.map((entry) => {
-          const perf = entry.perf.find((p) => `${p.step_type ?? 'step'}:${p.step_name ?? p.step_id}` === stepKey);
-          const b = getRaw(perf, branchName);
-          const m = getRaw(perf, 'branch-misses');
-          return b && b > 0 && m !== null ? (m / b) * 100 : null;
-        });
-        if (values.some((v) => v !== null))
-          computed.push({ eventName: 'branch-miss-rate', group: 'Branch', isComputed: true, lowerIsBetter: true, values, derivedValues: [], derivedUnit: '' });
+      if (perfViewMode !== 'derived') {
+        const cyclesName = eventNames.has('cpu-cycles') ? 'cpu-cycles' : eventNames.has('cycles') ? 'cycles' : null;
+        if (cyclesName && eventNames.has('instructions')) {
+          const values = selectedRunsWithPerf.map((entry) => {
+            const perf = entry.perf.find((p) => `${p.step_type ?? 'step'}:${p.step_name ?? p.step_id}` === stepKey);
+            const c = getRaw(perf, cyclesName);
+            const i = getRaw(perf, 'instructions');
+            return c && c > 0 && i !== null ? i / c : null;
+          });
+          if (values.some((v) => v !== null))
+            computed.push({ eventName: 'ipc', group: 'CPU', isComputed: true, lowerIsBetter: false, values, derivedUnit: '' });
+        }
+        if (eventNames.has('cache-references') && eventNames.has('cache-misses')) {
+          const values = selectedRunsWithPerf.map((entry) => {
+            const perf = entry.perf.find((p) => `${p.step_type ?? 'step'}:${p.step_name ?? p.step_id}` === stepKey);
+            const refs = getRaw(perf, 'cache-references');
+            const misses = getRaw(perf, 'cache-misses');
+            return refs && refs > 0 && misses !== null ? (misses / refs) * 100 : null;
+          });
+          if (values.some((v) => v !== null))
+            computed.push({ eventName: 'cache-miss-rate', group: 'Memory', isComputed: true, lowerIsBetter: true, values, derivedUnit: '' });
+        }
+        const branchName = eventNames.has('branch-instructions') ? 'branch-instructions' : eventNames.has('branches') ? 'branches' : null;
+        if (branchName && eventNames.has('branch-misses')) {
+          const values = selectedRunsWithPerf.map((entry) => {
+            const perf = entry.perf.find((p) => `${p.step_type ?? 'step'}:${p.step_name ?? p.step_id}` === stepKey);
+            const b = getRaw(perf, branchName);
+            const m = getRaw(perf, 'branch-misses');
+            return b && b > 0 && m !== null ? (m / b) * 100 : null;
+          });
+          if (values.some((v) => v !== null))
+            computed.push({ eventName: 'branch-miss-rate', group: 'Branch', isComputed: true, lowerIsBetter: true, values, derivedUnit: '' });
+        }
       }
 
       const allRows = [...baseRows, ...computed];
@@ -768,10 +770,13 @@
           <div class="perf-view-toggle">
             <button class="perf-mode-btn" class:active={perfViewMode === 'per_tx'} onclick={() => perfViewMode = 'per_tx'}>Per Tx</button>
             <button class="perf-mode-btn" class:active={perfViewMode === 'raw'} onclick={() => perfViewMode = 'raw'}>Raw</button>
+            <button class="perf-mode-btn" class:active={perfViewMode === 'derived'} onclick={() => perfViewMode = 'derived'}>Derived</button>
           </div>
         </div>
         {#if perfViewMode === 'raw'}
-          <p class="perf-raw-note">Raw mode shows absolute counter values — results depend on run duration. Derived shows perf's own computed metric (e.g. GHz, IPC). Use Per Tx for meaningful comparisons.</p>
+          <p class="perf-raw-note">Raw: absolute counter values — duration-dependent. Use Per Tx for run comparisons.</p>
+        {:else if perfViewMode === 'derived'}
+          <p class="perf-raw-note">Derived: perf's own computed metrics (e.g. GHz for cpu-cycles). Not all events have a derived value.</p>
         {/if}
 
         {#if perfCompareRows().length > 0}
@@ -836,7 +841,6 @@
                     <th class="col-event">Event</th>
                     {#each selectedRunsWithPerf as entry}
                       <th class="col-num" style="color:{entry.color}">{entry.label}</th>
-                      {#if perfViewMode === 'raw'}<th class="col-num cmp-derived-hdr" style="color:{entry.color}">derived</th>{/if}
                     {/each}
                     {#if perfViewMode === 'per_tx'}<th class="col-num">Best</th>{/if}
                   </tr>
@@ -844,16 +848,17 @@
                 <tbody>
                   {#each step.groups as group}
                     <tr class="perf-group-hdr">
-                      <td colspan={selectedRunsWithPerf.length * (perfViewMode === 'raw' ? 2 : 1) + (perfViewMode === 'per_tx' ? 2 : 1)}>{group.name}</td>
+                      <td colspan={selectedRunsWithPerf.length + (perfViewMode === 'per_tx' ? 2 : 1)}>{group.name}</td>
                     </tr>
                     {#each group.rows as row}
                       {@const validValues = row.values.filter((v): v is number => v !== null)}
-                      {@const bestValue = perfViewMode === 'raw' || row.lowerIsBetter === null || validValues.length < 2 ? null :
+                      {@const bestValue = perfViewMode !== 'per_tx' || row.lowerIsBetter === null || validValues.length < 2 ? null :
                         row.lowerIsBetter ? Math.min(...validValues) : Math.max(...validValues)}
                       <tr class:perf-cmp-computed={row.isComputed}>
                         <td class="col-event">
                           <code class="cmp-event-name" class:cmp-event-computed={row.isComputed}>{row.eventName}</code>
                           {#if row.isComputed}<span class="cmp-computed-badge">computed</span>{/if}
+                          {#if perfViewMode === 'derived' && row.derivedUnit}<span class="cmp-unit"> {row.derivedUnit}</span>{/if}
                         </td>
                         {#each row.values as value, i}
                           {@const isBest = bestValue !== null && value !== null && value === bestValue}
@@ -861,13 +866,6 @@
                             {formatMetric(value, 3)}{#if row.isComputed && row.eventName.includes('rate')}<span class="cmp-unit">%</span>{/if}
                             {#if isBest}<span class="cmp-best-dot" style="background:{selectedRunsWithPerf[i]?.color}"></span>{/if}
                           </td>
-                          {#if perfViewMode === 'raw'}
-                            <td class="col-num cmp-derived-cell">
-                              {#if !row.isComputed && row.derivedValues[i] !== null}
-                                {formatMetric(row.derivedValues[i], 3)}{#if row.derivedUnit}<span class="cmp-unit"> {row.derivedUnit}</span>{/if}
-                              {:else}—{/if}
-                            </td>
-                          {/if}
                         {/each}
                         {#if perfViewMode === 'per_tx'}
                           <td class="col-num">
