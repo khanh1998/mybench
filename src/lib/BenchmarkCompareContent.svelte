@@ -759,8 +759,6 @@
       title="CloudWatch"
       subtitle="Compare AWS CloudWatch telemetry across the selected runs."
       includeSectionKeys={['cloudwatch']}
-      showHeroCards={false}
-      showInsightSummary={false}
     />
   {:else if activeCompareTab === 'perf'}
     {#if hasPerfData}
@@ -913,8 +911,6 @@
         ? 'Compare self-hosted machine CPU, memory, disk, and network telemetry across the selected runs.'
         : 'Compare self-hosted PostgreSQL process telemetry across the selected runs.'}
       includeSectionKeys={hostMetricsTab === 'system' ? ['host_system'] : ['host_processes']}
-      showHeroCards={false}
-      showInsightSummary={false}
     />
   {/if}
 {:else if !canCompare}
