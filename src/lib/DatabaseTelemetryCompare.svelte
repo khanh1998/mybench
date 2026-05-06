@@ -1,21 +1,12 @@
 <script lang="ts">
   import { fetchRunTelemetry } from '$lib/telemetry/api';
-  import { formatValue } from '$lib/telemetry/format';
   import TelemetryCompareSection from '$lib/telemetry/TelemetryCompareSection.svelte';
-  import type { RunTelemetry, TelemetryCard, TelemetryPhase, TelemetrySection } from '$lib/telemetry/types';
+  import type { RunTelemetry, TelemetryPhase, TelemetrySection } from '$lib/telemetry/types';
 
   interface CompareRun {
     id: number;
     label: string;
     color: string;
-  }
-
-  interface HeroCompareCard {
-    key: string;
-    label: string;
-    kind: TelemetryCard['kind'];
-    infoText?: string;
-    values: Record<number, TelemetryCard['value']>;
   }
 
   interface SectionCompareGroup {
@@ -31,8 +22,6 @@
     subtitle = 'Compare database internals section-by-section across the selected runs.',
     includeSectionKeys = null,
     excludeSectionKeys = null,
-    showHeroCards = true,
-    showInsightSummary = true
   }: {
     runs: CompareRun[];
     active?: boolean;
@@ -40,8 +29,6 @@
     subtitle?: string;
     includeSectionKeys?: string[] | null;
     excludeSectionKeys?: string[] | null;
-    showHeroCards?: boolean;
-    showInsightSummary?: boolean;
   } = $props();
 
   const PHASES: TelemetryPhase[] = ['pre', 'bench', 'post'];
@@ -117,23 +104,6 @@
     }
   }
 
-  const heroCompareCards = $derived.by((): HeroCompareCard[] => {
-    const firstTelemetry = runs.map((run) => getRunTelemetry(run.id)).find(Boolean);
-    if (!firstTelemetry) return [];
-    return firstTelemetry.heroCards.map((card) => ({
-      key: card.key,
-      label: card.label,
-      kind: card.kind,
-      infoText: card.infoText,
-      values: Object.fromEntries(
-        runs.map((run) => [
-          run.id,
-          getRunTelemetry(run.id)?.heroCards.find((heroCard) => heroCard.key === card.key)?.value ?? null
-        ])
-      )
-    }));
-  });
-
   const sectionGroups = $derived.by((): SectionCompareGroup[] => {
     const firstTelemetry = runs.map((run) => getRunTelemetry(run.id)).find(Boolean);
     if (!firstTelemetry) return [];
@@ -162,97 +132,6 @@
     void loadTelemetry();
   });
 
-  interface InsightBullet {
-    text: string;
-    kind: 'info' | 'warn' | 'good';
-  }
-
-  const insightBullets = $derived.by((): InsightBullet[] => {
-    if (runs.length < 2 || heroCompareCards.length === 0) return [];
-
-    const get = (key: string, runId: number): number | null => {
-      const card = heroCompareCards.find((c) => c.key === key);
-      const v = card?.values[runId];
-      return typeof v === 'number' && isFinite(v) ? v : null;
-    };
-
-    const bullets: InsightBullet[] = [];
-
-    // 1. Throughput winner (by db_tps)
-    const tpsByRun = runs
-      .map((r) => ({ run: r, tps: get('db_tps', r.id) }))
-      .filter((x): x is { run: CompareRun; tps: number } => x.tps !== null)
-      .sort((a, b) => b.tps - a.tps);
-
-    if (tpsByRun.length >= 2) {
-      const [best, second] = tpsByRun;
-      const tpsPct = (((best.tps - second.tps) / second.tps) * 100).toFixed(0);
-      let text = `${best.run.label} leads on throughput (+${tpsPct}% DB-stat TPS)`;
-
-      // 2. WAL amplification caveat on the winner
-      const walBest = get('wal_per_tx', best.run.id);
-      const walSecond = get('wal_per_tx', second.run.id);
-      if (walBest !== null && walSecond !== null && walSecond > 0) {
-        const walPct = ((walBest - walSecond) / walSecond) * 100;
-        if (walPct >= 20) {
-          text += `, but generates ${walPct.toFixed(0)}% more WAL per transaction — higher replication and I/O cost over time`;
-        }
-      }
-
-      bullets.push({ text: text + '.', kind: tpsByRun.length >= 2 ? 'info' : 'good' });
-    }
-
-    // 3. Checkpoint pressure
-    for (const r of runs) {
-      const req = get('requested_checkpoints', r.id);
-      if (req !== null && req > 0) {
-        bullets.push({
-          text: `${r.label} triggered ${req} requested checkpoint${req > 1 ? 's' : ''} — indicates write pressure exceeding checkpoint_completion_target; may cause I/O spikes under sustained load.`,
-          kind: 'warn'
-        });
-      }
-    }
-
-    // 4. Cache pressure
-    for (const r of runs) {
-      const hr = get('buffer_hit_ratio', r.id);
-      if (hr !== null && hr < 95) {
-        bullets.push({
-          text: `${r.label} buffer hit ratio is ${hr.toFixed(1)}% — working set may exceed shared_buffers; expect performance to degrade further as data grows.`,
-          kind: 'warn'
-        });
-      }
-    }
-
-    // 5. Dead tuple accumulation (winner vs others)
-    if (tpsByRun.length >= 2) {
-      const [best, second] = tpsByRun;
-      const dtBest = get('dead_tuple_growth', best.run.id);
-      const dtSecond = get('dead_tuple_growth', second.run.id);
-      if (dtBest !== null && dtSecond !== null && dtSecond > 0) {
-        const dtPct = ((dtBest - dtSecond) / dtSecond) * 100;
-        if (dtPct >= 50) {
-          bullets.push({
-            text: `${best.run.label} accumulates ${dtPct.toFixed(0)}% more dead tuples — higher autovacuum overhead over time, which may erode the throughput advantage.`,
-            kind: 'warn'
-          });
-        }
-      }
-    }
-
-    // 6. Temp spill
-    for (const r of runs) {
-      const tmp = get('temp_bytes', r.id);
-      if (tmp !== null && tmp > 1_000_000) {
-        bullets.push({
-          text: `${r.label} spilled ${(tmp / 1e6).toFixed(1)} MB to disk (sorts or hash joins) — increase work_mem or redesign sort-heavy queries to avoid latency spikes.`,
-          kind: 'warn'
-        });
-      }
-    }
-
-    return bullets;
-  });
 </script>
 
 <div class="telemetry-compare-shell">
@@ -290,35 +169,6 @@
   {:else if error}
     <div class="card telemetry-empty telemetry-error">{error}</div>
   {:else}
-    {#if showInsightSummary && insightBullets.length > 0}
-      <div class="card insight-summary-card">
-        <div class="insight-header">Insight Summary</div>
-        <ul class="insight-list">
-          {#each insightBullets as bullet}
-            <li class="insight-item insight-{bullet.kind}">{bullet.text}</li>
-          {/each}
-        </ul>
-      </div>
-    {/if}
-
-    {#if showHeroCards && heroCompareCards.length > 0}
-      <div class="hero-compare-grid">
-        {#each heroCompareCards as card}
-          <div class="hero-compare-card">
-            <div class="hero-compare-label">{card.label}</div>
-            <div class="hero-compare-values">
-              {#each runs as run}
-                <div class="hero-compare-row">
-                  <span class="hero-run-label" style={`color:${run.color}`}>{run.label}</span>
-                  <strong>{formatValue(card.values[run.id], card.kind)}</strong>
-                </div>
-              {/each}
-            </div>
-          </div>
-        {/each}
-      </div>
-    {/if}
-
     <div class="section-compare-list">
       {#each sectionGroups as group}
         <section class="card compare-section-card">
@@ -422,45 +272,6 @@
     background: var(--run-color);
   }
 
-  .hero-compare-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-    gap: 10px;
-  }
-
-  .hero-compare-card {
-    border: 1px solid #e6ebf2;
-    border-radius: 12px;
-    padding: 12px;
-    background: linear-gradient(180deg, #ffffff 0%, #f9fbfd 100%);
-  }
-
-  .hero-compare-label {
-    font-size: 11px;
-    color: #666;
-    text-transform: uppercase;
-    font-weight: 700;
-    margin-bottom: 8px;
-  }
-
-  .hero-compare-values {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  .hero-compare-row {
-    display: flex;
-    justify-content: space-between;
-    gap: 12px;
-    align-items: baseline;
-    font-size: 13px;
-  }
-
-  .hero-run-label {
-    font-weight: 700;
-  }
-
   .section-compare-list {
     display: flex;
     flex-direction: column;
@@ -486,50 +297,4 @@
     color: #a11;
   }
 
-  .insight-summary-card {
-    padding: 14px 16px;
-  }
-
-  .insight-header {
-    font-size: 11px;
-    font-weight: 700;
-    text-transform: uppercase;
-    color: #666;
-    margin-bottom: 10px;
-    letter-spacing: 0.04em;
-  }
-
-  .insight-list {
-    margin: 0;
-    padding: 0 0 0 16px;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  .insight-item {
-    font-size: 13px;
-    line-height: 1.5;
-    color: #213247;
-  }
-
-  .insight-item::marker {
-    color: #888;
-  }
-
-  .insight-warn {
-    color: #7a3a00;
-  }
-
-  .insight-warn::marker {
-    color: #e6531d;
-  }
-
-  .insight-good {
-    color: #005a3a;
-  }
-
-  .insight-good::marker {
-    color: #00996b;
-  }
 </style>
