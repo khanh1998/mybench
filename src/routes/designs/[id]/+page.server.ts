@@ -30,7 +30,7 @@ export const load: PageServerLoad = ({ params }) => {
 		'SELECT * FROM design_params WHERE design_id = ? ORDER BY position'
 	).all(id) as DesignParam[];
 
-	const servers = db.prepare('SELECT id, name, host, port, username, password, ssl, rds_instance_id, ssh_enabled, private_host, vpc FROM pg_servers ORDER BY id').all();
+	const servers = db.prepare('SELECT id, name, host, port, username, password, ssl, ssh_enabled, private_host, vpc FROM pg_servers ORDER BY id').all();
 	const ec2Servers = db.prepare('SELECT id, name, host, user, port, vpc FROM ec2_servers ORDER BY id').all();
 	const runs = db.prepare('SELECT * FROM benchmark_runs WHERE design_id = ? ORDER BY id DESC').all(id);
 

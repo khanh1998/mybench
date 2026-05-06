@@ -27,17 +27,14 @@ type ProfileValue struct {
 	Value     string `json:"value"`
 }
 
-// ServerConfig holds the PostgreSQL connection parameters and optional AWS/RDS config.
+// ServerConfig holds the PostgreSQL connection parameters.
 type ServerConfig struct {
-	Host               string `json:"host"`
-	Port               int    `json:"port"`
-	Username           string `json:"username"`
-	Password           string `json:"password"`
-	Database           string `json:"database"`
-	SSL                bool   `json:"ssl"`
-	AWSRegion          string `json:"aws_region"`
-	RDSInstanceID      string `json:"rds_instance_id"`
-	EnhancedMonitoring bool   `json:"enhanced_monitoring"`
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+	Database string `json:"database"`
+	SSL      bool   `json:"ssl"`
 	// SSH config for OS metrics collection on EC2/VPS database hosts.
 	SSHEnabled    bool   `json:"ssh_enabled"`
 	SSHHost       string `json:"ssh_host"` // empty = use Host

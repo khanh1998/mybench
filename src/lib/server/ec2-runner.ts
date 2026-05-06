@@ -112,7 +112,6 @@ export interface Ec2TestResult {
 	binary?: { ok: boolean; version?: string; path?: string; error?: string };
 	pgbench?: { ok: boolean; version?: string; error?: string };
 	sysbench?: { ok: boolean; version?: string; error?: string };
-	iam?: { ok: boolean; role?: string; error?: string };
 }
 
 /**
@@ -162,23 +161,8 @@ export async function testEc2Connection(server: Ec2Server): Promise<Ec2TestResul
 			? { ok: false, error: 'not found on PATH' }
 			: { ok: true, version: sysbenchOut };
 
-		// Check IAM instance profile (required for CloudWatch metrics)
-		const iamCmd = `TOKEN=$(curl -s -X PUT 'http://169.254.169.254/latest/api/token' -H 'X-aws-ec2-metadata-token-ttl-seconds: 21600' 2>/dev/null) && curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/iam/security-credentials/ 2>/dev/null`;
-		const iamResult = await exec(conn, iamCmd);
-		const role = iamResult.stdout.trim();
-		const iamOk = iamResult.code === 0 && role.length > 0 && !role.startsWith('<?xml') && !role.startsWith('<');
-		const iam: Ec2TestResult['iam'] = iamOk
-			? { ok: true, role }
-			: {
-					ok: false,
-					error:
-						'No IAM instance profile found on this EC2 instance. CloudWatch metrics will not be collected. ' +
-						'To fix: go to AWS Console → EC2 → select instance → Actions → Security → Modify IAM role, ' +
-						'then attach a role with the CloudWatchReadOnlyAccess policy.'
-				};
-
 		const overallOk = binaryOk && pgbench.ok && sysbench.ok;
-		return { ok: overallOk, ssh: { ok: true }, binary, pgbench, sysbench, iam };
+		return { ok: overallOk, ssh: { ok: true }, binary, pgbench, sysbench };
 	} catch (err) {
 		return {
 			ok: false,

@@ -86,7 +86,7 @@
   let expandedStep = $state<number | null>(null);
   let scrollPending = false;
   let phases: PhaseState[] = $state([]);
-  let activeTab = $state<'overview' | 'load' | 'telemetry' | 'cloudwatch' | 'host_metrics' | 'perf'>('overview');
+  let activeTab = $state<'overview' | 'load' | 'telemetry' | 'host_metrics' | 'perf'>('overview');
   let hostSubTab = $state<'system' | 'processes'>('system');
   let nameInput = $state<HTMLInputElement | null>(null);
   let ec2StatusLoading = $state(false);
@@ -574,10 +574,6 @@
     disabled={!done}
     title={!done ? 'Available after run completes' : ''}
     onclick={() => activeTab = 'telemetry'}>Database Telemetry</button>
-  <button class="tab-btn" class:active={activeTab === 'cloudwatch'}
-    disabled={!done}
-    title={!done ? 'Available after run completes' : ''}
-    onclick={() => activeTab = 'cloudwatch'}>CloudWatch</button>
   <button class="tab-btn" class:active={activeTab === 'perf'}
     disabled={!done}
     title={!done ? 'Available after run completes' : ''}
@@ -825,15 +821,7 @@
   <DatabaseTelemetry
     {runId}
     active={activeTab === 'telemetry' && done}
-    excludeSectionKeys={['cloudwatch', 'host_system', 'host_processes']}
-  />
-{:else if activeTab === 'cloudwatch'}
-  <DatabaseTelemetry
-    {runId}
-    active={activeTab === 'cloudwatch' && done}
-    title="CloudWatch Metrics"
-    includeSectionKeys={['cloudwatch']}
-    showHeroCards={false}
+    excludeSectionKeys={['host_system', 'host_processes']}
   />
 {:else if activeTab === 'perf'}
   {#if perfSteps.length > 0}

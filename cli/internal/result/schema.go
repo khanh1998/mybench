@@ -8,22 +8,8 @@ type Result struct {
 	Run               RunSummary               `json:"run"`
 	Steps             []StepResult             `json:"steps"`
 	Snapshots         map[string][]SnapshotRow `json:"snapshots"`
-	CloudWatchMetrics *CloudWatchResult        `json:"cloudwatch_metrics,omitempty"`
-	HostSnapshots     map[string][]SnapshotRow `json:"host_snapshots,omitempty"`
+	HostSnapshots map[string][]SnapshotRow `json:"host_snapshots,omitempty"`
 	HostConfig        map[string]any           `json:"host_config,omitempty"`
-}
-
-// CloudWatchResult holds all CloudWatch data points collected for a run.
-type CloudWatchResult struct {
-	DataPoints []CloudWatchDataPoint `json:"data_points"`
-}
-
-// CloudWatchDataPoint is a single metric observation from CloudWatch.
-type CloudWatchDataPoint struct {
-	MetricName string  `json:"metric_name"`
-	Timestamp  string  `json:"timestamp"` // RFC3339
-	Value      float64 `json:"value"`
-	Unit       string  `json:"unit"`
 }
 
 // StepResult records execution metadata for a single step.

@@ -246,19 +246,7 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 		}
 	}
 
-	// Collect CloudWatch metrics covering the full run window (pre + bench + post).
-	runEndTime := time.Now().UTC()
-	{
-		runStartTime = runStartTime.Truncate(time.Minute)              // round down to include full minute of start time
-		runEndTime = runEndTime.Truncate(time.Minute).Add(time.Minute) // round up to include last minute
-		cwResult, cwErr := collectCloudWatchMetrics(ctx, opts.Plan.Server, runStartTime, runEndTime)
-		if cwErr != nil {
-			fmt.Fprintf(os.Stderr, "warning: cloudwatch metrics: %v\n", cwErr)
-		} else {
-			res.CloudWatchMetrics = cwResult
-		}
-	}
-	_ = benchEndTime // no longer used for CW window; kept for future use
+	_ = benchEndTime
 
 	res.Run.Status = "completed"
 	res.Run.FinishedAt = time.Now().UTC().Format(time.RFC3339)

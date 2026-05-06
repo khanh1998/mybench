@@ -3,7 +3,6 @@
 
   interface Server {
     id: number; name: string; host: string; port: number; username: string; password: string; ssl: number;
-    rds_instance_id: string; aws_region: string; enhanced_monitoring: number;
     ssh_enabled: number; ssh_host: string | null; ssh_port: number; ssh_user: string | null; ssh_private_key: string | null;
     private_host: string; vpc: string;
   }
@@ -41,7 +40,6 @@
     binary?: { ok: boolean; version?: string; path?: string; error?: string };
     pgbench?: { ok: boolean; version?: string; error?: string };
     sysbench?: { ok: boolean; version?: string; error?: string };
-    iam?: { ok: boolean; role?: string; error?: string };
   }
   let ec2TestResult = $state<Ec2TestResult | null>(null);
   let ec2Testing = $state(false);
@@ -180,7 +178,7 @@
   }
 
   function startNew() {
-    editing = { name: '', host: 'localhost', port: 5432, username: 'postgres', password: '', ssl: 0, rds_instance_id: '', aws_region: '', enhanced_monitoring: 0, ssh_enabled: 0, ssh_host: null, ssh_port: 22, ssh_user: null, ssh_private_key: null, private_host: '', vpc: '' };
+    editing = { name: '', host: 'localhost', port: 5432, username: 'postgres', password: '', ssl: 0, ssh_enabled: 0, ssh_host: null, ssh_port: 22, ssh_user: null, ssh_private_key: null, private_host: '', vpc: '' };
     isNew = true;
     testMsg = '';
     testOk = null;
@@ -277,7 +275,6 @@
   }
 
   function serverTypeBadge(s: Server): string {
-    if (s.rds_instance_id) return 'RDS';
     if (s.ssh_enabled) return 'SSH';
     return 'Local';
   }
@@ -355,30 +352,6 @@
         <input id="conn-vpc" list="vpc-list" bind:value={editing.vpc} placeholder="default-sgp1" />
       </div>
     </div>
-
-    {#if editing.host?.includes('.rds.amazonaws.com')}
-    <div class="row" style="margin-top:4px">
-      <div class="form-group" style="flex:1">
-        <label for="conn-rds-id">RDS Instance ID <span style="font-weight:normal;color:#888">(auto-detected)</span></label>
-        <input id="conn-rds-id" bind:value={editing.rds_instance_id} placeholder="my-db-instance" />
-      </div>
-      <div class="form-group" style="flex:1">
-        <label for="conn-aws-region">AWS Region <span style="font-weight:normal;color:#888">(auto-detected)</span></label>
-        <input id="conn-aws-region" bind:value={editing.aws_region} placeholder="ap-southeast-2" />
-      </div>
-      <div class="form-group" style="flex:0; justify-content:flex-end; padding-top:20px">
-        <label style="display:flex; align-items:center; gap:6px; font-weight:normal; cursor:pointer; white-space:nowrap">
-          <input
-            type="checkbox"
-            style="width:auto"
-            checked={!!editing.enhanced_monitoring}
-            onchange={(e) => { if (editing) editing.enhanced_monitoring = (e.currentTarget as HTMLInputElement).checked ? 1 : 0; }}
-          />
-          Enhanced Monitoring
-        </label>
-      </div>
-    </div>
-    {/if}
 
     <!-- OS Metrics via SSH -->
     <div class="ssh-section">
@@ -613,16 +586,6 @@
               <button class="install-btn" disabled={ec2Installing !== null} onclick={() => installTool('sysbench')}>
                 {ec2Installing === 'sysbench' ? 'Installing…' : 'Install'}
               </button>
-            {/if}
-          </div>
-        {/if}
-        {#if ec2TestResult.iam}
-          <div class="ec2-check" class:ok={ec2TestResult.iam.ok} class:warn={!ec2TestResult.iam.ok}>
-            {ec2TestResult.iam.ok ? '✓' : '⚠'} IAM instance profile
-            {#if ec2TestResult.iam.ok}
-              <span class="check-detail">role: {ec2TestResult.iam.role}</span>
-            {:else}
-              <span class="check-detail">{ec2TestResult.iam.error}</span>
             {/if}
           </div>
         {/if}

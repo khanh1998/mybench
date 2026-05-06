@@ -47,7 +47,7 @@
     server_id: number|null; database: string; steps: Step[]; params: Param[];
     snapshot_interval_seconds: number;
   }
-  interface Server { id: number; name: string; rds_instance_id?: string; ssh_enabled?: number; private_host?: string; vpc?: string; }
+  interface Server { id: number; name: string; ssh_enabled?: number; private_host?: string; vpc?: string; }
   interface Ec2Server { id: number; name: string; host: string; user: string; port: number; vpc?: string; }
   interface Run { id: number; status: string; tps: number|null; latency_avg_ms: number|null; started_at: string; profile_name: string; name: string; }
   interface Profile { id: number; design_id: number; name: string; values: { param_name: string; value: string }[]; }
@@ -686,7 +686,7 @@
         <select id="run-server" bind:value={runServer}>
           <option value={null}>— select server —</option>
           {#each servers as s}
-            <option value={s.id}>{s.name} {s.rds_instance_id ? '(RDS)' : s.ssh_enabled ? '(SSH)' : '(Local)'}</option>
+            <option value={s.id}>{s.name} {s.ssh_enabled ? '(SSH)' : '(Local)'}</option>
           {/each}
         </select>
         {#if runServer}

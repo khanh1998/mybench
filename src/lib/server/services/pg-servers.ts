@@ -5,13 +5,6 @@ import { connectSsh, exec } from '$lib/server/ec2-runner';
 import { DEFAULT_PERF_EVENTS } from '$lib/server/perf-inspect';
 import type { PgServer } from '$lib/types';
 
-// Parses RDS endpoint: <instance-id>.<hash>.<region>.rds.amazonaws.com
-function parseRdsHostname(host: string): { rdsInstanceId: string; awsRegion: string } {
-	const match = host.match(/^([^.]+)\.[^.]+\.([\w-]+)\.rds\.amazonaws\.com$/i);
-	if (match) return { rdsInstanceId: match[1], awsRegion: match[2] };
-	return { rdsInstanceId: '', awsRegion: '' };
-}
-
 export interface SavePgServerInput {
 	server_id?: number;
 	name?: string;
@@ -20,9 +13,6 @@ export interface SavePgServerInput {
 	username?: string;
 	password?: string;
 	ssl?: boolean | number;
-	rds_instance_id?: string;
-	aws_region?: string;
-	enhanced_monitoring?: boolean | number;
 	ssh_enabled?: boolean | number;
 	ssh_host?: string | null;
 	ssh_port?: number;
@@ -69,7 +59,6 @@ export function savePgServer(input: SavePgServerInput): { action: 'created' | 'u
 	if (input.server_id && !existing) throw new Error(`PostgreSQL connection ${input.server_id} not found`);
 
 	const newHost = input.host ?? existing?.host ?? 'localhost';
-	const parsed = parseRdsHostname(newHost);
 	const next = {
 		name: input.name ?? existing?.name ?? '',
 		host: newHost,
@@ -77,9 +66,6 @@ export function savePgServer(input: SavePgServerInput): { action: 'created' | 'u
 		username: input.username ?? existing?.username ?? 'postgres',
 		password: input.password ?? existing?.password ?? '',
 		ssl: input.ssl !== undefined ? (input.ssl ? 1 : 0) : (existing?.ssl ?? 0),
-		rds_instance_id: input.rds_instance_id ?? (input.host ? parsed.rdsInstanceId : (existing?.rds_instance_id ?? '')),
-		aws_region: input.aws_region ?? (input.host ? parsed.awsRegion : (existing?.aws_region ?? '')),
-		enhanced_monitoring: input.enhanced_monitoring !== undefined ? (input.enhanced_monitoring ? 1 : 0) : (existing?.enhanced_monitoring ?? 0),
 		ssh_enabled: input.ssh_enabled !== undefined ? (input.ssh_enabled ? 1 : 0) : (existing?.ssh_enabled ?? 0),
 		ssh_host: input.ssh_host !== undefined ? (input.ssh_host || null) : (existing?.ssh_host ?? null),
 		ssh_port: input.ssh_port ?? existing?.ssh_port ?? 22,
@@ -97,14 +83,14 @@ export function savePgServer(input: SavePgServerInput): { action: 'created' | 'u
 
 	if (existing) {
 		db.prepare(
-			'UPDATE pg_servers SET name=?, host=?, port=?, username=?, password=?, ssl=?, rds_instance_id=?, aws_region=?, enhanced_monitoring=?, ssh_enabled=?, ssh_host=?, ssh_port=?, ssh_user=?, ssh_private_key=?, private_host=?, vpc=?, perf_enabled=?, perf_scope=?, perf_cgroup=?, perf_events=?, perf_status_json=? WHERE id=?'
-		).run(next.name, next.host, next.port, next.username, next.password, next.ssl, next.rds_instance_id, next.aws_region, next.enhanced_monitoring, next.ssh_enabled, next.ssh_host, next.ssh_port, next.ssh_user, next.ssh_private_key, next.private_host, next.vpc, next.perf_enabled, next.perf_scope, next.perf_cgroup, next.perf_events, next.perf_status_json, input.server_id);
+			'UPDATE pg_servers SET name=?, host=?, port=?, username=?, password=?, ssl=?, ssh_enabled=?, ssh_host=?, ssh_port=?, ssh_user=?, ssh_private_key=?, private_host=?, vpc=?, perf_enabled=?, perf_scope=?, perf_cgroup=?, perf_events=?, perf_status_json=? WHERE id=?'
+		).run(next.name, next.host, next.port, next.username, next.password, next.ssl, next.ssh_enabled, next.ssh_host, next.ssh_port, next.ssh_user, next.ssh_private_key, next.private_host, next.vpc, next.perf_enabled, next.perf_scope, next.perf_cgroup, next.perf_events, next.perf_status_json, input.server_id);
 		return { action: 'updated', server: getPgServer(input.server_id!)! };
 	}
 
 	const result = db.prepare(
-		'INSERT INTO pg_servers (name, host, port, username, password, ssl, rds_instance_id, aws_region, enhanced_monitoring, ssh_enabled, ssh_host, ssh_port, ssh_user, ssh_private_key, private_host, vpc, perf_enabled, perf_scope, perf_cgroup, perf_events, perf_status_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-	).run(next.name, next.host, next.port, next.username, next.password, next.ssl, next.rds_instance_id, next.aws_region, next.enhanced_monitoring, next.ssh_enabled, next.ssh_host, next.ssh_port, next.ssh_user, next.ssh_private_key, next.private_host, next.vpc, next.perf_enabled, next.perf_scope, next.perf_cgroup, next.perf_events, next.perf_status_json);
+		'INSERT INTO pg_servers (name, host, port, username, password, ssl, ssh_enabled, ssh_host, ssh_port, ssh_user, ssh_private_key, private_host, vpc, perf_enabled, perf_scope, perf_cgroup, perf_events, perf_status_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+	).run(next.name, next.host, next.port, next.username, next.password, next.ssl, next.ssh_enabled, next.ssh_host, next.ssh_port, next.ssh_user, next.ssh_private_key, next.private_host, next.vpc, next.perf_enabled, next.perf_scope, next.perf_cgroup, next.perf_events, next.perf_status_json);
 	return { action: 'created', server: getPgServer(result.lastInsertRowid as number)! };
 }
 
@@ -149,9 +135,6 @@ export async function testPgServer(input: TestPgServerInput): Promise<{
 			username: input.username ?? 'postgres',
 			password: input.password ?? '',
 			ssl: input.ssl ? 1 : 0,
-			rds_instance_id: '',
-			aws_region: '',
-			enhanced_monitoring: 0,
 			ssh_enabled: 0,
 			ssh_host: null,
 			ssh_port: 22,
