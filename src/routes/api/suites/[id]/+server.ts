@@ -1,6 +1,7 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from '@sveltejs/kit';
 import getDb from '$lib/server/db';
+import { stopRun } from '$lib/server/run-manager';
 
 export const GET: RequestHandler = ({ params }) => {
 	const db = getDb();
@@ -33,4 +34,18 @@ export const GET: RequestHandler = ({ params }) => {
 		: [];
 
 	return json({ suite, seriesList, runs });
+};
+
+export const DELETE: RequestHandler = async ({ params }) => {
+	const suiteId = Number(params.id);
+	const db = getDb();
+	const seriesIds = (db.prepare(`SELECT id FROM benchmark_series WHERE suite_id = ?`).all(suiteId) as { id: number }[]).map(s => s.id);
+	if (seriesIds.length > 0) {
+		const runningRuns = db.prepare(`SELECT id FROM benchmark_runs WHERE series_id IN (${seriesIds.join(',')}) AND status = 'running'`).all() as { id: number }[];
+		for (const run of runningRuns) await stopRun(run.id);
+		db.prepare(`DELETE FROM benchmark_runs WHERE series_id IN (${seriesIds.join(',')})`).run();
+		db.prepare(`DELETE FROM benchmark_series WHERE suite_id = ?`).run(suiteId);
+	}
+	db.prepare(`DELETE FROM decision_suites WHERE id = ?`).run(suiteId);
+	return json({ ok: true });
 };

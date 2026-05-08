@@ -4,16 +4,18 @@ import type { PageServerLoad } from './$types';
 export const load: PageServerLoad = () => {
 	const db = getDb();
 
-	// Suites with decision info and aggregated child series stats
+	// Suites with decision info, aggregated child series stats, and design names
 	const suiteList = db.prepare(`
 		SELECT
 			ds.id, ds.name, ds.status, ds.created_at, ds.finished_at,
 			ds.decision_id, dec.name AS decision_name,
 			COUNT(DISTINCT bs.id) AS series_count,
-			COUNT(br.id) AS run_count
+			COUNT(br.id) AS run_count,
+			GROUP_CONCAT(DISTINCT d.name) AS design_names
 		FROM decision_suites ds
 		JOIN decisions dec ON ds.decision_id = dec.id
 		LEFT JOIN benchmark_series bs ON bs.suite_id = ds.id
+		LEFT JOIN designs d ON bs.design_id = d.id
 		LEFT JOIN benchmark_runs br ON br.series_id = bs.id
 		GROUP BY ds.id
 		ORDER BY ds.created_at DESC
@@ -21,6 +23,7 @@ export const load: PageServerLoad = () => {
 	`).all() as {
 		id: number; name: string; status: string; created_at: string; finished_at: string | null;
 		decision_id: number; decision_name: string; series_count: number; run_count: number;
+		design_names: string | null;
 	}[];
 
 	// Series that are NOT part of a suite
