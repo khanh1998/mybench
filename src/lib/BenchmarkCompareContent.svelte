@@ -62,7 +62,7 @@
     { key: 'transactions' as const, label: 'Transactions', decimals: 0, higherBetter: true }
   ];
 
-  let activeCompareTab = $state<'summary' | 'load' | 'telemetry' | 'cloudwatch' | 'perf' | 'host_metrics'>('summary');
+  let activeCompareTab = $state<'summary' | 'load' | 'telemetry' | 'perf' | 'host_metrics'>('summary');
   let hostMetricsTab = $state<'system' | 'processes'>('system');
   let selectedPerfMetric = $state('');
   let selectedSummaryMetricKey = $state('');
@@ -547,13 +547,6 @@
     </button>
     <button
       class="tab-btn"
-      class:active={activeCompareTab === 'cloudwatch'}
-      onclick={() => activeCompareTab = 'cloudwatch'}
-    >
-      CloudWatch
-    </button>
-    <button
-      class="tab-btn"
       class:active={activeCompareTab === 'perf'}
       onclick={() => activeCompareTab = 'perf'}
     >
@@ -751,14 +744,6 @@
       runs={selectedRuns}
       active={activeCompareTab === 'telemetry'}
       excludeSectionKeys={['cloudwatch', 'host_system', 'host_processes']}
-    />
-  {:else if activeCompareTab === 'cloudwatch'}
-    <DatabaseTelemetryCompare
-      runs={selectedRuns}
-      active={activeCompareTab === 'cloudwatch'}
-      title="CloudWatch"
-      subtitle="Compare AWS CloudWatch telemetry across the selected runs."
-      includeSectionKeys={['cloudwatch']}
     />
   {:else if activeCompareTab === 'perf'}
     {#if hasPerfData}

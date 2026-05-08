@@ -16,6 +16,11 @@
     runs: CompareRunInfo[];
   }
 
+  interface Slot {
+    designId: number | null;
+    runId: number | null;
+  }
+
   let { data }: { data: PageData } = $props();
 
   const decisionId = $derived(Number($page.params.id));
@@ -39,117 +44,114 @@
         .filter((design) => design.runs.length > 0)
   );
 
-  let selectedDesignA = $state<number | null>(null);
-  let selectedDesignB = $state<number | null>(null);
-  let selectedRunA = $state<number | null>(null);
-  let selectedRunB = $state<number | null>(null);
+  let slots = $state<Slot[]>([
+    { designId: null, runId: null },
+    { designId: null, runId: null }
+  ]);
 
   function getDesignGroup(designId: number | null): DesignGroup | undefined {
     if (designId === null) return undefined;
-    return designGroups.find((design) => design.id === designId);
-  }
-
-  function getRunForId(runId: number | null): CompareRunInfo | undefined {
-    if (runId === null) return undefined;
-    return allRuns.find((run) => run.id === runId);
+    return designGroups.find((d) => d.id === designId);
   }
 
   function syncUrl() {
     const url = new URL($page.url);
-
-    const values: Record<string, number | null> = {
-      designA: selectedDesignA,
-      runA: selectedRunA,
-      designB: selectedDesignB,
-      runB: selectedRunB
-    };
-
-    for (const [key, value] of Object.entries(values)) {
-      if (value) {
-        url.searchParams.set(key, String(value));
-      } else {
-        url.searchParams.delete(key);
-      }
+    const runIds = slots.map((s) => s.runId ?? 0).join(',');
+    const hasAny = slots.some((s) => s.runId !== null);
+    if (hasAny) {
+      url.searchParams.set('runs', runIds);
+    } else {
+      url.searchParams.delete('runs');
     }
-
     goto(url.toString(), { replaceState: true, noScroll: true, keepFocus: true });
   }
 
   function assignDefaultSelections() {
-    const [first, second] = designGroups;
-    selectedDesignA = first?.id ?? null;
-    selectedRunA = first?.runs[0]?.id ?? null;
-    selectedDesignB = second?.id ?? null;
-    selectedRunB = second?.runs[0]?.id ?? null;
+    if (designGroups.length >= 2) {
+      const [first, second] = designGroups;
+      slots = [
+        { designId: first.id, runId: first.runs[0]?.id ?? null },
+        { designId: second.id, runId: second.runs[0]?.id ?? null }
+      ];
+    } else if (designGroups.length === 1 && designGroups[0].runs.length >= 2) {
+      const group = designGroups[0];
+      slots = [
+        { designId: group.id, runId: group.runs[0].id },
+        { designId: group.id, runId: group.runs[1].id }
+      ];
+    } else {
+      const group = designGroups[0];
+      slots = [
+        { designId: group?.id ?? null, runId: group?.runs[0]?.id ?? null },
+        { designId: null, runId: null }
+      ];
+    }
   }
 
   function initFromUrl() {
     const params = $page.url.searchParams;
-    const designA = Number(params.get('designA'));
-    const designB = Number(params.get('designB'));
-    const runA = Number(params.get('runA'));
-    const runB = Number(params.get('runB'));
+    const runsParam = params.get('runs');
 
-    if (!params.toString()) {
+    if (!runsParam) {
       assignDefaultSelections();
       return;
     }
 
-    const groupA = designGroups.find((design) => design.id === designA);
-    const groupB = designGroups.find((design) => design.id === designB && design.id !== designA);
+    const runIds = runsParam.split(',').map(Number);
+    const newSlots: Slot[] = runIds.map((runId) => {
+      if (!runId) return { designId: null, runId: null };
+      const run = allRuns.find((r) => r.id === runId);
+      return { designId: run?.design_id ?? null, runId: run ? runId : null };
+    });
 
-    selectedDesignA = groupA?.id ?? null;
-    selectedRunA = groupA?.runs.find((run) => run.id === runA)?.id ?? groupA?.runs[0]?.id ?? null;
-
-    selectedDesignB = groupB?.id ?? null;
-    selectedRunB = groupB?.runs.find((run) => run.id === runB)?.id ?? groupB?.runs[0]?.id ?? null;
-
-    if (!selectedDesignA && !selectedDesignB) {
-      assignDefaultSelections();
+    while (newSlots.length < 2) {
+      newSlots.push({ designId: null, runId: null });
     }
+
+    slots = newSlots;
   }
 
-  function handleDesignChange(slot: 'A' | 'B', nextDesignId: number | null) {
-    const designId = nextDesignId && Number.isFinite(nextDesignId) ? nextDesignId : null;
+  function handleDesignChange(index: number, designId: number | null) {
     const group = getDesignGroup(designId);
-    const nextRunId = group?.runs[0]?.id ?? null;
-
-    if (slot === 'A') {
-      selectedDesignA = designId;
-      selectedRunA = nextRunId;
-    } else {
-      selectedDesignB = designId;
-      selectedRunB = nextRunId;
-    }
-
+    slots[index] = { designId, runId: group?.runs[0]?.id ?? null };
     syncUrl();
   }
 
-  function handleRunChange(slot: 'A' | 'B', nextRunId: number | null) {
-    const runId = nextRunId && Number.isFinite(nextRunId) ? nextRunId : null;
-    if (slot === 'A') {
-      selectedRunA = runId;
-    } else {
-      selectedRunB = runId;
-    }
+  function handleRunChange(index: number, runId: number | null) {
+    slots[index] = { ...slots[index], runId };
+    syncUrl();
+  }
+
+  function addSlot() {
+    slots = [...slots, { designId: null, runId: null }];
+    syncUrl();
+  }
+
+  function removeSlot(index: number) {
+    slots = slots.filter((_, i) => i !== index);
     syncUrl();
   }
 
   function clearSelection() {
-    selectedDesignA = null;
-    selectedRunA = null;
-    selectedDesignB = null;
-    selectedRunB = null;
+    slots = [
+      { designId: null, runId: null },
+      { designId: null, runId: null }
+    ];
     syncUrl();
   }
 
   const selectedRunIds = $derived(
-    [selectedRunA, selectedRunB]
-      .filter((runId): runId is number => runId !== null)
-      .filter((runId, index, values) => values.indexOf(runId) === index)
+    slots
+      .map((s) => s.runId)
+      .filter((id): id is number => id !== null)
+      .filter((id, index, arr) => arr.indexOf(id) === index)
   );
 
-  const canCompare = $derived(designGroups.length >= 2);
+  const canCompare = $derived(allRuns.length >= 2);
+
+  onMount(() => {
+    initFromUrl();
+  });
 </script>
 
 <div class="row page-header">
@@ -160,8 +162,8 @@
 <div class="card">
   <div class="row section-header">
     <h3 style="margin:0">Select Runs to Compare</h3>
-    <span class="section-note">Choose one run from each design</span>
-    {#if selectedRunA || selectedRunB}
+    <span class="section-note">Select runs to compare — the same design can appear in multiple slots with different runs</span>
+    {#if slots.some((s) => s.runId)}
       <button onclick={clearSelection} class="clear-btn">Clear</button>
     {/if}
   </div>
@@ -170,67 +172,51 @@
     <p class="empty-copy">No completed runs for this decision yet.</p>
   {:else}
     <div class="selector-grid">
-      <section class="selector-card">
-        <div class="selector-title">Design A</div>
-        <div class="selector-field">
-          <label for="design-a">Design</label>
-          <select
-            id="design-a"
-            value={selectedDesignA ?? ''}
-            onchange={(e) => handleDesignChange('A', Number((e.currentTarget as HTMLSelectElement).value) || null)}
-          >
-            <option value="">Select design</option>
-            {#each designGroups as design}
-              <option value={design.id} disabled={selectedDesignB === design.id}>{design.name}</option>
-            {/each}
-          </select>
-        </div>
-        <div class="selector-field">
-          <label for="run-a">Run</label>
-          <select
-            id="run-a"
-            disabled={!selectedDesignA}
-            value={selectedRunA ?? ''}
-            onchange={(e) => handleRunChange('A', Number((e.currentTarget as HTMLSelectElement).value) || null)}
-          >
-            <option value="">Select run</option>
-            {#each getDesignGroup(selectedDesignA)?.runs ?? [] as run}
-              <option value={run.id}>{run.name || `Run #${run.id}`} · {fmtTs(run.started_at)}</option>
-            {/each}
-          </select>
-        </div>
-      </section>
-
-      <section class="selector-card">
-        <div class="selector-title">Design B</div>
-        <div class="selector-field">
-          <label for="design-b">Design</label>
-          <select
-            id="design-b"
-            value={selectedDesignB ?? ''}
-            onchange={(e) => handleDesignChange('B', Number((e.currentTarget as HTMLSelectElement).value) || null)}
-          >
-            <option value="">Select design</option>
-            {#each designGroups as design}
-              <option value={design.id} disabled={selectedDesignA === design.id}>{design.name}</option>
-            {/each}
-          </select>
-        </div>
-        <div class="selector-field">
-          <label for="run-b">Run</label>
-          <select
-            id="run-b"
-            disabled={!selectedDesignB}
-            value={selectedRunB ?? ''}
-            onchange={(e) => handleRunChange('B', Number((e.currentTarget as HTMLSelectElement).value) || null)}
-          >
-            <option value="">Select run</option>
-            {#each getDesignGroup(selectedDesignB)?.runs ?? [] as run}
-              <option value={run.id}>{run.name || `Run #${run.id}`} · {fmtTs(run.started_at)}</option>
-            {/each}
-          </select>
-        </div>
-      </section>
+      {#each slots as slot, index}
+        <section class="selector-card">
+          <div class="selector-card-header">
+            <div class="selector-title">Run {index + 1}</div>
+            {#if slots.length > 2}
+              <button class="remove-slot-btn" onclick={() => removeSlot(index)}>Remove</button>
+            {/if}
+          </div>
+          <div class="selector-field">
+            <label for="design-{index}">Design</label>
+            <select
+              id="design-{index}"
+              value={slot.designId ?? ''}
+              onchange={(e) => handleDesignChange(index, Number((e.currentTarget as HTMLSelectElement).value) || null)}
+            >
+              <option value="">Select design</option>
+              {#each designGroups as design}
+                <option value={design.id}>{design.name}</option>
+              {/each}
+            </select>
+          </div>
+          <div class="selector-field">
+            <label for="run-{index}">Run</label>
+            <select
+              id="run-{index}"
+              disabled={!slot.designId}
+              value={slot.runId ?? ''}
+              onchange={(e) => handleRunChange(index, Number((e.currentTarget as HTMLSelectElement).value) || null)}
+            >
+              <option value="">Select run</option>
+              {#each getDesignGroup(slot.designId)?.runs ?? [] as run}
+                <option
+                  value={run.id}
+                  disabled={selectedRunIds.includes(run.id) && slot.runId !== run.id}
+                >
+                  {run.name || `Run #${run.id}`} · {fmtTs(run.started_at)}
+                </option>
+              {/each}
+            </select>
+          </div>
+        </section>
+      {/each}
+    </div>
+    <div class="add-slot-row">
+      <button class="add-slot-btn" onclick={addSlot}>+ Add run</button>
     </div>
   {/if}
 </div>
@@ -239,8 +225,8 @@
   allRuns={allRuns}
   {selectedRunIds}
   {canCompare}
-  insufficientMessage="This decision needs at least 2 designs with completed runs to compare."
-  selectionPrompt="Choose one run for each design above to begin comparing."
+  insufficientMessage="This decision needs at least 2 completed runs to compare."
+  selectionPrompt="Select at least 2 runs above to begin comparing."
 />
 
 <style>
@@ -278,8 +264,9 @@
 
   .selector-grid {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
     gap: 12px;
+    margin-bottom: 12px;
   }
 
   .selector-card {
@@ -292,10 +279,32 @@
     gap: 10px;
   }
 
+  .selector-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
   .selector-title {
     font-size: 13px;
     font-weight: 700;
     color: #213247;
+  }
+
+  .remove-slot-btn {
+    font-size: 11px;
+    font-weight: 600;
+    color: #cc3333;
+    background: none;
+    border: 1px solid #f0c0c0;
+    border-radius: 4px;
+    padding: 2px 8px;
+    cursor: pointer;
+  }
+
+  .remove-slot-btn:hover {
+    background: #fff0f0;
+    border-color: #e09090;
   }
 
   .selector-field {
@@ -308,6 +317,30 @@
     font-size: 12px;
     font-weight: 600;
     color: #516072;
+  }
+
+  .selector-field select {
+    width: 100%;
+  }
+
+  .add-slot-row {
+    margin-top: 4px;
+  }
+
+  .add-slot-btn {
+    font-size: 12px;
+    font-weight: 600;
+    color: #0066cc;
+    background: #f0f6ff;
+    border: 1px solid #c0d8f5;
+    border-radius: 6px;
+    padding: 6px 14px;
+    cursor: pointer;
+  }
+
+  .add-slot-btn:hover {
+    background: #dceeff;
+    border-color: #99c0ee;
   }
 
   .empty-copy {
