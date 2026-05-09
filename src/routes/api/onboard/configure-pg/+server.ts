@@ -98,6 +98,7 @@ sudo ufw status
 echo ""
 echo "==> Creating database user '${dbUser}' with superuser privileges (if not exists)..."
 sudo -u postgres psql -c "DO \\$\\$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${dbUser}') THEN CREATE USER ${dbUser} WITH PASSWORD '${escapedPass}'; END IF; END \\$\\$;"
+sudo -u postgres psql -c "ALTER USER ${dbUser} WITH PASSWORD '${escapedPass}';"
 sudo -u postgres psql -c "ALTER USER ${dbUser} WITH SUPERUSER;"
 
 echo ""
