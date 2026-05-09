@@ -496,7 +496,7 @@
   <span class="spacer"></span>
   {#if run?.ec2_server_id && (run.status === 'running' || run.status === 'failed')}
     <button onclick={checkEc2Status} disabled={ec2StatusLoading}>
-      {ec2StatusLoading ? 'Checking...' : 'EC2 Status'}
+      {ec2StatusLoading ? 'Checking...' : 'VPS Status'}
     </button>
   {/if}
   {#if !done && run?.status === 'running'}
@@ -510,7 +510,7 @@
 {#if ec2Status || ec2StatusError}
 <div class="ec2-status-card">
   <div class="ec2-status-header">
-    <strong>EC2 Status</strong>
+    <strong>VPS Status</strong>
     <button class="ec2-status-close" onclick={() => { ec2Status = null; ec2StatusError = null; ec2LogFile = null; ec2LogContent = null; }}>✕</button>
   </div>
   {#if ec2StatusError}

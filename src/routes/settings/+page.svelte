@@ -146,7 +146,7 @@
   }
 
   async function delEc2(id: number) {
-    if (!confirm('Delete this EC2 server?')) return;
+    if (!confirm('Delete this VPS server?')) return;
     await fetch(`/api/ec2/${id}`, { method: 'DELETE' });
     await loadEc2();
   }
@@ -478,12 +478,12 @@
 <div class="row" style="margin-bottom:12px">
   <h2>Benchmark Runners</h2>
   <span class="spacer"></span>
-  <button class="primary" onclick={startNewEc2}>+ Add EC2 Server</button>
+  <button class="primary" onclick={startNewEc2}>+ Add VPS Server</button>
 </div>
 
 {#if ec2Editing}
   <div class="card">
-    <h3>{ec2IsNew ? 'New EC2 Server' : 'Edit EC2 Server'}</h3>
+    <h3>{ec2IsNew ? 'New VPS Server' : 'Edit VPS Server'}</h3>
     <div class="row">
       <div class="form-group" style="flex:2">
         <label for="ec2-name">Name</label>
@@ -598,7 +598,7 @@
 {/if}
 
 {#if ec2Servers.length === 0 && !ec2Editing}
-  <p style="color:#666">No EC2 servers yet.</p>
+  <p style="color:#666">No VPS servers yet.</p>
 {/if}
 
 {#each ec2Servers as s}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -17,6 +18,16 @@ import (
 	"github.com/khanh1998/mybench/cli/internal/result"
 	"github.com/khanh1998/mybench/cli/internal/runner"
 )
+
+// emitSeriesEvent writes a __MB__-prefixed JSON event line to stdout when jsonEvents is true.
+func emitSeriesEvent(jsonEvents bool, v any) {
+	if !jsonEvents {
+		return
+	}
+	b, _ := json.Marshal(v)
+	fmt.Printf("__MB__%s\n", b)
+	os.Stdout.Sync()
+}
 
 // runSpec holds a parsed --run "plan.json,profileName,output.json" entry.
 type runSpec struct {
@@ -43,6 +54,7 @@ func newSeriesCmd() *cobra.Command {
 	var logDir string
 	var progress bool
 	var logTailLines int
+	var jsonEvents bool
 
 	cmd := &cobra.Command{
 		Use:   "series",
@@ -92,6 +104,7 @@ func newSeriesCmd() *cobra.Command {
 
 				if i > 0 && delaySecs > 0 {
 					fmt.Printf("[series] Sleeping %ds before run %d/%d...\n", delaySecs, i+1, len(specs))
+					emitSeriesEvent(jsonEvents, map[string]any{"event": "delay", "run_index": i, "seconds": delaySecs})
 					select {
 					case <-time.After(time.Duration(delaySecs) * time.Second):
 					case <-ctx.Done():
@@ -104,6 +117,7 @@ func newSeriesCmd() *cobra.Command {
 				}
 
 				fmt.Printf("\n[series] Run %d/%d — profile: %q\n", i+1, len(specs), spec.profileName)
+				emitSeriesEvent(jsonEvents, map[string]any{"event": "run_start", "run_index": i, "profile": spec.profileName})
 
 				// Load and configure plan.
 				p, err := plan.ReadPlan(spec.planPath)
@@ -146,6 +160,8 @@ func newSeriesCmd() *cobra.Command {
 					Progress:     progress,
 					Timestamp:    timestamp,
 					LogTailLines: logTailLines,
+					JSONEvents:   jsonEvents,
+					RunIndex:     i,
 				}
 
 				pool, err := pgconn.NewPool(ctx,
@@ -205,6 +221,7 @@ func newSeriesCmd() *cobra.Command {
 			signal.Stop(sigCh)
 			cancel()
 
+			emitSeriesEvent(jsonEvents, map[string]any{"event": "series_done"})
 			if anyFailed {
 				return fmt.Errorf("one or more runs in the series failed")
 			}
@@ -218,6 +235,7 @@ func newSeriesCmd() *cobra.Command {
 	cmd.Flags().StringVar(&logDir, "log-dir", "/tmp", "directory for step log files")
 	cmd.Flags().BoolVar(&progress, "progress", false, "tee subprocess output to terminal")
 	cmd.Flags().IntVar(&logTailLines, "log-tail-lines", 100, "trailing log lines per step in result (0 to disable)")
+	cmd.Flags().BoolVar(&jsonEvents, "json-events", false, "emit __MB__-prefixed JSON event lines to stdout for structured progress tracking")
 
 	return cmd
 }

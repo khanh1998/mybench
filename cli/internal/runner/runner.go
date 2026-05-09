@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -23,6 +24,20 @@ type RunOpts struct {
 	Progress     bool
 	Timestamp    string // formatted timestamp used in file names
 	LogTailLines int    // trailing log lines per step to embed in result (0 = skip)
+	JSONEvents   bool   // emit __MB__-prefixed JSON event lines to stdout
+	RunIndex     int    // 0 for standalone runs; index within a series
+}
+
+// emitEvent writes a __MB__-prefixed JSON line to stdout when JSONEvents is enabled.
+// The os.Stdout.Sync() call ensures the line is flushed immediately — stdout may be
+// line-buffered when piped through SSH.
+func (opts *RunOpts) emitEvent(v any) {
+	if !opts.JSONEvents {
+		return
+	}
+	b, _ := json.Marshal(v)
+	fmt.Printf("__MB__%s\n", b)
+	os.Stdout.Sync()
 }
 
 // Run executes all enabled steps in the plan in order and returns a Result.
@@ -64,8 +79,14 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 		return steps[i].Position < steps[j].Position
 	})
 
+	// Emit run_done on all return paths (deferred so it captures the final status).
+	defer func() {
+		opts.emitEvent(map[string]any{"event": "run_done", "run_index": opts.RunIndex, "status": res.Run.Status})
+	}()
+
 	seenPgbench := false
 	var benchStartTime, benchEndTime time.Time
+	var lastPhase string // tracks the last emitted phase for transition events
 
 	for _, step := range steps {
 		// Determine phase.
@@ -90,6 +111,25 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 
 		var stepErr error
 
+		// Emit phase transition events when the phase changes.
+		if phase != lastPhase {
+			switch {
+			case lastPhase == "" && phase == "pre":
+				opts.emitEvent(map[string]any{"event": "phase", "run_index": opts.RunIndex, "name": "pre", "status": "running", "duration_secs": opts.Plan.RunSettings.PreCollectSecs})
+			case lastPhase == "pre" && phase != "pre":
+				opts.emitEvent(map[string]any{"event": "phase", "run_index": opts.RunIndex, "name": "pre", "status": "completed"})
+				if phase == "post" {
+					opts.emitEvent(map[string]any{"event": "phase", "run_index": opts.RunIndex, "name": "post", "status": "running", "duration_secs": opts.Plan.RunSettings.PostCollectSecs})
+				}
+			case lastPhase == "bench" && phase == "post":
+				opts.emitEvent(map[string]any{"event": "phase", "run_index": opts.RunIndex, "name": "post", "status": "running", "duration_secs": opts.Plan.RunSettings.PostCollectSecs})
+			}
+			lastPhase = phase
+		}
+
+		// Emit step_start event.
+		opts.emitEvent(map[string]any{"event": "step_start", "run_index": opts.RunIndex, "step_id": step.ID, "position": step.Position, "name": step.Name, "type": step.Type})
+
 		switch step.Type {
 		case "sql":
 			script := plan.SubstituteParams(step.Script, opts.Plan.Params)
@@ -102,6 +142,7 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 			if stepErr != nil {
 				stepRes.Status = "failed"
 				stepRes.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+				opts.emitEvent(map[string]any{"event": "step_done", "run_index": opts.RunIndex, "step_id": step.ID, "status": "failed", "exit_code": 1})
 				res.Steps = append(res.Steps, stepRes)
 				res.Run.Status = "failed"
 				res.Run.FinishedAt = stepRes.FinishedAt
@@ -176,6 +217,7 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 				stepErr = err
 				stepRes.Status = "failed"
 				stepRes.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+				opts.emitEvent(map[string]any{"event": "step_done", "run_index": opts.RunIndex, "step_id": step.ID, "status": "failed", "exit_code": 1})
 				res.Steps = append(res.Steps, stepRes)
 				res.Run.Status = "failed"
 				res.Run.FinishedAt = stepRes.FinishedAt
@@ -210,6 +252,7 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 				stepErr = err
 				stepRes.Status = "failed"
 				stepRes.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+				opts.emitEvent(map[string]any{"event": "step_done", "run_index": opts.RunIndex, "step_id": step.ID, "status": "failed", "exit_code": 1})
 				res.Steps = append(res.Steps, stepRes)
 				res.Run.Status = "failed"
 				res.Run.FinishedAt = stepRes.FinishedAt
@@ -222,6 +265,7 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 
 		stepRes.Status = "completed"
 		stepRes.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+		opts.emitEvent(map[string]any{"event": "step_done", "run_index": opts.RunIndex, "step_id": step.ID, "status": "completed", "exit_code": 0})
 		res.Steps = append(res.Steps, stepRes)
 
 		// Update phase for next step if we just ran a bench step.
@@ -233,6 +277,14 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 		if seenPgbench && !isBenchStep && res.Run.PostStartedAt == "" {
 			res.Run.PostStartedAt = time.Now().UTC().Format(time.RFC3339)
 		}
+	}
+
+	// Emit final phase completion event.
+	switch lastPhase {
+	case "pre":
+		opts.emitEvent(map[string]any{"event": "phase", "run_index": opts.RunIndex, "name": "pre", "status": "completed"})
+	case "post":
+		opts.emitEvent(map[string]any{"event": "phase", "run_index": opts.RunIndex, "name": "post", "status": "completed"})
 	}
 
 	// Stop host metrics collection and store results.

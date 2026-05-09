@@ -31,7 +31,6 @@
   let startingSuite = $state(false);
   let suiteName = $state('');
   let suiteDelay = $state(0);
-  let suiteMode = $state<'local' | 'ec2'>('local');
   let suiteServerId = $state<number|null>(null);
   let suiteEc2ServerId = $state<number|null>(null);
   let suiteDatabase = $state('');
@@ -41,7 +40,6 @@
   let suiteLoadingProfiles = $state(false);
 
   const suitePrivateIpApplicable = $derived((() => {
-    if (suiteMode !== 'ec2') return false;
     const srv = servers.find(s => s.id === suiteServerId);
     const runner = ec2Servers.find(s => s.id === suiteEc2ServerId);
     return !!(srv?.private_host && srv.vpc && runner?.vpc && srv.vpc === runner.vpc);
@@ -53,7 +51,6 @@
     suiteLoadingProfiles = true;
     suiteName = '';
     suiteDelay = 0;
-    suiteMode = 'local';
     suiteServerId = null;
     suiteEc2ServerId = null;
     suiteDatabase = '';
@@ -111,10 +108,8 @@
       database: suiteDatabase || undefined,
       snapshot_interval_seconds: suiteSnapshotInterval,
     };
-    if (suiteMode === 'ec2') {
-      body.ec2_server_id = suiteEc2ServerId;
-      if (suiteUsePrivateIp) body.use_private_ip = true;
-    }
+    body.ec2_server_id = suiteEc2ServerId;
+    if (suiteUsePrivateIp) body.use_private_ip = true;
     const res = await fetch('/api/suites', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -257,39 +252,24 @@
           <input id="suite-delay" type="number" bind:value={suiteDelay} min="0" max="3600" />
         </div>
 
-        <fieldset class="form-group modal-fieldset">
-          <legend>Run location</legend>
-          <div style="display:flex; gap:16px">
-            <label style="font-weight:normal; cursor:pointer; display:flex; align-items:center; gap:6px">
-              <input type="radio" bind:group={suiteMode} value="local" style="width:auto" />
-              Local
-            </label>
-            <label style="font-weight:normal; cursor:pointer; display:flex; align-items:center; gap:6px" class:disabled={ec2Servers.length === 0}>
-              <input type="radio" bind:group={suiteMode} value="ec2" style="width:auto" disabled={ec2Servers.length === 0} />
-              EC2{#if ec2Servers.length === 0}<span style="color:#aaa; font-size:11px; margin-left:4px">(none configured)</span>{/if}
-            </label>
-          </div>
-        </fieldset>
-
-        {#if suiteMode === 'ec2'}
+        <div class="form-group">
+          <label for="suite-ec2">VPS Server</label>
+          <select id="suite-ec2" bind:value={suiteEc2ServerId}>
+            <option value={null}>— select VPS server —</option>
+            {#each ec2Servers as s}
+              <option value={s.id}>{s.name} ({s.user}@{s.host}:{s.port})</option>
+            {/each}
+          </select>
+          {#if ec2Servers.length === 0}<p style="font-size:12px; color:#aaa; margin:4px 0 0">No VPS servers configured — add one in Settings.</p>{/if}
+        </div>
+        {#if suitePrivateIpApplicable || (suiteEc2ServerId && servers.find(s => s.id === suiteServerId)?.private_host)}
           <div class="form-group">
-            <label for="suite-ec2">EC2 Server</label>
-            <select id="suite-ec2" bind:value={suiteEc2ServerId}>
-              <option value={null}>— select EC2 server —</option>
-              {#each ec2Servers as s}
-                <option value={s.id}>{s.name} ({s.user}@{s.host}:{s.port})</option>
-              {/each}
-            </select>
+            <label style="display:flex; align-items:center; gap:8px; font-weight:normal; cursor:pointer">
+              <input type="checkbox" style="width:auto" checked={suiteUsePrivateIp}
+                onchange={(e) => { suiteUsePrivateIp = (e.currentTarget as HTMLInputElement).checked; }} />
+              Use private network (VPC)
+            </label>
           </div>
-          {#if suitePrivateIpApplicable || (suiteEc2ServerId && servers.find(s => s.id === suiteServerId)?.private_host)}
-            <div class="form-group">
-              <label style="display:flex; align-items:center; gap:8px; font-weight:normal; cursor:pointer">
-                <input type="checkbox" style="width:auto" checked={suiteUsePrivateIp}
-                  onchange={(e) => { suiteUsePrivateIp = (e.currentTarget as HTMLInputElement).checked; }} />
-                Use private network (VPC)
-              </label>
-            </div>
-          {/if}
         {/if}
 
         <div class="form-group">
@@ -375,7 +355,7 @@
         <div class="modal-actions">
           <button onclick={() => showSuiteModal = false}>Cancel</button>
           <button class="primary" onclick={startSuite}
-            disabled={suiteLoadingProfiles || suiteEnabledDesigns.length === 0 || (suiteMode === 'ec2' && !suiteEc2ServerId)}>
+            disabled={suiteLoadingProfiles || suiteEnabledDesigns.length === 0 || !suiteEc2ServerId}>
             ⊞ Start Suite
           </button>
         </div>

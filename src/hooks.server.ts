@@ -1,6 +1,5 @@
 import { recoverStaleRuns } from '$lib/server/run-manager';
 import { recoverEc2Runs } from '$lib/server/ec2-executor';
-import { recoverLocalSeries } from '$lib/server/series-executor';
 import { recoverStaleLocalSuites } from '$lib/server/suite-executor';
 import getDb from '$lib/server/db';
 import { redirect } from '@sveltejs/kit';
@@ -10,7 +9,6 @@ import { env } from '$env/dynamic/private';
 getDb();
 recoverStaleRuns();
 recoverEc2Runs();
-recoverLocalSeries();
 recoverStaleLocalSuites();
 
 const PUBLIC_PATHS = ['/login', '/favicon.ico'];

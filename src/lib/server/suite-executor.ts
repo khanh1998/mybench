@@ -3,6 +3,8 @@ import { writeFileSync, readFileSync, unlinkSync } from 'fs';
 import { randomUUID } from 'crypto';
 import getDb from '$lib/server/db';
 import { startSeries, getActiveSeries } from '$lib/server/series-executor';
+import { createRun, completeRun } from '$lib/server/run-manager';
+import type { ActiveRun } from '$lib/server/run-manager';
 import {
 	connectSsh,
 	execStreaming,
@@ -14,6 +16,71 @@ import {
 import { generatePlan } from '$lib/server/plan-generator';
 import { importResultIntoRun } from '$lib/server/run-importer';
 import type { Ec2Server } from '$lib/types';
+
+const MB_PREFIX = '__MB__';
+
+/**
+ * Routes a __MB__ structured event from a suite's series command to the appropriate
+ * DB updates and SSE events. The flat `run_index` maps to flatRuns[run_index].
+ */
+function handleSuiteEvent(
+	flatRuns: Array<{ runId: number; token: string; profileName: string }>,
+	activeRunMap: Map<number, ActiveRun>,
+	emitter: SuiteEmitter,
+	evt: Record<string, unknown>,
+	db: ReturnType<typeof getDb>
+): void {
+	const now = new Date().toISOString();
+	const runIndex = evt.run_index as number | undefined;
+	const run = runIndex !== undefined ? flatRuns[runIndex] : undefined;
+	const activeRun = run ? activeRunMap.get(run.runId) : undefined;
+
+	switch (evt.event) {
+		case 'run_start': {
+			if (!run) break;
+			db.prepare(`UPDATE benchmark_runs SET status='running', started_at=? WHERE id=?`).run(now, run.runId);
+			break;
+		}
+		case 'step_start': {
+			if (!run || !activeRun) break;
+			const stepId = evt.step_id as number;
+			db.prepare(
+				`UPDATE run_step_results SET status='running', started_at=? WHERE run_id=? AND step_id=?`
+			).run(now, run.runId, stepId);
+			activeRun.emitter.emit('step', { step_id: stepId, status: 'running', started_at: now });
+			break;
+		}
+		case 'step_done': {
+			if (!run || !activeRun) break;
+			const stepId = evt.step_id as number;
+			const status = (evt.status as string) === 'completed' ? 'completed' : 'failed';
+			db.prepare(
+				`UPDATE run_step_results SET status=?, finished_at=? WHERE run_id=? AND step_id=?`
+			).run(status, now, run.runId, stepId);
+			activeRun.emitter.emit('step', { step_id: stepId, status, finished_at: now });
+			break;
+		}
+		case 'phase': {
+			if (!activeRun) break;
+			activeRun.emitter.emit('phase', {
+				name: evt.name as string,
+				status: evt.status as string,
+				duration_secs: (evt.duration_secs as number) ?? 0,
+				started_ms: Date.now()
+			});
+			break;
+		}
+		case 'run_done': {
+			// Signal the individual run's SSE stream (import happens in the batch loop below)
+			if (activeRun) activeRun.emitter.emit('done');
+			break;
+		}
+		case 'delay': {
+			emitter.emit('line', `[suite] Sleeping ${evt.seconds}s between runs...`);
+			break;
+		}
+	}
+}
 
 export interface SuiteDesignConfig {
 	design_id: number;
@@ -187,6 +254,11 @@ async function executeEc2SuiteAsync(
 		`).run(dc.design_id, designName, opts.delay_seconds, now, suiteId, designToken);
 		const seriesId = seriesResult.lastInsertRowid as number;
 
+		// Load design steps once for pre-creating step result rows
+		const designSteps = db.prepare(
+			'SELECT * FROM design_steps WHERE design_id = ? AND enabled = 1 ORDER BY position'
+		).all(dc.design_id) as { id: number; position: number; name: string; type: string }[];
+
 		const runs: SuiteRunEntry[] = [];
 		for (const profileId of dc.profile_ids) {
 			const profile = db.prepare('SELECT name FROM design_param_profiles WHERE id = ?').get(profileId) as { name: string } | undefined;
@@ -207,15 +279,25 @@ async function executeEc2SuiteAsync(
 			);
 			const runId = runResult.lastInsertRowid as number;
 
-			db.prepare(`
-				INSERT INTO run_step_results (run_id, step_id, position, name, type, status, started_at)
-				VALUES (?, 0, 0, 'EC2 Remote Execution', 'sql', 'running', ?)
-			`).run(runId, now);
+			// Pre-create real per-step result rows
+			const insStep = db.prepare(
+				`INSERT INTO run_step_results (run_id, step_id, position, name, type, status) VALUES (?, ?, ?, ?, ?, 'pending')`
+			);
+			for (const step of designSteps) {
+				insStep.run(runId, step.id, step.position, step.name, step.type);
+			}
 
 			runs.push({ runId, token: runToken, profileName, seriesId, designId: dc.design_id, designToken });
 		}
 
 		designEntries.push({ designId: dc.design_id, designName, designToken, seriesId, snapshot_interval_seconds, runs });
+	}
+
+	// Create ActiveRun for every run upfront (flat list matching the series command's run_index order)
+	const flatRuns = designEntries.flatMap(de => de.runs);
+	const activeRunMap = new Map<number, ActiveRun>();
+	for (const run of flatRuns) {
+		activeRunMap.set(run.runId, createRun(run.runId));
 	}
 
 	let conn: import('ssh2').Client | null = null;
@@ -244,10 +326,11 @@ async function executeEc2SuiteAsync(
 			try { unlinkSync(localPlanPath); } catch { /* ignore */ }
 		}
 
-		// Build single series command across all designs × profiles
+		// Build single series command across all designs × profiles, with --json-events
 		const cmdParts: string[] = [
 			shellQuote(resolvedBinaryPath),
 			'series',
+			'--json-events',
 			'--delay', String(opts.delay_seconds),
 			'--log-dir', shellQuote(resolvedLogDir)
 		];
@@ -259,8 +342,17 @@ async function executeEc2SuiteAsync(
 			}
 		}
 
-		emitter.emit('line', `[suite] Starting EC2 suite: ${designEntries.length} design(s), ${designEntries.reduce((s, d) => s + d.runs.length, 0)} total runs`);
-		const exitCode = await execStreaming(conn, cmdParts.join(' '), (line) => emitter.emit('line', line));
+		emitter.emit('line', `[suite] Starting EC2 suite: ${designEntries.length} design(s), ${flatRuns.length} total runs`);
+		const exitCode = await execStreaming(conn, cmdParts.join(' '), (line) => {
+			if (line.startsWith(MB_PREFIX)) {
+				try {
+					const evt = JSON.parse(line.slice(MB_PREFIX.length)) as Record<string, unknown>;
+					handleSuiteEvent(flatRuns, activeRunMap, emitter, evt, db);
+				} catch { /* malformed — ignore */ }
+				return;
+			}
+			emitter.emit('line', line);
+		});
 		if (exitCode !== 0) {
 			emitter.emit('line', `[suite] EC2 suite process exited with code ${exitCode}`);
 		}
@@ -283,7 +375,7 @@ async function executeEc2SuiteAsync(
 				try {
 					await downloadFile(conn, remoteResultPath, localResultPath);
 					const resultJson = JSON.parse(readFileSync(localResultPath, 'utf8'));
-					await importResultIntoRun(run.runId, resultJson);
+					importResultIntoRun(run.runId, resultJson);
 					try { unlinkSync(localResultPath); } catch { /* ignore */ }
 					emitter.emit('line', `[suite] Imported run ${runIndex} (profile: ${run.profileName})`);
 				} catch (err) {
@@ -292,6 +384,8 @@ async function executeEc2SuiteAsync(
 					db.prepare(`UPDATE benchmark_runs SET status='failed', finished_at=? WHERE id=?`)
 						.run(new Date().toISOString(), run.runId);
 				}
+				// Signal each run's individual SSE stream and clean up its ActiveRun
+				completeRun(run.runId);
 			}
 
 			db.prepare(`UPDATE benchmark_series SET status='completed', finished_at=? WHERE id=?`)
@@ -320,6 +414,7 @@ async function executeEc2SuiteAsync(
 			for (const run of de.runs) {
 				db.prepare(`UPDATE benchmark_runs SET status='failed', finished_at=? WHERE id=? AND status='running'`)
 					.run(new Date().toISOString(), run.runId);
+				completeRun(run.runId);
 			}
 		}
 	} finally {

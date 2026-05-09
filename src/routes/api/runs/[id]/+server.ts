@@ -1,6 +1,6 @@
 import { json, error } from '@sveltejs/kit';
 import getDb from '$lib/server/db';
-import { stopRun } from '$lib/server/run-manager';
+import { completeRun } from '$lib/server/run-manager';
 import type { RequestHandler } from './$types';
 
 export const GET: RequestHandler = ({ params }) => {
@@ -42,7 +42,7 @@ export const PATCH: RequestHandler = async ({ params, request }) => {
 export const DELETE: RequestHandler = async ({ params, url }) => {
 	const runId = Number(params.id);
 	const db = getDb();
-	await stopRun(runId);
+	completeRun(runId); // signal SSE stream; EC2 runner manages its own process lifecycle
 	if (url.searchParams.get('action') === 'delete') {
 		db.prepare(`DELETE FROM benchmark_runs WHERE id = ?`).run(runId);
 	} else {

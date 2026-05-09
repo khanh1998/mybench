@@ -93,12 +93,10 @@
   let runSnapshotInterval = $state(30);
   let runProfile = $state<number|null>(null);
   let runName = $state('');
-  let runMode = $state<'local' | 'ec2'>('local');
   let runEc2ServerId = $state<number|null>(null);
   let runUsePrivateIp = $state(false);
 
   const privateIpApplicable = $derived((() => {
-    if (runMode !== 'ec2') return false;
     const srv = servers.find(s => s.id === runServer);
     const runner = ec2Servers.find(s => s.id === runEc2ServerId);
     return !!(srv?.private_host && srv.vpc && runner?.vpc && srv.vpc === runner.vpc);
@@ -114,7 +112,6 @@
   let seriesName = $state('');
   let seriesDelay = $state(0);
   let seriesProfiles = $state<number[]>([]);
-  let seriesMode = $state<'local' | 'ec2'>('local');
   let seriesEc2ServerId = $state<number|null>(null);
   let seriesServer = $state<number|null>(null);
   let seriesDatabase = $state('');
@@ -122,7 +119,6 @@
   let seriesUsePrivateIp = $state(false);
 
   const seriesPrivateIpApplicable = $derived((() => {
-    if (seriesMode !== 'ec2') return false;
     const srv = servers.find(s => s.id === seriesServer);
     const runner = ec2Servers.find(s => s.id === seriesEc2ServerId);
     return !!(srv?.private_host && srv.vpc && runner?.vpc && srv.vpc === runner.vpc);
@@ -166,7 +162,6 @@
     seriesName = '';
     seriesDelay = 0;
     seriesProfiles = profiles.map(p => p.id);
-    seriesMode = 'local';
     seriesEc2ServerId = null;
     seriesServer = design.server_id;
     seriesDatabase = design.database;
@@ -205,11 +200,9 @@
       server_id: seriesServer,
       database: seriesDatabase,
       snapshot_interval_seconds: seriesSnapshotInterval,
+      ec2_server_id: seriesEc2ServerId
     };
-    if (seriesMode === 'ec2') {
-      body.ec2_server_id = seriesEc2ServerId;
-      if (seriesUsePrivateIp) body.use_private_ip = true;
-    }
+    if (seriesUsePrivateIp) body.use_private_ip = true;
     const res = await fetch('/api/series', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -234,7 +227,6 @@
     runSnapshotInterval = design.snapshot_interval_seconds;
     runProfile = null;
     runName = '';
-    runMode = 'local';
     runEc2ServerId = null;
     runUsePrivateIp = false;
     showRunModal = true;
@@ -352,12 +344,10 @@
       database: runDatabase,
       snapshot_interval_seconds: runSnapshotInterval,
       profile_id: runProfile ?? undefined,
-      name: runName || undefined
+      name: runName || undefined,
+      ec2_server_id: runEc2ServerId
     };
-    if (runMode === 'ec2') {
-      body.ec2_server_id = runEc2ServerId;
-      if (runUsePrivateIp) body.use_private_ip = true;
-    }
+    if (runUsePrivateIp) body.use_private_ip = true;
     const res = await fetch('/api/runs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -633,52 +623,37 @@
         </div>
       {/if}
 
-      <fieldset class="form-group modal-fieldset">
-        <legend>Run location</legend>
-        <div style="display:flex; gap:16px">
-          <label style="font-weight:normal; cursor:pointer; display:flex; align-items:center; gap:6px">
-            <input type="radio" bind:group={runMode} value="local" style="width:auto" />
-            Local
-          </label>
-          <label style="font-weight:normal; cursor:pointer; display:flex; align-items:center; gap:6px" class:disabled={ec2Servers.length === 0}>
-            <input type="radio" bind:group={runMode} value="ec2" style="width:auto" disabled={ec2Servers.length === 0} />
-            EC2{#if ec2Servers.length === 0}<span style="color:#aaa; font-size:11px; margin-left:4px">(none configured)</span>{/if}
-          </label>
-        </div>
-      </fieldset>
-
-      {#if runMode === 'ec2'}
+      <div class="form-group">
+        <label for="run-ec2-server">VPS Server</label>
+        <select id="run-ec2-server" bind:value={runEc2ServerId}>
+          <option value={null}>— select VPS server —</option>
+          {#each ec2Servers as s}
+            <option value={s.id}>{s.name} ({s.user}@{s.host}:{s.port})</option>
+          {/each}
+        </select>
+        {#if ec2Servers.length === 0}<p style="font-size:12px; color:#aaa; margin:4px 0 0">No VPS servers configured — add one in Settings.</p>{/if}
+      </div>
+      {#if privateIpApplicable || (runEc2ServerId && servers.find(s => s.id === runServer)?.private_host)}
         <div class="form-group">
-          <label for="run-ec2-server">EC2 Server</label>
-          <select id="run-ec2-server" bind:value={runEc2ServerId}>
-            <option value={null}>— select EC2 server —</option>
-            {#each ec2Servers as s}
-              <option value={s.id}>{s.name} ({s.user}@{s.host}:{s.port})</option>
-            {/each}
-          </select>
+          <label style="display:flex; align-items:center; gap:8px; font-weight:normal; cursor:pointer">
+            <input
+              type="checkbox"
+              style="width:auto"
+              checked={runUsePrivateIp}
+              onchange={(e) => { runUsePrivateIp = (e.currentTarget as HTMLInputElement).checked; }}
+            />
+            <span>
+              Use private network (VPC)
+              {#if runUsePrivateIp}
+                {@const ph = servers.find(s => s.id === runServer)?.private_host}
+                {#if ph}<span style="color:#888; font-size:12px; font-weight:normal"> — connecting to {ph}</span>{/if}
+              {/if}
+            </span>
+          </label>
+          {#if !privateIpApplicable}
+            <p style="font-size:12px; color:#888; margin:4px 0 0">Runner and DB server are not on the same VPC — private IP may not be reachable.</p>
+          {/if}
         </div>
-        {#if privateIpApplicable || (runEc2ServerId && servers.find(s => s.id === runServer)?.private_host)}
-          <div class="form-group">
-            <label style="display:flex; align-items:center; gap:8px; font-weight:normal; cursor:pointer">
-              <input
-                type="checkbox"
-                style="width:auto"
-                checked={runUsePrivateIp}
-                onchange={(e) => { runUsePrivateIp = (e.currentTarget as HTMLInputElement).checked; }}
-              />
-              <span>
-                Use private network (VPC)
-                {#if runUsePrivateIp}
-                  {@const ph = servers.find(s => s.id === runServer)?.private_host}
-                  {#if ph}<span style="color:#888; font-size:12px; font-weight:normal"> — connecting to {ph}</span>{/if}
-                {/if}
-              </span>
-            </label>
-            {#if !privateIpApplicable}
-              <p style="font-size:12px; color:#888; margin:4px 0 0">Runner and DB server are not on the same VPC — private IP may not be reachable.</p>
-            {/if}
-          </div>
-        {/if}
       {/if}
 
       <div class="form-group">
@@ -733,7 +708,7 @@
 
       <div class="modal-actions">
         <button onclick={() => showRunModal = false}>Cancel</button>
-        <button class="primary" onclick={startRun} disabled={!runServer || !runDatabase || (runMode === 'ec2' && !runEc2ServerId)}>▶ Start Run</button>
+        <button class="primary" onclick={startRun} disabled={!runServer || !runDatabase || !runEc2ServerId}>▶ Start Run</button>
       </div>
     </div>
   </div>
@@ -796,52 +771,37 @@
         {/if}
       </div>
 
-      <fieldset class="form-group modal-fieldset">
-        <legend>Run location</legend>
-        <div style="display:flex; gap:16px">
-          <label style="font-weight:normal; cursor:pointer; display:flex; align-items:center; gap:6px">
-            <input type="radio" bind:group={seriesMode} value="local" style="width:auto" />
-            Local
-          </label>
-          <label style="font-weight:normal; cursor:pointer; display:flex; align-items:center; gap:6px" class:disabled={ec2Servers.length === 0}>
-            <input type="radio" bind:group={seriesMode} value="ec2" style="width:auto" disabled={ec2Servers.length === 0} />
-            EC2{#if ec2Servers.length === 0}<span style="color:#aaa; font-size:11px; margin-left:4px">(none configured)</span>{/if}
-          </label>
-        </div>
-      </fieldset>
-
-      {#if seriesMode === 'ec2'}
+      <div class="form-group">
+        <label for="series-ec2">VPS Server</label>
+        <select id="series-ec2" bind:value={seriesEc2ServerId}>
+          <option value={null}>— select VPS server —</option>
+          {#each ec2Servers as s}
+            <option value={s.id}>{s.name} ({s.user}@{s.host}:{s.port})</option>
+          {/each}
+        </select>
+        {#if ec2Servers.length === 0}<p style="font-size:12px; color:#aaa; margin:4px 0 0">No VPS servers configured — add one in Settings.</p>{/if}
+      </div>
+      {#if seriesPrivateIpApplicable || (seriesEc2ServerId && servers.find(s => s.id === seriesServer)?.private_host)}
         <div class="form-group">
-          <label for="series-ec2">EC2 Server</label>
-          <select id="series-ec2" bind:value={seriesEc2ServerId}>
-            <option value={null}>— select EC2 server —</option>
-            {#each ec2Servers as s}
-              <option value={s.id}>{s.name} ({s.user}@{s.host}:{s.port})</option>
-            {/each}
-          </select>
+          <label style="display:flex; align-items:center; gap:8px; font-weight:normal; cursor:pointer">
+            <input
+              type="checkbox"
+              style="width:auto"
+              checked={seriesUsePrivateIp}
+              onchange={(e) => { seriesUsePrivateIp = (e.currentTarget as HTMLInputElement).checked; }}
+            />
+            <span>
+              Use private network (VPC)
+              {#if seriesUsePrivateIp}
+                {@const ph = servers.find(s => s.id === seriesServer)?.private_host}
+                {#if ph}<span style="color:#888; font-size:12px; font-weight:normal"> — connecting to {ph}</span>{/if}
+              {/if}
+            </span>
+          </label>
+          {#if !seriesPrivateIpApplicable}
+            <p style="font-size:12px; color:#888; margin:4px 0 0">Runner and DB server are not on the same VPC — private IP may not be reachable.</p>
+          {/if}
         </div>
-        {#if seriesPrivateIpApplicable || (seriesEc2ServerId && servers.find(s => s.id === seriesServer)?.private_host)}
-          <div class="form-group">
-            <label style="display:flex; align-items:center; gap:8px; font-weight:normal; cursor:pointer">
-              <input
-                type="checkbox"
-                style="width:auto"
-                checked={seriesUsePrivateIp}
-                onchange={(e) => { seriesUsePrivateIp = (e.currentTarget as HTMLInputElement).checked; }}
-              />
-              <span>
-                Use private network (VPC)
-                {#if seriesUsePrivateIp}
-                  {@const ph = servers.find(s => s.id === seriesServer)?.private_host}
-                  {#if ph}<span style="color:#888; font-size:12px; font-weight:normal"> — connecting to {ph}</span>{/if}
-                {/if}
-              </span>
-            </label>
-            {#if !seriesPrivateIpApplicable}
-              <p style="font-size:12px; color:#888; margin:4px 0 0">Runner and DB server are not on the same VPC — private IP may not be reachable.</p>
-            {/if}
-          </div>
-        {/if}
       {/if}
 
       <div class="form-group">
@@ -865,7 +825,7 @@
       <div class="modal-actions">
         <button onclick={() => showSeriesModal = false}>Cancel</button>
         <button class="primary" onclick={startSeries}
-          disabled={seriesProfiles.length < 2 || !seriesServer || !seriesDatabase || (seriesMode === 'ec2' && !seriesEc2ServerId)}>
+          disabled={seriesProfiles.length < 2 || !seriesServer || !seriesDatabase || !seriesEc2ServerId}>
           ⇄ Start Series
         </button>
       </div>

@@ -14,7 +14,7 @@ npm run test       # Run vitest unit tests
 
 ## Architecture
 
-**mybench** is a SvelteKit app for comparing PostgreSQL table designs via pgbench/sysbench benchmarks. Runs can execute locally or on a remote EC2 instance via SSH.
+**mybench** is a SvelteKit app for comparing PostgreSQL table designs via pgbench/sysbench benchmarks. Runs execute on a remote VPS/EC2 instance via SSH using the Go CLI (`mybench-runner`).
 
 ### Core concepts
 
@@ -22,18 +22,17 @@ npm run test       # Run vitest unit tests
 - **Design** — one candidate answer; has ordered **Steps** and optional **Params**
 - **Profile** — a named set of param overrides for a design (e.g. "small", "large"); one profile produces one run
 - **Series** — runs one design across multiple profiles sequentially (with optional delay between runs)
-- **Suite** — runs multiple designs (each as a series) across a decision; can run locally or on EC2
+- **Suite** — runs multiple designs (each as a series) across a decision on a VPS runner
 
 ### Data flow
 
 1. User creates a **Decision** → **Designs** (each with ordered **Steps** and optional **Params**)
-2. **Local run**: POST `/api/runs` → inserts `benchmark_runs` row → `startRun()` in `run-executor.ts` runs steps async → returns `{ run_id }` immediately
-3. **EC2 run**: POST `/api/runs` with `ec2_server_id` → `startEc2Run()` generates `plan.json`, uploads to EC2, spawns `mybench-runner`, polls for completion, imports results
-4. **Series**: POST `/api/series` → `startSeries()` runs the design once per profile in order
-5. **Suite**: POST `/api/suites` → `startSuite()` orchestrates multiple series across designs
-6. Client navigates to the run/series/suite page → opens SSE stream at `/api/runs/[id]/stream` (or `/api/series/[id]/stream`, `/api/suites/[id]/stream`)
-7. For bench steps: pre-collect phase → spawn pgbench/sysbench → periodic pg_stat_* snapshots → post-collect phase
-8. Snapshots stored in `snap_*` SQLite tables → queryable in the Compare page
+2. **Run**: POST `/api/runs` with `ec2_server_id` → `startEc2Run()` generates `plan.json`, uploads to VPS via SSH, spawns `mybench-runner`, streams structured events back, imports results
+3. **Series**: POST `/api/series` → `startSeries()` runs the design once per profile in order on VPS
+4. **Suite**: POST `/api/suites` → `startSuite()` orchestrates multiple series across designs on VPS
+5. Client navigates to the run/series/suite page → opens SSE stream at `/api/runs/[id]/stream` (or `/api/series/[id]/stream`, `/api/suites/[id]/stream`)
+6. The Go CLI emits `__MB__`-prefixed JSON events (`step_start`, `step_done`, `phase`, `run_done`, etc.) which SvelteKit parses and forwards as SSE to the browser in real time
+7. Snapshots stored in `snap_*` SQLite tables → queryable in the Compare page
 
 ### Storage
 
@@ -49,35 +48,24 @@ npm run test       # Run vitest unit tests
 **Core infrastructure**
 - `db.ts` — SQLite singleton + all migrations + seed data (global saved queries)
 - `pg-client.ts` — `createPool()`, `testConnection()`, `discoverPgStatTables()`
-- `pg-stats.ts` — `collectSnapshot()` (queries PG, inserts into snap_ tables), `SNAP_TABLE_MAP`, `getEnabledTablesForRun()`
-- `run-manager.ts` — in-memory `Map<runId, ActiveRun>` holding EventEmitter + ChildProcess + pg.Pool + snapshot timer + `currentPhase`; `recoverStaleRuns()` called at startup
+- `pg-stats.ts` — `SNAP_TABLE_MAP`, `ALL_SNAP_TABLES` (used by plan-generator, MCP tools, snap-tables API)
+- `run-manager.ts` — in-memory `Map<runId, ActiveRun>` holding `EventEmitter` + `currentPhase`; `createRun()`, `completeRun()`, `recoverStaleRuns()` called at startup
 
-**Run execution**
-- `run-executor.ts` — `startRun()`: creates `benchmark_runs` row, resolves server/params, runs steps async locally; shared by HTTP API and MCP tool
-- `ec2-executor.ts` — `startEc2Run()`: generates plan, uploads via SSH, spawns `mybench-runner`, polls EC2 for completion, imports results
-- `series-executor.ts` — `startSeries()`: runs one design with multiple profiles sequentially with delay; emits SSE progress events
-- `suite-executor.ts` — `startSuite()`: orchestrates multiple series across a decision; local or EC2
+**Run execution (VPS/SSH only)**
+- `ec2-executor.ts` — `startEc2Run()`: pre-creates per-step rows, generates plan, uploads via SSH, spawns `mybench-runner --json-events`, parses `__MB__` structured events, imports results
+- `series-executor.ts` — `startSeries()`: requires `ec2_server_id`; pre-creates per-step rows for all runs, routes `__MB__` events by `run_index`, emits SSE progress per run
+- `suite-executor.ts` — `startSuite()`: orchestrates multiple series across a decision on VPS; routes events via flat `run_index` map
 
-**Step executors (`step-executors/`)**
-- `index.ts` — `getStepExecutor()` router; `BENCH_STEP_TYPES = ['pgbench', 'sysbench']`
-- `pgbench-executor.ts` — spawns pgbench, writes script to `/tmp/mybench-{runId}-{stepId}.pgbench`
-- `sysbench-executor.ts` — spawns sysbench OLTP benchmarks
-- `sql-executor.ts` — executes SQL statements via `pool.query()`, split on `;`
-- `collect-executor.ts` — collects pg_stat snapshots for a fixed duration
-- `pg-stat-executor.ts` — `pg_stat_statements_reset` and `pg_stat_statements_collect` step types
-
-**EC2 / remote execution**
+**VPS / remote execution**
 - `ec2-runner.ts` — SSH/SFTP utilities: `connectSsh()`, `exec()`, `execStreaming()`, `uploadFile()`, `downloadFile()`, `shellQuote()`
 - `plan-generator.ts` — `generatePlan()`: builds `plan.json` input for `mybench-runner` from a design + server config + param overrides
 - `run-importer.ts` — parses `mybench-runner` JSON output and inserts snapshots + step results into local SQLite tables
 
 **Supporting modules**
-- `params.ts` — `substituteParams()`: replaces `{{PARAM_NAME}}` placeholders in scripts and pgbench_options
-- `pgbench.ts` / `sysbench.ts` — low-level process spawn helpers
 - `perf-inspect.ts` — detects Linux perf/cgroup support; returns `PerfScope`: `'postgres_cgroup'` | `'system'` | `'disabled'`
 - `run-telemetry.ts` — collects Linux perf events during benchmarks (cgroup or system scope)
 - `pg-stat-statements-schema.ts` — SQLite column type definitions for `snap_pg_stat_statements`
-- `services/pg-servers.ts` / `services/ec2-servers.ts` — CRUD helpers for PG and EC2 server records
+- `services/pg-servers.ts` / `services/ec2-servers.ts` — CRUD helpers for PG and VPS server records
 
 **MCP integration (`mcp/`)**
 - `server.ts`, `transport.ts`, `tools.ts` — MCP server exposing benchmark tools to Claude Code via `/routes/mcp/+server.ts`
@@ -86,15 +74,15 @@ npm run test       # Run vitest unit tests
 
 | Route | Method | Purpose |
 |---|---|---|
-| `/api/runs` | POST | Start a local or EC2 run |
+| `/api/runs` | POST | Start a VPS run (`ec2_server_id` required) |
 | `/api/runs/import` | POST | Import mybench-runner results |
 | `/api/runs/[id]/stream` | GET | SSE stream for run progress |
-| `/api/series` | POST | Start a series (design × profiles) |
+| `/api/series` | POST | Start a series (design × profiles) on VPS |
 | `/api/series/[id]/stream` | GET | SSE stream for series progress |
-| `/api/suites` | POST | Start a suite (decision × designs × profiles) |
+| `/api/suites` | POST | Start a suite (decision × designs × profiles) on VPS |
 | `/api/suites/[id]/stream` | GET | SSE stream for suite progress |
 | `/api/connections` | GET/POST | List/create PG server connections |
-| `/api/ec2` | GET/POST | List/create EC2 servers |
+| `/api/ec2` | GET/POST | List/create VPS runner servers |
 | `/api/query` | POST | Run custom SQL against SQLite snap_* tables |
 | `/routes/mcp` | POST | MCP server endpoint |
 
@@ -107,8 +95,10 @@ npm run test       # Run vitest unit tests
 - **Param substitution**: `{{PARAM_NAME}}` in scripts/options is replaced at run time from the design's params or profile overrides
 - **Custom metrics**: user writes SQL against `snap_*` tables using `?` as `_run_id` placeholder; executed via `POST /api/query` against SQLite
 - **SSE replay**: if a run is already done when the client connects, stored stdout/stderr from `run_step_results` is replayed line-by-line
-- **EC2 workflow**: `plan.json` is generated locally → uploaded via SFTP → `mybench-runner` (Go CLI in `/cli/`) executes it → results downloaded and imported via `run-importer.ts`
-- **MCP tool**: `startRun()` in `run-executor.ts` is shared between the HTTP API and the MCP tool to avoid duplication
+- **VPS workflow**: `plan.json` is generated locally → uploaded via SFTP → `mybench-runner --json-events` (Go CLI in `/cli/`) executes it → `__MB__` structured events streamed back over SSH → results downloaded and imported via `run-importer.ts`
+- **Structured events**: Go CLI emits `__MB__{json}` lines; SvelteKit strips them from stdout, routes by `run_index`, updates per-step DB rows live, and forwards as SSE `step`/`phase` events to the browser
+- **`ec2_server_id` required**: all run/series/suite POST endpoints require a VPS runner — local execution path has been removed
+- **MCP tool**: `run_design` tool calls `startEc2Run()` directly; `ec2_server_id` is required
 
 ### `enabled` field
 
@@ -116,4 +106,9 @@ Steps and table selections use `INTEGER` (0/1) for `enabled`, not boolean. In Sv
 
 ### CLI (`/cli/`)
 
-Separate Go project (`mybench-runner`). Reads `plan.json`, executes steps (pgbench/sysbench/sql), collects pg_stat snapshots, writes results as JSON. Deployed to EC2 for remote execution.
+Separate Go project (`mybench-runner`). Reads `plan.json`, executes steps (pgbench/sysbench/sql), collects pg_stat snapshots, writes results as JSON. Deployed to VPS for remote execution.
+
+Key flags:
+- `--json-events` — emit `__MB__{json}` structured event lines to stdout for real-time SSE feedback (used by all VPS runs)
+
+Event types emitted: `step_start`, `step_done`, `phase`, `run_done` (from `runner.go`); `run_start`, `delay`, `series_done` (from `series.go`). All carry `run_index` so SvelteKit can route events to the correct run in a series/suite.

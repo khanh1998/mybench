@@ -25,6 +25,7 @@ func newRunCmd() *cobra.Command {
 	var logDir string
 	var progress bool
 	var logTailLines int
+	var jsonEvents bool
 
 	cmd := &cobra.Command{
 		Use:   "run <plan.json>",
@@ -77,6 +78,8 @@ func newRunCmd() *cobra.Command {
 				Progress:     progress,
 				Timestamp:    timestamp,
 				LogTailLines: logTailLines,
+				JSONEvents:   jsonEvents,
+				RunIndex:     0,
 			}
 
 			// Create a cancellable context so SIGINT can abort in-progress steps.
@@ -179,6 +182,7 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&logDir, "log-dir", "/tmp", "directory for step log files")
 	cmd.Flags().BoolVar(&progress, "progress", false, "tee subprocess output to terminal")
 	cmd.Flags().IntVar(&logTailLines, "log-tail-lines", 100, "trailing log lines per step in result (0 to disable)")
+	cmd.Flags().BoolVar(&jsonEvents, "json-events", false, "emit __MB__-prefixed JSON event lines to stdout for structured progress tracking")
 
 	return cmd
 }

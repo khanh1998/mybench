@@ -24,6 +24,54 @@ export interface StartEc2RunOptions {
 	use_private_ip?: boolean;
 }
 
+const MB_PREFIX = '__MB__';
+
+/**
+ * Parses a __MB__-prefixed JSON event line from the Go CLI and routes it to the
+ * appropriate SSE events and DB updates for a single run.
+ */
+function handleRunEvent(
+	runId: number,
+	evt: Record<string, unknown>,
+	db: ReturnType<typeof getDb>,
+	setCurrentStepId: (id: number) => void
+): void {
+	const now = new Date().toISOString();
+	const activeRun = getActiveRun(runId);
+
+	switch (evt.event) {
+		case 'step_start': {
+			const stepId = evt.step_id as number;
+			setCurrentStepId(stepId);
+			db.prepare(
+				`UPDATE run_step_results SET status='running', started_at=? WHERE run_id=? AND step_id=?`
+			).run(now, runId, stepId);
+			activeRun?.emitter.emit('step', { step_id: stepId, status: 'running', started_at: now });
+			break;
+		}
+		case 'step_done': {
+			const stepId = evt.step_id as number;
+			const status = (evt.status as string) === 'completed' ? 'completed' : 'failed';
+			const exitCode = (evt.exit_code as number) ?? null;
+			db.prepare(
+				`UPDATE run_step_results SET status=?, exit_code=?, finished_at=? WHERE run_id=? AND step_id=?`
+			).run(status, exitCode, now, runId, stepId);
+			activeRun?.emitter.emit('step', { step_id: stepId, status, finished_at: now });
+			break;
+		}
+		case 'phase': {
+			activeRun?.emitter.emit('phase', {
+				name: evt.name as string,
+				status: evt.status as string,
+				duration_secs: (evt.duration_secs as number) ?? 0,
+				started_ms: Date.now()
+			});
+			break;
+		}
+		// run_done is handled by the existing result-import flow — no DB action needed here
+	}
+}
+
 /**
  * Creates a benchmark_runs row, registers an ActiveRun for SSE streaming,
  * and kicks off async EC2 execution. Returns the run_id immediately.
@@ -56,8 +104,6 @@ export function startEc2Run(
 
 	const runName = opts.name ?? profileName;
 	const now = new Date().toISOString();
-	// Unique token for this EC2 execution — used as the remote file stem so result files
-	// are unambiguous even across multiple runs on the same EC2 server.
 	const ec2RunToken = randomUUID();
 
 	// Insert the benchmark_runs row
@@ -84,19 +130,24 @@ export function startEc2Run(
 
 	const runId = insertResult.lastInsertRowid as number;
 
-	// Create a placeholder step result for live streaming
-	db.prepare(`
-		INSERT INTO run_step_results (run_id, step_id, position, name, type, status, started_at)
-		VALUES (?, 0, 0, 'EC2 Remote Execution', 'sql', 'running', ?)
-	`).run(runId, now);
+	// Pre-create real step result rows (one per enabled design step) so the UI
+	// can render the step list immediately and update per-step status via SSE.
+	const steps = db.prepare(
+		'SELECT * FROM design_steps WHERE design_id = ? AND enabled = 1 ORDER BY position'
+	).all(design.id) as { id: number; position: number; name: string; type: string }[];
+
+	const insStep = db.prepare(
+		`INSERT INTO run_step_results (run_id, step_id, position, name, type, status) VALUES (?, ?, ?, ?, ?, 'pending')`
+	);
+	for (const step of steps) {
+		insStep.run(runId, step.id, step.position, step.name, step.type);
+	}
 
 	// Register in-memory ActiveRun for SSE
 	createRun(runId);
 
 	// Fire and forget — errors handled inside
-	executeEc2RunAsync(runId, design.id, ec2Server, profileName, ec2RunToken, opts).catch(() => {
-		// Swallow — errors are logged and DB updated inside executeEc2RunAsync
-	});
+	executeEc2RunAsync(runId, design.id, ec2Server, profileName, ec2RunToken, opts).catch(() => {});
 
 	return runId;
 }
@@ -244,7 +295,6 @@ async function pollUntilDone(
 
 			console.log(`[ec2-recovery] Run ${run.id}: still in progress, next check in ${POLL_INTERVAL_MS / 1000}s`);
 		} catch (sshErr) {
-			// Transient SSH failure — log and keep retrying
 			console.warn(`[ec2-recovery] Run ${run.id}: SSH check failed (${sshErr instanceof Error ? sshErr.message : sshErr}), will retry`);
 		} finally {
 			conn?.end();
@@ -278,7 +328,15 @@ async function executeEc2RunAsync(
 	let remoteDir = ec2Server.remote_dir;
 	let remoteLogDir = ec2Server.log_dir;
 	let stdoutAccum = '';
+	let currentStepId: number | null = null;
 	const LOG_CAP = 500_000;
+
+	const flushStdout = () => {
+		if (currentStepId !== null) {
+			db.prepare(`UPDATE run_step_results SET stdout=? WHERE run_id=? AND step_id=?`)
+				.run(stdoutAccum, runId, currentStepId);
+		}
+	};
 
 	try {
 		// Connect SSH
@@ -313,6 +371,7 @@ async function executeEc2RunAsync(
 		const cmdParts = [
 			shellQuote(binaryPath),
 			'run',
+			'--json-events',
 			'--output',
 			shellQuote(remoteResultPath),
 			'--log-dir',
@@ -327,15 +386,20 @@ async function executeEc2RunAsync(
 		// Execute remotely with live output streaming
 		emit(`Running mybench-runner on EC2...`);
 		let lineCount = 0;
-		const flushStdout = () => {
-			db.prepare(`UPDATE run_step_results SET stdout = ? WHERE run_id = ? AND position = 0`)
-				.run(stdoutAccum, runId);
-		};
 
 		let exitCode: number;
 		try {
 			exitCode = await execStreaming(conn, cmd, (line) => {
+				// Intercept __MB__ structured events — never add them to the stored log
+				if (line.startsWith(MB_PREFIX)) {
+					try {
+						const evt = JSON.parse(line.slice(MB_PREFIX.length)) as Record<string, unknown>;
+						handleRunEvent(runId, evt, db, (sid) => { currentStepId = sid; });
+					} catch { /* malformed — ignore */ }
+					return;
+				}
 				if (stdoutAccum.length < LOG_CAP) stdoutAccum += line + '\n';
+				else if (!stdoutAccum.endsWith('[truncated]\n')) stdoutAccum += '[truncated]\n';
 				emit(line);
 				lineCount++;
 				if (lineCount % 50 === 0) flushStdout();
@@ -345,9 +409,7 @@ async function executeEc2RunAsync(
 			const sshMsg = sshErr instanceof Error ? sshErr.message : String(sshErr);
 			emit(`[WARN] SSH connection lost: ${sshMsg}. Attempting recovery...`);
 			flushStdout();
-			try {
-				conn.end();
-			} catch { /* ignore */ }
+			try { conn.end(); } catch { /* ignore */ }
 			conn = await connectSsh(ec2Server);
 			const checkResult = await exec(conn, `test -f ${shellQuote(remoteResultPath)} && echo exists`);
 			if (checkResult.stdout.trim() === 'exists') {
@@ -361,21 +423,18 @@ async function executeEc2RunAsync(
 		// Final flush of accumulated output
 		flushStdout();
 
-		// Update placeholder step with accumulated output
-		db.prepare(`
-			UPDATE run_step_results
-			SET status = ?, exit_code = ?, stdout = ?, finished_at = ?
-			WHERE run_id = ? AND position = 0
-		`).run(exitCode === 0 ? 'completed' : 'failed', exitCode, stdoutAccum, now(), runId);
-
+		// Mark any still-pending/running steps as failed if the process exited non-zero
 		if (exitCode !== 0) {
 			emit(`[ERROR] mybench-runner exited with code ${exitCode}`);
+			db.prepare(
+				`UPDATE run_step_results SET status='failed', finished_at=? WHERE run_id=? AND status IN ('pending','running')`
+			).run(now(), runId);
 		}
 
 		// Always try to download and import the result — the runner writes result.json
 		// even when a step fails, so we can show partial results and step logs in the UI.
-		const resultExists = (await exec(conn, `test -f ${shellQuote(remoteResultPath)} && echo yes || echo no`)).stdout.trim() === 'yes';
-		if (resultExists) {
+		const remoteResultExists = (await exec(conn, `test -f ${shellQuote(remoteResultPath)} && echo yes || echo no`)).stdout.trim() === 'yes';
+		if (remoteResultExists) {
 			emit(`Downloading result from EC2...`);
 			await downloadFile(conn, remoteResultPath, localResultPath);
 
@@ -411,11 +470,10 @@ async function executeEc2RunAsync(
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
 		emit(`[FATAL ERROR] ${msg}`);
-		db.prepare(`
-			UPDATE run_step_results
-			SET status = 'failed', finished_at = ?, stdout = ?
-			WHERE run_id = ? AND position = 0
-		`).run(now(), stdoutAccum, runId);
+		flushStdout();
+		db.prepare(
+			`UPDATE run_step_results SET status='failed', finished_at=? WHERE run_id=? AND status IN ('pending','running')`
+		).run(now(), runId);
 		db.prepare(`UPDATE benchmark_runs SET status = 'failed', finished_at = ? WHERE id = ?`).run(
 			now(),
 			runId

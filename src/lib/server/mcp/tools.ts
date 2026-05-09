@@ -4,7 +4,6 @@ import { getRunnablePgbenchScripts } from '$lib/params';
 import getDb from '$lib/server/db';
 import { createPool } from '$lib/server/pg-client';
 import { SNAP_TABLE_MAP } from '$lib/server/pg-stats';
-import { startRun } from '$lib/server/run-executor';
 import { startEc2Run } from '$lib/server/ec2-executor';
 import type { PgServer, Ec2Server, DesignStep, PgbenchScript, DesignParam } from '$lib/types';
 import {
@@ -942,13 +941,14 @@ Example: pgbench -T 120 + two 15s wait steps → wait ~150s before first poll.`,
 				snapshot_interval_seconds: z.number().int().optional().describe('Optional run-time pg_stat_* snapshot interval override'),
 				profile_id: z.number().int().optional().describe('Optional profile ID to apply param overrides'),
 				name: z.string().optional().describe('Optional run name; defaults to profile name if a profile is used'),
-				ec2_server_id: z.number().int().optional().describe('Optional EC2 runner ID from get_context ec2_servers; omit for a local run')
+				ec2_server_id: z.number().int().describe('EC2 runner ID from get_context ec2_servers. Required — use list_ec2_servers to find available runners.')
 			}
 		},
 		async ({ design_id, server_id, database, snapshot_interval_seconds, profile_id, name, ec2_server_id }) => {
-			const runId = ec2_server_id
-				? startEc2Run(design_id, ec2_server_id, { server_id, database, snapshot_interval_seconds, profile_id, name })
-				: startRun(design_id, { server_id, database, snapshot_interval_seconds, profile_id, name });
+			if (!ec2_server_id) {
+				return text({ error: 'ec2_server_id is required. Local runs are no longer supported. Use list_ec2_servers to find an available runner.' });
+			}
+			const runId = startEc2Run(design_id, ec2_server_id, { server_id, database, snapshot_interval_seconds, profile_id, name });
 			return text({ run_id: runId, message: 'Run started. Poll get_run(run_id) for status.' });
 		}
 	);
