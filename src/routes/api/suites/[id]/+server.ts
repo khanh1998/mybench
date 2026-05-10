@@ -41,7 +41,7 @@ export const GET: RequestHandler = ({ params }) => {
 async function killRemoteProcess(ec2Server: Ec2Server, execLogPath: string): Promise<void> {
 	const conn = await connectSsh(ec2Server);
 	try {
-		await exec(conn, `pkill -f ${shellQuote(execLogPath)} || true`);
+		await exec(conn, `pkill -9 -f ${shellQuote(execLogPath)}`);
 	} finally {
 		conn.end();
 	}
