@@ -52,12 +52,12 @@ npm run test       # Run vitest unit tests
 - `run-manager.ts` — in-memory `Map<runId, ActiveRun>` holding `EventEmitter` + `currentPhase`; `createRun()`, `completeRun()`, `recoverStaleRuns()` called at startup
 
 **Run execution (VPS/SSH only)**
-- `ec2-executor.ts` — `startEc2Run()`: pre-creates per-step rows, generates plan, uploads via SSH, spawns `mybench-runner --json-events`, parses `__MB__` structured events, imports results
-- `series-executor.ts` — `startSeries()`: requires `ec2_server_id`; pre-creates per-step rows for all runs, routes `__MB__` events by `run_index`, emits SSE progress per run
-- `suite-executor.ts` — `startSuite()`: orchestrates multiple series across a decision on VPS; routes events via flat `run_index` map
+- `ec2-executor.ts` — `startEc2Run()`: pre-creates per-step rows, generates plan, uploads via SSH, launches `mybench-runner` in background (`nohup ... &`) with `--exec-log`, tails exec log over SSH, reconnects SSH after tail, downloads result, imports
+- `series-executor.ts` — `startSeries()`: requires `ec2_server_id`; pre-creates per-step rows for all runs, background-launches CLI, tails exec log, routes `__MB__` events by `run_index`
+- `suite-executor.ts` — `startSuite()`: orchestrates multiple series across a decision on VPS; tails suite exec log, routes events via flat `run_index` map
 
 **VPS / remote execution**
-- `ec2-runner.ts` — SSH/SFTP utilities: `connectSsh()`, `exec()`, `execStreaming()`, `uploadFile()`, `downloadFile()`, `shellQuote()`
+- `ec2-runner.ts` — SSH/SFTP utilities: `connectSsh()`, `exec()`, `execStreaming()`, `execStreamingCancellable()`, `uploadFile()`, `downloadFile()`, `shellQuote()`
 - `plan-generator.ts` — `generatePlan()`: builds `plan.json` input for `mybench-runner` from a design + server config + param overrides
 - `run-importer.ts` — parses `mybench-runner` JSON output and inserts snapshots + step results into local SQLite tables
 
@@ -95,7 +95,11 @@ npm run test       # Run vitest unit tests
 - **Param substitution**: `{{PARAM_NAME}}` in scripts/options is replaced at run time from the design's params or profile overrides
 - **Custom metrics**: user writes SQL against `snap_*` tables using `?` as `_run_id` placeholder; executed via `POST /api/query` against SQLite
 - **SSE replay**: if a run is already done when the client connects, stored stdout/stderr from `run_step_results` is replayed line-by-line
-- **VPS workflow**: `plan.json` is generated locally → uploaded via SFTP → `mybench-runner --json-events` (Go CLI in `/cli/`) executes it → `__MB__` structured events streamed back over SSH → results downloaded and imported via `run-importer.ts`
+- **VPS workflow**: `plan.json` is generated locally → uploaded via SFTP → `mybench-runner --json-events --exec-log <path>` launched via `nohup ... &` → SvelteKit tails the exec log over SSH → results downloaded and imported via `run-importer.ts`
+- **Exec log + tail-based SSE**: CLI writes `__MB__`-prefixed JSON events and timestamped human-readable progress lines to an exec log file (`--exec-log`, stored in `ec2_servers.log_dir` on VPS). SvelteKit tails this with `tail -n +1 -F` for refresh-safe streaming. Each invocation gets a session key `YYYYMMDDHHMMSS_TOKEN6` → `run_KEY.log` / `series_KEY.log` / `suite_KEY.log`. Debug log (stderr) goes to a separate `ec2_servers.cli_log_dir` directory.
+- **SSH reconnect after tail**: After the exec log tail completes, a fresh SSH connection is opened before the result file check and download. Closing the tail channel from within `onData` can leave the ssh2 `Client` in a degraded state.
+- **`exec_log_path` column**: `benchmark_runs`, `benchmark_series`, and `decision_suites` each store the VPS path of their exec log. SSE stream endpoints use this for tail-based streaming; falls back to in-memory EventEmitter if empty.
+- **`output_file` on step results**: `run_step_results.output_file` stores the per-step pgbench/sysbench log path emitted in `step_start` events. Populated during live tail; overwritten (cleared) when `importResultIntoRun` re-inserts rows from the result JSON.
 - **Structured events**: Go CLI emits `__MB__{json}` lines; SvelteKit strips them from stdout, routes by `run_index`, updates per-step DB rows live, and forwards as SSE `step`/`phase` events to the browser
 - **`ec2_server_id` required**: all run/series/suite POST endpoints require a VPS runner — local execution path has been removed
 - **MCP tool**: `run_design` tool calls `startEc2Run()` directly; `ec2_server_id` is required
@@ -110,5 +114,7 @@ Separate Go project (`mybench-runner`). Reads `plan.json`, executes steps (pgben
 
 Key flags:
 - `--json-events` — emit `__MB__{json}` structured event lines to stdout for real-time SSE feedback (used by all VPS runs)
+- `--exec-log <path>` — write structured events + timestamped progress lines to a persistent log file on the VPS (safe across SIGKILL via direct `write()` syscalls); SvelteKit tails this file for refresh-safe SSE
+- `--log-dir <path>` — directory for per-step pgbench/sysbench output files (paths included in `step_start` events as `output_file`)
 
 Event types emitted: `step_start`, `step_done`, `phase`, `run_done` (from `runner.go`); `run_start`, `delay`, `series_done` (from `series.go`). All carry `run_index` so SvelteKit can route events to the correct run in a series/suite.
