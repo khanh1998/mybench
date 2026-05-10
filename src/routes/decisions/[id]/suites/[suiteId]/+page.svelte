@@ -58,6 +58,13 @@
       : null;
   }
 
+  async function stopSuite() {
+    await fetch(`/api/suites/${suite.id}`, { method: 'DELETE' });
+    es?.close();
+    es = null;
+    refreshData();
+  }
+
   async function refreshData() {
     try {
       const res = await fetch(`/api/suites/${suite.id}`);
@@ -109,6 +116,9 @@
     <div class="suite-title-row">
       <h2>{suite.name}</h2>
       <span class="suite-status {statusClass(suite.status)}">{suite.status}</span>
+      {#if suite.status === 'running'}
+        <button class="danger" onclick={stopSuite}>Stop Suite</button>
+      {/if}
     </div>
     <div class="suite-meta">
       {seriesList.length} design{seriesList.length !== 1 ? 's' : ''}

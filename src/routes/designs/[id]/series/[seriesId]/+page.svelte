@@ -53,6 +53,13 @@
     return '·';
   }
 
+  async function stopSeries() {
+    await fetch(`/api/series/${series.id}`, { method: 'DELETE' });
+    es?.close();
+    es = null;
+    refreshRuns();
+  }
+
   async function refreshRuns() {
     try {
       const res = await fetch(`/api/series/${series.id}`);
@@ -104,6 +111,9 @@
     <div class="series-title-row">
       <h2>{series.name}</h2>
       <span class="series-status {statusClass(series.status)}">{series.status}</span>
+      {#if series.status === 'running'}
+        <button class="danger" onclick={stopSeries}>Stop Series</button>
+      {/if}
     </div>
     {#if series.delay_seconds > 0}
       <div class="series-meta">{runs.length} runs · {series.delay_seconds}s delay between runs</div>

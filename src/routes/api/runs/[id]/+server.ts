@@ -1,6 +1,8 @@
 import { json, error } from '@sveltejs/kit';
 import getDb from '$lib/server/db';
 import { completeRun } from '$lib/server/run-manager';
+import { connectSsh, exec, shellQuote } from '$lib/server/ec2-runner';
+import type { Ec2Server } from '$lib/types';
 import type { RequestHandler } from './$types';
 
 export const GET: RequestHandler = ({ params }) => {
@@ -39,14 +41,42 @@ export const PATCH: RequestHandler = async ({ params, request }) => {
 	return json({ updated: true });
 };
 
+async function killRemoteProcess(ec2Server: Ec2Server, token: string, execLogPath: string | null): Promise<void> {
+	const conn = await connectSsh(ec2Server);
+	try {
+		// Kill mybench-runner process and the tail that was streaming its exec log
+		const parts = [`pkill -f ${shellQuote(`result-${token}.json`)} || true`];
+		if (execLogPath) parts.push(`pkill -f ${shellQuote(execLogPath)} || true`);
+		await exec(conn, parts.join('; '));
+	} finally {
+		conn.end();
+	}
+}
+
 export const DELETE: RequestHandler = async ({ params, url }) => {
 	const runId = Number(params.id);
 	const db = getDb();
-	completeRun(runId); // signal SSE stream; EC2 runner manages its own process lifecycle
+
 	if (url.searchParams.get('action') === 'delete') {
+		completeRun(runId);
 		db.prepare(`DELETE FROM benchmark_runs WHERE id = ?`).run(runId);
 	} else {
+		const run = db.prepare(
+			'SELECT ec2_run_token, ec2_server_id, exec_log_path FROM benchmark_runs WHERE id = ? AND status = ?'
+		).get(runId, 'running') as { ec2_run_token: string | null; ec2_server_id: number | null; exec_log_path: string | null } | undefined;
+
+		completeRun(runId);
 		db.prepare(`UPDATE benchmark_runs SET status='stopped', finished_at=datetime('now') WHERE id=? AND status='running'`).run(runId);
+
+		if (run?.ec2_run_token && run.ec2_server_id) {
+			const ec2Server = db.prepare('SELECT * FROM ec2_servers WHERE id = ?').get(run.ec2_server_id) as Ec2Server | undefined;
+			if (ec2Server) {
+				killRemoteProcess(ec2Server, run.ec2_run_token, run.exec_log_path ?? null).catch((err) => {
+					console.warn(`[stop-run] Failed to kill remote process for run ${runId}:`, err instanceof Error ? err.message : err);
+				});
+			}
+		}
 	}
+
 	return json({ ok: true });
 };
