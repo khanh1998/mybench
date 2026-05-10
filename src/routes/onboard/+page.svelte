@@ -41,7 +41,7 @@
 
 	// ── Helpers ──────────────────────────────────────────────────────────────────
 	function randomPassword(len = 24): string {
-		const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$%^&*';
+		const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
 		return Array.from(crypto.getRandomValues(new Uint8Array(len)))
 			.map(b => chars[b % chars.length]).join('');
 	}
