@@ -44,9 +44,10 @@ export const PATCH: RequestHandler = async ({ params, request }) => {
 async function killRemoteProcess(ec2Server: Ec2Server, token: string, execLogPath: string | null): Promise<void> {
 	const conn = await connectSsh(ec2Server);
 	try {
-		// Kill mybench-runner; separate exec() calls avoid shell parsing issues with ; and ||
 		await exec(conn, `pkill -9 -f ${shellQuote(`result-${token}.json`)}`);
-		// Kill the tail (and its timeout parent) streaming the exec log; tail -F ignores stdin EOF
+		// Children (sysbench/pgbench) are orphaned when mybench-runner is killed; kill them explicitly
+		await exec(conn, `pkill -9 sysbench`);
+		await exec(conn, `pkill -9 pgbench`);
 		if (execLogPath) await exec(conn, `pkill -9 -f ${shellQuote(execLogPath)}`);
 	} finally {
 		conn.end();

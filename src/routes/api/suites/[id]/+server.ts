@@ -42,6 +42,8 @@ async function killRemoteProcess(ec2Server: Ec2Server, execLogPath: string): Pro
 	const conn = await connectSsh(ec2Server);
 	try {
 		await exec(conn, `pkill -9 -f ${shellQuote(execLogPath)}`);
+		await exec(conn, `pkill -9 sysbench`);
+		await exec(conn, `pkill -9 pgbench`);
 	} finally {
 		conn.end();
 	}
