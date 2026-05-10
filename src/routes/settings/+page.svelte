@@ -25,7 +25,7 @@
   // ── EC2 Servers ──────────────────────────────────────────────────────────────
   interface Ec2Server {
     id: number; name: string; host: string; user: string; port: number;
-    private_key: string; remote_dir: string; log_dir: string; vpc: string;
+    private_key: string; remote_dir: string; log_dir: string; cli_log_dir: string; vpc: string;
   }
 
   let ec2Servers: Ec2Server[] = $state([]);
@@ -111,7 +111,7 @@
   }
 
   function startNewEc2() {
-    ec2Editing = { name: '', host: '', user: 'ec2-user', port: 22, private_key: '', remote_dir: '~/mybench-bench', log_dir: '/tmp/mybench-logs', vpc: '' };
+    ec2Editing = { name: '', host: '', user: 'ec2-user', port: 22, private_key: '', remote_dir: '~/mybench-bench', log_dir: '/tmp/mybench-logs', cli_log_dir: '/tmp/gocli-logs', vpc: '' };
     ec2IsNew = true;
     ec2TestResult = null;
     ec2InstallOutput = '';
@@ -535,6 +535,10 @@
       <div class="form-group" style="flex:1">
         <label for="ec2-log-dir">Log Dir</label>
         <input id="ec2-log-dir" bind:value={ec2Editing.log_dir} placeholder="/tmp/mybench-logs" />
+      </div>
+      <div class="form-group" style="flex:1">
+        <label for="ec2-cli-log-dir">CLI Log Dir</label>
+        <input id="ec2-cli-log-dir" bind:value={ec2Editing.cli_log_dir} placeholder="/tmp/gocli-logs" />
       </div>
     </div>
     <div class="row">

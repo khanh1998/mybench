@@ -16,7 +16,7 @@ export const POST: RequestHandler = async ({ request }) => {
 	if (!host) throw error(400, 'host is required');
 	if (!private_key) throw error(400, 'private_key is required');
 
-	const server = { id: 0, name: '', host, user: user ?? 'root', port: 22, private_key, remote_dir: '~', log_dir: '/tmp', vpc: '' };
+	const server = { id: 0, name: '', host, user: user ?? 'root', port: 22, private_key, remote_dir: '~', log_dir: '/tmp', cli_log_dir: '/tmp/gocli-logs', vpc: '' };
 	const cmd = buildCreatePostgresPerfSliceCommand(randomSliceName());
 
 	const stream = new ReadableStream({

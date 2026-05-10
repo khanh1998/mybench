@@ -6,7 +6,8 @@ import { createRun, completeRun } from '$lib/server/run-manager';
 import type { ActiveRun } from '$lib/server/run-manager';
 import {
 	connectSsh,
-	execStreaming,
+	exec,
+	execStreamingCancellable,
 	uploadFile,
 	downloadFile,
 	shellQuote
@@ -76,9 +77,10 @@ function handleSeriesEvent(
 		case 'step_start': {
 			if (!entry || !activeRun) break;
 			const stepId = evt.step_id as number;
+			const outputFile = (evt.output_file as string) ?? '';
 			db.prepare(
-				`UPDATE run_step_results SET status='running', started_at=? WHERE run_id=? AND step_id=?`
-			).run(now, entry.runId, stepId);
+				`UPDATE run_step_results SET status='running', started_at=?, output_file=? WHERE run_id=? AND step_id=?`
+			).run(now, outputFile, entry.runId, stepId);
 			activeRun.emitter.emit('step', { step_id: stepId, status: 'running', started_at: now });
 			break;
 		}
@@ -157,12 +159,15 @@ export function startSeries(opts: StartSeriesOptions): number {
 		'SELECT * FROM design_steps WHERE design_id = ? AND enabled = 1 ORDER BY position'
 	).all(design.id) as { id: number; position: number; name: string; type: string }[];
 
-	const entries: { runId: number; token: string; profileName: string }[] = [];
+	const entries: { runId: number; token: string; profileName: string; cliProfileName: string }[] = [];
 	const now = new Date().toISOString();
 
 	for (const profileId of opts.profile_ids) {
-		const profile = db.prepare('SELECT name FROM design_param_profiles WHERE id = ?').get(profileId) as { name: string } | undefined;
-		const profileName = profile?.name ?? '';
+		const profile = profileId === 0
+			? null
+			: db.prepare('SELECT name FROM design_param_profiles WHERE id = ?').get(profileId) as { name: string } | undefined;
+		const profileName = profileId === 0 ? 'Default' : (profile?.name ?? '');
+		const cliProfileName = profileId === 0 ? '' : (profile?.name ?? '');
 		const runToken = randomUUID();
 
 		const insertResult = db.prepare(`
@@ -186,7 +191,7 @@ export function startSeries(opts: StartSeriesOptions): number {
 			insStep.run(runId, step.id, step.position, step.name, step.type);
 		}
 
-		entries.push({ runId, token: runToken, profileName });
+		entries.push({ runId, token: runToken, profileName, cliProfileName });
 	}
 
 	executeEc2SeriesAsync(
@@ -201,7 +206,7 @@ export function startSeries(opts: StartSeriesOptions): number {
 async function executeEc2SeriesAsync(
 	seriesId: number,
 	seriesToken: string,
-	entries: { runId: number; token: string; profileName: string }[],
+	entries: { runId: number; token: string; profileName: string; cliProfileName: string }[],
 	designId: number,
 	ec2Server: Ec2Server,
 	overrideServerId: number | undefined,
@@ -212,9 +217,8 @@ async function executeEc2SeriesAsync(
 	usePrivateIp = false
 ): Promise<void> {
 	const db = getDb();
-	const remoteDir = ec2Server.remote_dir;
-	const logDir = ec2Server.log_dir || remoteDir;
-	const binaryPath = `${remoteDir}/mybench-runner`;
+	const binaryPath = `${ec2Server.remote_dir}/mybench-runner`;
+	const sessionKey = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14) + '_' + seriesToken.slice(0, 6);
 
 	// Create ActiveRun for each entry upfront so SSE subscribers can connect
 	// to individual run streams before their run actually starts.
@@ -228,14 +232,18 @@ async function executeEc2SeriesAsync(
 	try {
 		conn = await connectSsh(ec2Server);
 
-		const { exec } = await import('$lib/server/ec2-runner');
-		const homeResult = await exec(conn, 'echo $HOME');
-		const homeDir = homeResult.stdout.trim();
-		const resolvedRemoteDir = remoteDir.replace(/^~/, homeDir);
-		const resolvedLogDir = logDir.replace(/^~/, homeDir);
+		const homeDir = (await exec(conn, 'echo $HOME')).stdout.trim();
+		const resolvedRemoteDir = ec2Server.remote_dir.replace(/^~/, homeDir);
+		const resolvedLogDir = (ec2Server.log_dir || ec2Server.remote_dir).replace(/^~/, homeDir);
 		const resolvedBinaryPath = binaryPath.replace(/^~/, homeDir);
+		const resolvedCliLogDir = (ec2Server.cli_log_dir || '/tmp/gocli-logs').replace(/^~/, homeDir);
 
-		await exec(conn, `mkdir -p ${shellQuote(resolvedRemoteDir)}`);
+		// Exec log: events + progress written by CLI via file I/O; debug log: CLI stderr via shell redirect
+		const execLogPath = `${resolvedLogDir}/series_${sessionKey}.log`;
+		const debugLogPath = `${resolvedCliLogDir}/series_${sessionKey}.log`;
+
+		await exec(conn, `mkdir -p ${shellQuote(resolvedRemoteDir)} ${shellQuote(resolvedLogDir)} ${shellQuote(resolvedCliLogDir)}`);
+		db.prepare(`UPDATE benchmark_series SET exec_log_path=? WHERE id=?`).run(execLogPath, seriesId);
 
 		// Generate and upload a single plan file (reused for all runs)
 		const plan = generatePlan(designId, {
@@ -250,37 +258,51 @@ async function executeEc2SeriesAsync(
 		await uploadFile(conn, localPlanPath, remotePlanPath);
 		try { unlinkSync(localPlanPath); } catch { /* ignore */ }
 
-		// Build series command with --json-events
+		// Build series command — runs in background, independent of this SSH session
 		const cmdParts: string[] = [
+			'nohup',
 			shellQuote(resolvedBinaryPath),
 			'series',
 			'--json-events',
+			'--exec-log', shellQuote(execLogPath),
 			'--delay', String(delaySeconds),
 			'--log-dir', shellQuote(resolvedLogDir)
 		];
 		for (const entry of entries) {
 			const remoteResultPath = `${resolvedRemoteDir}/result-${entry.token}.json`;
-			cmdParts.push('--run', shellQuote(`${remotePlanPath},${entry.profileName},${remoteResultPath}`));
+			cmdParts.push('--run', shellQuote(`${remotePlanPath},${entry.cliProfileName},${remoteResultPath}`));
 		}
-		const cmd = cmdParts.join(' ');
+		cmdParts.push('>/dev/null', `2>${shellQuote(debugLogPath)}`, '&');
+		const launchCmd = cmdParts.join(' ');
 
-		emitter.emit('line', `[series] Starting EC2 series: ${entries.length} runs, ${delaySeconds}s delay`);
+		emitter.emit('line', `[series] Launching EC2 series: ${entries.length} runs, ${delaySeconds}s delay`);
+		await exec(conn, launchCmd);
 
-		// Stream output — parse __MB__ events, forward plain lines to series SSE
-		const exitCode = await execStreaming(conn, cmd, (line) => {
-			if (line.startsWith(MB_PREFIX)) {
-				try {
-					const evt = JSON.parse(line.slice(MB_PREFIX.length)) as Record<string, unknown>;
-					handleSeriesEvent(entries, activeRunMap, emitter, evt, db);
-				} catch { /* malformed — ignore */ }
-				return;
+		// Wait for exec log to appear (up to 10s)
+		const deadline = Date.now() + 10_000;
+		while (Date.now() < deadline) {
+			const r = await exec(conn, `test -f ${shellQuote(execLogPath)} && echo y || echo n`);
+			if (r.stdout.trim() === 'y') break;
+			await new Promise((r) => setTimeout(r, 200));
+		}
+
+		// Tail exec log — drives DB updates + EventEmitter; stop on series_done
+		const { promise: tailPromise, cancel: stopTail } = execStreamingCancellable(
+			conn,
+			`timeout 86400 tail -n +1 -F ${shellQuote(execLogPath)}`,
+			(line) => {
+				if (line.startsWith(MB_PREFIX)) {
+					try {
+						const evt = JSON.parse(line.slice(MB_PREFIX.length)) as Record<string, unknown>;
+						handleSeriesEvent(entries, activeRunMap, emitter, evt, db);
+						if (evt.event === 'series_done') stopTail();
+					} catch { /* malformed — ignore */ }
+					return;
+				}
+				emitter.emit('line', line);
 			}
-			emitter.emit('line', line);
-		});
-
-		if (exitCode !== 0) {
-			emitter.emit('line', `[series] EC2 series exited with code ${exitCode}`);
-		}
+		);
+		await tailPromise;
 
 		// Download and import each result in order
 		for (let i = 0; i < entries.length; i++) {
@@ -301,14 +323,13 @@ async function executeEc2SeriesAsync(
 					.run(new Date().toISOString(), entry.runId);
 			}
 
-			// Signal the individual run's SSE stream and clean up its ActiveRun
 			completeRun(entry.runId);
 		}
 
-		// Cleanup remote files (plan, all result files, log dir)
+		// Cleanup remote files (plan + result files); exec log and debug log stay on VPS
 		try {
 			const filesToRemove = [remotePlanPath, ...entries.map(e => `${resolvedRemoteDir}/result-${e.token}.json`)];
-			await exec(conn, `rm -f ${filesToRemove.map(shellQuote).join(' ')} && rm -rf ${shellQuote(resolvedLogDir)}`);
+			await exec(conn, `rm -f ${filesToRemove.map(shellQuote).join(' ')}`);
 		} catch { /* ignore */ }
 
 		db.prepare(`UPDATE benchmark_series SET status='completed', finished_at=? WHERE id=?`)
@@ -319,7 +340,6 @@ async function executeEc2SeriesAsync(
 		emitter.emit('line', `\n[series] Fatal error: ${msg}`);
 		db.prepare(`UPDATE benchmark_series SET status='failed', finished_at=? WHERE id=?`)
 			.run(new Date().toISOString(), seriesId);
-		// Mark any still-running runs as failed
 		for (const entry of entries) {
 			db.prepare(`UPDATE benchmark_runs SET status='failed', finished_at=? WHERE id=? AND status='running'`)
 				.run(new Date().toISOString(), entry.runId);

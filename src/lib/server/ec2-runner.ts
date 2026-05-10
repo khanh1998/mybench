@@ -67,6 +67,43 @@ export function execStreaming(
 	});
 }
 
+export function execStreamingCancellable(
+	conn: Client,
+	command: string,
+	onData: (line: string) => void
+): { promise: Promise<number>; cancel: () => void } {
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	let _stream: any = null;
+	const promise = new Promise<number>((resolve, reject) => {
+		conn.exec(command, (err, stream) => {
+			if (err) return reject(err);
+			_stream = stream;
+			let buf = '';
+			stream
+				.on('close', (code: number) => {
+					if (buf.length > 0) onData(buf);
+					resolve(code ?? 0);
+				})
+				.on('data', (data: Buffer) => {
+					buf += data.toString();
+					const lines = buf.split('\n');
+					buf = lines.pop() ?? '';
+					for (const line of lines) onData(line);
+				})
+				.stderr.on('data', (data: Buffer) => {
+					buf += data.toString();
+					const lines = buf.split('\n');
+					buf = lines.pop() ?? '';
+					for (const line of lines) onData(line);
+				});
+		});
+	});
+	return {
+		promise,
+		cancel: () => { try { _stream?.close(); } catch { /* ignore */ } }
+	};
+}
+
 function getSftp(conn: Client): Promise<SFTPWrapper> {
 	return new Promise((resolve, reject) => {
 		conn.sftp((err, sftp) => {

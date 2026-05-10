@@ -58,16 +58,18 @@
     suiteUsePrivateIp = false;
     showSuiteModal = true;
 
+    const DEFAULT_PROFILE = { id: 0, name: 'Default' };
     const entries: SuiteDesignEntry[] = await Promise.all(designs.map(async (d) => {
       const r = await fetch(`/api/designs/${d.id}/profiles`);
-      const profiles: {id: number; name: string}[] = await r.json();
+      const custom: {id: number; name: string}[] = await r.json();
+      const profiles = [DEFAULT_PROFILE, ...custom];
       return {
         design_id: d.id,
         design_name: d.name,
         database: d.database,
-        enabled: profiles.length >= 1,
+        enabled: true,
         profiles,
-        profile_ids: profiles.map(p => p.id)
+        profile_ids: custom.length > 0 ? custom.map(p => p.id) : [DEFAULT_PROFILE.id]
       };
     }));
     suiteDesigns = entries;
@@ -307,12 +309,9 @@
                         onchange={(e) => { suiteDesigns[di] = { ...entry, enabled: (e.currentTarget as HTMLInputElement).checked }; }} />
                       {entry.design_name}
                     </label>
-                    {#if entry.profiles.length === 0}
-                      <span style="color:#aaa; font-size:11px; margin-left:auto">no profiles</span>
-                    {/if}
                   </div>
 
-                  {#if entry.enabled && entry.profiles.length > 0}
+                  {#if entry.enabled}
                     <div class="suite-profiles-list">
                       {#each entry.profile_ids as pid, pi}
                         {@const prof = entry.profiles.find(p => p.id === pid)}

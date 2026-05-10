@@ -210,9 +210,10 @@ export interface Ec2Server {
 	user: string;        // SSH username
 	port: number;        // SSH port (default 22)
 	private_key: string; // PEM content of SSH private key (stored in DB, not a file path)
-	remote_dir: string;  // working directory on EC2
-	log_dir: string;     // pgbench log directory on EC2
-	vpc: string;         // VPC name tag; matched against PgServer.vpc to auto-enable private_host
+	remote_dir: string;    // working directory on EC2
+	log_dir: string;       // pgbench log directory on EC2
+	cli_log_dir: string;   // directory on VPS for persistent Go CLI stderr logs
+	vpc: string;           // VPC name tag; matched against PgServer.vpc to auto-enable private_host
 }
 
 export interface SavedQuery {

@@ -7,7 +7,7 @@ import { createRun, completeRun } from '$lib/server/run-manager';
 import type { ActiveRun } from '$lib/server/run-manager';
 import {
 	connectSsh,
-	execStreaming,
+	execStreamingCancellable,
 	uploadFile,
 	downloadFile,
 	exec,
@@ -44,9 +44,10 @@ function handleSuiteEvent(
 		case 'step_start': {
 			if (!run || !activeRun) break;
 			const stepId = evt.step_id as number;
+			const outputFile = (evt.output_file as string) ?? '';
 			db.prepare(
-				`UPDATE run_step_results SET status='running', started_at=? WHERE run_id=? AND step_id=?`
-			).run(now, run.runId, stepId);
+				`UPDATE run_step_results SET status='running', started_at=?, output_file=? WHERE run_id=? AND step_id=?`
+			).run(now, outputFile, run.runId, stepId);
 			activeRun.emitter.emit('step', { step_id: stepId, status: 'running', started_at: now });
 			break;
 		}
@@ -201,7 +202,8 @@ async function executeLocalSuiteAsync(
 interface SuiteRunEntry {
 	runId: number;
 	token: string;
-	profileName: string;
+	profileName: string;    // display name stored in DB
+	cliProfileName: string; // empty string = use design defaults
 	seriesId: number;
 	designId: number;
 	designToken: string;
@@ -217,9 +219,8 @@ async function executeEc2SuiteAsync(
 	const suiteToken = randomUUID();
 	db.prepare(`UPDATE decision_suites SET ec2_run_token=? WHERE id=?`).run(suiteToken, suiteId);
 
-	const remoteDir = ec2Server.remote_dir;
-	const logDir = ec2Server.log_dir || remoteDir;
-	const binaryPath = `${remoteDir}/mybench-runner`;
+	const sessionKey = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14) + '_' + suiteToken.slice(0, 6);
+	const binaryPath = `${ec2Server.remote_dir}/mybench-runner`;
 
 	// Gather design info and create series + run rows upfront
 	interface DesignEntry {
@@ -247,22 +248,23 @@ async function executeEc2SuiteAsync(
 		const designToken = randomUUID();
 		const snapshot_interval_seconds = opts.snapshot_interval_seconds ?? design.snapshot_interval_seconds;
 
-		// Create series row
 		const seriesResult = db.prepare(`
 			INSERT INTO benchmark_series (design_id, name, delay_seconds, status, created_at, suite_id, ec2_run_token)
 			VALUES (?, ?, ?, 'running', ?, ?, ?)
 		`).run(dc.design_id, designName, opts.delay_seconds, now, suiteId, designToken);
 		const seriesId = seriesResult.lastInsertRowid as number;
 
-		// Load design steps once for pre-creating step result rows
 		const designSteps = db.prepare(
 			'SELECT * FROM design_steps WHERE design_id = ? AND enabled = 1 ORDER BY position'
 		).all(dc.design_id) as { id: number; position: number; name: string; type: string }[];
 
 		const runs: SuiteRunEntry[] = [];
 		for (const profileId of dc.profile_ids) {
-			const profile = db.prepare('SELECT name FROM design_param_profiles WHERE id = ?').get(profileId) as { name: string } | undefined;
-			const profileName = profile?.name ?? '';
+			const profile = profileId === 0
+				? null
+				: db.prepare('SELECT name FROM design_param_profiles WHERE id = ?').get(profileId) as { name: string } | undefined;
+			const profileName = profileId === 0 ? 'Default' : (profile?.name ?? '');
+			const cliProfileName = profileId === 0 ? '' : (profile?.name ?? '');
 			const runToken = randomUUID();
 
 			const resolvedDatabase = opts.database || design.database;
@@ -279,7 +281,6 @@ async function executeEc2SuiteAsync(
 			);
 			const runId = runResult.lastInsertRowid as number;
 
-			// Pre-create real per-step result rows
 			const insStep = db.prepare(
 				`INSERT INTO run_step_results (run_id, step_id, position, name, type, status) VALUES (?, ?, ?, ?, ?, 'pending')`
 			);
@@ -287,30 +288,42 @@ async function executeEc2SuiteAsync(
 				insStep.run(runId, step.id, step.position, step.name, step.type);
 			}
 
-			runs.push({ runId, token: runToken, profileName, seriesId, designId: dc.design_id, designToken });
+			runs.push({ runId, token: runToken, profileName, cliProfileName, seriesId, designId: dc.design_id, designToken });
 		}
 
 		designEntries.push({ designId: dc.design_id, designName, designToken, seriesId, snapshot_interval_seconds, runs });
 	}
 
-	// Create ActiveRun for every run upfront (flat list matching the series command's run_index order)
+	// Flat list matching the series command's run_index order
 	const flatRuns = designEntries.flatMap(de => de.runs);
 	const activeRunMap = new Map<number, ActiveRun>();
 	for (const run of flatRuns) {
 		activeRunMap.set(run.runId, createRun(run.runId));
 	}
 
+	// Track run_done count per design to emit series-done at the right time
+	const designRunDone = new Map<number, number>(); // seriesId → done count
+	const designRunTotal = new Map<number, number>(); // seriesId → total runs
+	for (const de of designEntries) {
+		designRunDone.set(de.seriesId, 0);
+		designRunTotal.set(de.seriesId, de.runs.length);
+	}
+
 	let conn: import('ssh2').Client | null = null;
 
 	try {
 		conn = await connectSsh(ec2Server);
-		const homeResult = await exec(conn, 'echo $HOME');
-		const homeDir = homeResult.stdout.trim();
-		const resolvedRemoteDir = remoteDir.replace(/^~/, homeDir);
-		const resolvedLogDir = logDir.replace(/^~/, homeDir);
+		const homeDir = (await exec(conn, 'echo $HOME')).stdout.trim();
+		const resolvedRemoteDir = ec2Server.remote_dir.replace(/^~/, homeDir);
+		const resolvedLogDir = (ec2Server.log_dir || ec2Server.remote_dir).replace(/^~/, homeDir);
 		const resolvedBinaryPath = binaryPath.replace(/^~/, homeDir);
+		const resolvedCliLogDir = (ec2Server.cli_log_dir || '/tmp/gocli-logs').replace(/^~/, homeDir);
 
-		await exec(conn, `mkdir -p ${shellQuote(resolvedRemoteDir)}`);
+		const execLogPath = `${resolvedLogDir}/suite_${sessionKey}.log`;
+		const debugLogPath = `${resolvedCliLogDir}/suite_${sessionKey}.log`;
+
+		await exec(conn, `mkdir -p ${shellQuote(resolvedRemoteDir)} ${shellQuote(resolvedLogDir)} ${shellQuote(resolvedCliLogDir)}`);
+		db.prepare(`UPDATE decision_suites SET exec_log_path=? WHERE id=?`).run(execLogPath, suiteId);
 
 		// Upload one plan file per design
 		for (const de of designEntries) {
@@ -326,11 +339,13 @@ async function executeEc2SuiteAsync(
 			try { unlinkSync(localPlanPath); } catch { /* ignore */ }
 		}
 
-		// Build single series command across all designs × profiles, with --json-events
+		// Build single series command across all designs × profiles — runs in background
 		const cmdParts: string[] = [
+			'nohup',
 			shellQuote(resolvedBinaryPath),
 			'series',
 			'--json-events',
+			'--exec-log', shellQuote(execLogPath),
 			'--delay', String(opts.delay_seconds),
 			'--log-dir', shellQuote(resolvedLogDir)
 		];
@@ -338,27 +353,58 @@ async function executeEc2SuiteAsync(
 			const remotePlanPath = `${resolvedRemoteDir}/plan-${de.designToken}.json`;
 			for (const run of de.runs) {
 				const remoteResultPath = `${resolvedRemoteDir}/result-${run.token}.json`;
-				cmdParts.push('--run', shellQuote(`${remotePlanPath},${run.profileName},${remoteResultPath}`));
+				cmdParts.push('--run', shellQuote(`${remotePlanPath},${run.cliProfileName},${remoteResultPath}`));
 			}
 		}
+		cmdParts.push('>/dev/null', `2>${shellQuote(debugLogPath)}`, '&');
 
-		emitter.emit('line', `[suite] Starting EC2 suite: ${designEntries.length} design(s), ${flatRuns.length} total runs`);
-		const exitCode = await execStreaming(conn, cmdParts.join(' '), (line) => {
-			if (line.startsWith(MB_PREFIX)) {
-				try {
-					const evt = JSON.parse(line.slice(MB_PREFIX.length)) as Record<string, unknown>;
-					handleSuiteEvent(flatRuns, activeRunMap, emitter, evt, db);
-				} catch { /* malformed — ignore */ }
-				return;
-			}
-			emitter.emit('line', line);
-		});
-		if (exitCode !== 0) {
-			emitter.emit('line', `[suite] EC2 suite process exited with code ${exitCode}`);
+		emitter.emit('line', `[suite] Launching EC2 suite: ${designEntries.length} design(s), ${flatRuns.length} total runs`);
+		await exec(conn, cmdParts.join(' '));
+
+		// Wait for exec log to appear (up to 10s)
+		const deadline = Date.now() + 10_000;
+		while (Date.now() < deadline) {
+			const r = await exec(conn, `test -f ${shellQuote(execLogPath)} && echo y || echo n`);
+			if (r.stdout.trim() === 'y') break;
+			await new Promise((r) => setTimeout(r, 200));
 		}
 
-		// Reconnect before downloading results — the long-lived execStreaming channel
-		// can exhaust per-connection channel limits on the SSH server.
+		// Tail exec log — drives DB updates; emit series-done per design as runs complete
+		const { promise: tailPromise, cancel: stopTail } = execStreamingCancellable(
+			conn,
+			`timeout 86400 tail -n +1 -F ${shellQuote(execLogPath)}`,
+			(line) => {
+				if (line.startsWith(MB_PREFIX)) {
+					try {
+						const evt = JSON.parse(line.slice(MB_PREFIX.length)) as Record<string, unknown>;
+						handleSuiteEvent(flatRuns, activeRunMap, emitter, evt, db);
+
+						// Emit series-done when all runs in a design have completed
+						if (evt.event === 'run_done') {
+							const runIndex = evt.run_index as number | undefined;
+							if (runIndex !== undefined) {
+								const seriesId = flatRuns[runIndex]?.seriesId;
+								if (seriesId !== undefined) {
+									const done = (designRunDone.get(seriesId) ?? 0) + 1;
+									designRunDone.set(seriesId, done);
+									if (done === designRunTotal.get(seriesId)) {
+										const di = designEntries.findIndex(de => de.seriesId === seriesId);
+										emitter.emit('series-done', { series_id: seriesId, design_id: designEntries[di]?.designId ?? 0, index: di });
+									}
+								}
+							}
+						}
+
+						if (evt.event === 'series_done') stopTail();
+					} catch { /* malformed — ignore */ }
+					return;
+				}
+				emitter.emit('line', line);
+			}
+		);
+		await tailPromise;
+
+		// Reconnect for downloads (long tail channel may have aged out the connection)
 		conn.end();
 		conn = await connectSsh(ec2Server);
 
@@ -384,20 +430,18 @@ async function executeEc2SuiteAsync(
 					db.prepare(`UPDATE benchmark_runs SET status='failed', finished_at=? WHERE id=?`)
 						.run(new Date().toISOString(), run.runId);
 				}
-				// Signal each run's individual SSE stream and clean up its ActiveRun
 				completeRun(run.runId);
 			}
 
 			db.prepare(`UPDATE benchmark_series SET status='completed', finished_at=? WHERE id=?`)
 				.run(new Date().toISOString(), de.seriesId);
-			emitter.emit('series-done', { series_id: de.seriesId, design_id: de.designId, index: di });
 		}
 
-		// Cleanup remote files
+		// Cleanup remote files (plans + results); exec log and debug log stay on VPS
 		try {
 			const planFiles = designEntries.map(de => `${resolvedRemoteDir}/plan-${de.designToken}.json`);
 			const resultFiles = designEntries.flatMap(de => de.runs.map(r => `${resolvedRemoteDir}/result-${r.token}.json`));
-			await exec(conn, `rm -f ${[...planFiles, ...resultFiles].map(shellQuote).join(' ')} && rm -rf ${shellQuote(resolvedLogDir)}`);
+			await exec(conn, `rm -f ${[...planFiles, ...resultFiles].map(shellQuote).join(' ')}`);
 		} catch { /* ignore */ }
 
 		db.prepare(`UPDATE decision_suites SET status='completed', finished_at=? WHERE id=?`)

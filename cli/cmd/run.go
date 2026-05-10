@@ -26,6 +26,7 @@ func newRunCmd() *cobra.Command {
 	var progress bool
 	var logTailLines int
 	var jsonEvents bool
+	var execLogPath string
 
 	cmd := &cobra.Command{
 		Use:   "run <plan.json>",
@@ -33,6 +34,17 @@ func newRunCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			planPath := args[0]
+
+			var execLog *os.File
+			if execLogPath != "" {
+				var err error
+				execLog, err = os.OpenFile(execLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "warning: could not open exec log %q: %v\n", execLogPath, err)
+				} else {
+					defer execLog.Close()
+				}
+			}
 
 			// Parse plan.
 			p, err := plan.ReadPlan(planPath)
@@ -80,6 +92,7 @@ func newRunCmd() *cobra.Command {
 				LogTailLines: logTailLines,
 				JSONEvents:   jsonEvents,
 				RunIndex:     0,
+				ExecLog:      execLog,
 			}
 
 			// Create a cancellable context so SIGINT can abort in-progress steps.
@@ -183,6 +196,7 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&progress, "progress", false, "tee subprocess output to terminal")
 	cmd.Flags().IntVar(&logTailLines, "log-tail-lines", 100, "trailing log lines per step in result (0 to disable)")
 	cmd.Flags().BoolVar(&jsonEvents, "json-events", false, "emit __MB__-prefixed JSON event lines to stdout for structured progress tracking")
+	cmd.Flags().StringVar(&execLogPath, "exec-log", "", "path to write execution log (structured events + progress); written directly via file I/O")
 
 	return cmd
 }

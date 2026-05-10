@@ -5,7 +5,7 @@ import { createRun, completeRun, getActiveRun } from '$lib/server/run-manager';
 import {
 	connectSsh,
 	exec,
-	execStreaming,
+	execStreamingCancellable,
 	uploadFile,
 	downloadFile,
 	shellQuote
@@ -42,10 +42,11 @@ function handleRunEvent(
 	switch (evt.event) {
 		case 'step_start': {
 			const stepId = evt.step_id as number;
+			const outputFile = (evt.output_file as string) ?? '';
 			setCurrentStepId(stepId);
 			db.prepare(
-				`UPDATE run_step_results SET status='running', started_at=? WHERE run_id=? AND step_id=?`
-			).run(now, runId, stepId);
+				`UPDATE run_step_results SET status='running', started_at=?, output_file=? WHERE run_id=? AND step_id=?`
+			).run(now, outputFile, runId, stepId);
 			activeRun?.emitter.emit('step', { step_id: stepId, status: 'running', started_at: now });
 			break;
 		}
@@ -156,16 +157,62 @@ interface StaleEc2Run {
 	id: number;
 	ec2_run_token: string;
 	ec2_server_id: number;
+	exec_log_path: string;
 	host: string;
 	user: string;
 	port: number;
 	private_key: string;
 	remote_dir: string;
 	log_dir: string;
+	cli_log_dir: string;
 }
 
 const POLL_INTERVAL_MS = 15_000;
 const POLL_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+/**
+ * After a recovered run resolves (completed or failed), close its parent series/suite
+ * if all sibling runs have also resolved. Normal execution closes series/suites directly
+ * in the executor; this is only needed for the startup recovery path.
+ */
+function propagateRunStatus(runId: number, db: ReturnType<typeof getDb>): void {
+	const now = new Date().toISOString();
+	const row = db.prepare('SELECT series_id FROM benchmark_runs WHERE id = ?').get(runId) as { series_id: number | null } | undefined;
+	const seriesId = row?.series_id;
+	if (!seriesId) return;
+
+	const counts = db.prepare(`
+		SELECT COUNT(*) AS total,
+		       SUM(CASE WHEN status='running' THEN 1 ELSE 0 END) AS still_running,
+		       SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS completed
+		FROM benchmark_runs WHERE series_id = ?
+	`).get(seriesId) as { total: number; still_running: number; completed: number };
+
+	if (counts.still_running > 0) return;
+
+	const seriesStatus = counts.completed === counts.total ? 'completed' : 'failed';
+	db.prepare(`UPDATE benchmark_series SET status=?, finished_at=? WHERE id=? AND status='running'`)
+		.run(seriesStatus, now, seriesId);
+	console.log(`[ec2-recovery] Series ${seriesId} → ${seriesStatus}`);
+
+	const series = db.prepare('SELECT suite_id FROM benchmark_series WHERE id = ?').get(seriesId) as { suite_id: number | null } | undefined;
+	const suiteId = series?.suite_id;
+	if (!suiteId) return;
+
+	const suiteCounts = db.prepare(`
+		SELECT COUNT(*) AS total,
+		       SUM(CASE WHEN status='running' THEN 1 ELSE 0 END) AS still_running,
+		       SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS completed
+		FROM benchmark_series WHERE suite_id = ?
+	`).get(suiteId) as { total: number; still_running: number; completed: number };
+
+	if (suiteCounts.still_running > 0) return;
+
+	const suiteStatus = suiteCounts.completed === suiteCounts.total ? 'completed' : 'failed';
+	db.prepare(`UPDATE decision_suites SET status=?, finished_at=? WHERE id=? AND status='running'`)
+		.run(suiteStatus, now, suiteId);
+	console.log(`[ec2-recovery] Suite ${suiteId} → ${suiteStatus}`);
+}
 
 /**
  * Called at startup. For each benchmark_run that was still 'running' on an EC2 server,
@@ -176,8 +223,8 @@ export function recoverEc2Runs(): void {
 	const db = getDb();
 
 	const staleRuns = db.prepare(`
-		SELECT br.id, br.ec2_run_token, br.ec2_server_id,
-		       e.host, e.user, e.port, e.private_key, e.remote_dir, e.log_dir
+		SELECT br.id, br.ec2_run_token, br.ec2_server_id, br.exec_log_path,
+		       e.host, e.user, e.port, e.private_key, e.remote_dir, e.log_dir, e.cli_log_dir
 		FROM benchmark_runs br
 		JOIN ec2_servers e ON br.ec2_server_id = e.id
 		WHERE br.status = 'running'
@@ -209,6 +256,7 @@ async function recoverSingleEc2Run(run: StaleEc2Run): Promise<void> {
 		private_key: run.private_key,
 		remote_dir: run.remote_dir,
 		log_dir: run.log_dir,
+		cli_log_dir: run.cli_log_dir ?? '/tmp/gocli-logs',
 		vpc: ''
 	};
 
@@ -222,6 +270,26 @@ async function recoverSingleEc2Run(run: StaleEc2Run): Promise<void> {
 		const remoteResultPath = `${remoteDir}/result-${run.ec2_run_token}.json`;
 		const remotePlanPath = `${remoteDir}/plan-${run.ec2_run_token}.json`;
 
+		// If exec_log_path is set, replay events from it and wait for run_done
+		if (run.exec_log_path) {
+			console.log(`[ec2-recovery] Run ${run.id}: tailing exec log ${run.exec_log_path}`);
+			let currentStepId: number | null = null;
+			const { promise: tailPromise, cancel: stopTail } = execStreamingCancellable(
+				conn,
+				`timeout 86400 tail -n +1 -F ${shellQuote(run.exec_log_path)}`,
+				(line) => {
+					if (!line.startsWith(MB_PREFIX)) return;
+					try {
+						const evt = JSON.parse(line.slice(MB_PREFIX.length)) as Record<string, unknown>;
+						handleRunEvent(run.id, evt, db, (sid) => { currentStepId = sid; });
+						if (evt.event === 'run_done') stopTail();
+					} catch { /* ignore */ }
+				}
+			);
+			await tailPromise;
+			void currentStepId; // used via side-effect in handleRunEvent
+		}
+
 		const resultExists = (await exec(conn, `test -f ${shellQuote(remoteResultPath)} && echo yes || echo no`)).stdout.trim() === 'yes';
 
 		if (resultExists) {
@@ -229,22 +297,32 @@ async function recoverSingleEc2Run(run: StaleEc2Run): Promise<void> {
 			await downloadFile(conn, remoteResultPath, localResultPath);
 			conn.end(); conn = undefined;
 			importResultIntoRun(run.id, JSON.parse(readFileSync(localResultPath, 'utf8')));
+			propagateRunStatus(run.id, db);
 			console.log(`[ec2-recovery] Run ${run.id}: recovered successfully`);
 			return;
 		}
 
-		// Result not ready yet — check if mybench-runner is still alive
-		const pgrepOut = (await exec(conn, `pgrep -f ${shellQuote(`plan-${run.ec2_run_token}.json`)} || true`)).stdout.trim();
+		if (run.exec_log_path) {
+			// exec log path was set — if we got here the run_done event arrived but no result file
+			console.log(`[ec2-recovery] Run ${run.id}: run_done received but no result file — marking failed`);
+			db.prepare(`UPDATE benchmark_runs SET status='failed', finished_at=? WHERE id=?`)
+				.run(new Date().toISOString(), run.id);
+			propagateRunStatus(run.id, db);
+			return;
+		}
+
+		// Legacy path (no exec_log_path): pgrep + poll
+		const pgrepOut = (await exec(conn, `pgrep -f ${shellQuote(`result-${run.ec2_run_token}.json`)} || true`)).stdout.trim();
 		conn.end(); conn = undefined;
 
 		if (!pgrepOut) {
 			console.log(`[ec2-recovery] Run ${run.id}: process dead, no result — marking failed`);
-			db.prepare(`UPDATE benchmark_runs SET status = 'failed', finished_at = ? WHERE id = ?`)
+			db.prepare(`UPDATE benchmark_runs SET status='failed', finished_at=? WHERE id=?`)
 				.run(new Date().toISOString(), run.id);
+			propagateRunStatus(run.id, db);
 			return;
 		}
 
-		// Still running — poll until it finishes
 		console.log(`[ec2-recovery] Run ${run.id}: mybench-runner still running (PID ${pgrepOut}), polling every ${POLL_INTERVAL_MS / 1000}s...`);
 		await pollUntilDone(run, ec2Server, remoteResultPath, remotePlanPath, localResultPath);
 
@@ -278,18 +356,20 @@ async function pollUntilDone(
 				await downloadFile(conn, remoteResultPath, localResultPath);
 				conn.end(); conn = undefined;
 				importResultIntoRun(run.id, JSON.parse(readFileSync(localResultPath, 'utf8')));
+				propagateRunStatus(run.id, db);
 				console.log(`[ec2-recovery] Run ${run.id}: recovered successfully`);
 				return;
 			}
 
-			// Check if the process is still alive
-			const pgrepOut = (await exec(conn, `pgrep -f ${shellQuote(`plan-${run.ec2_run_token}.json`)} || true`)).stdout.trim();
+			// Check if the process is still alive (use result path — see note in recoverSingleEc2Run)
+			const pgrepOut = (await exec(conn, `pgrep -f ${shellQuote(`result-${run.ec2_run_token}.json`)} || true`)).stdout.trim();
 			conn.end(); conn = undefined;
 
 			if (!pgrepOut) {
 				console.log(`[ec2-recovery] Run ${run.id}: process exited without result — marking failed`);
 				db.prepare(`UPDATE benchmark_runs SET status = 'failed', finished_at = ? WHERE id = ?`)
 					.run(new Date().toISOString(), run.id);
+				propagateRunStatus(run.id, db);
 				return;
 			}
 
@@ -305,6 +385,7 @@ async function pollUntilDone(
 	console.error(`[ec2-recovery] Run ${run.id}: timed out after 24h — marking failed`);
 	db.prepare(`UPDATE benchmark_runs SET status = 'failed', finished_at = ? WHERE id = ?`)
 		.run(new Date().toISOString(), run.id);
+	propagateRunStatus(run.id, db);
 }
 
 async function executeEc2RunAsync(
@@ -324,19 +405,9 @@ async function executeEc2RunAsync(
 	const now = () => new Date().toISOString();
 	const localPlanPath = `/tmp/mybench-ec2-plan-${ec2RunToken}.json`;
 	const localResultPath = `/tmp/mybench-ec2-result-${ec2RunToken}.json`;
+	const sessionKey = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14) + '_' + ec2RunToken.slice(0, 6);
 	let conn: Client | undefined;
-	let remoteDir = ec2Server.remote_dir;
-	let remoteLogDir = ec2Server.log_dir;
-	let stdoutAccum = '';
 	let currentStepId: number | null = null;
-	const LOG_CAP = 500_000;
-
-	const flushStdout = () => {
-		if (currentStepId !== null) {
-			db.prepare(`UPDATE run_step_results SET stdout=? WHERE run_id=? AND step_id=?`)
-				.run(stdoutAccum, runId, currentStepId);
-		}
-	};
 
 	try {
 		// Connect SSH
@@ -344,13 +415,19 @@ async function executeEc2RunAsync(
 		conn = await connectSsh(ec2Server);
 
 		// Resolve ~ to $HOME for SFTP (fastPut/fastGet don't expand tildes)
-		const homeResult = await exec(conn, 'echo $HOME');
-		const homeDir = homeResult.stdout.trim();
-		remoteDir = ec2Server.remote_dir.replace(/^~/, homeDir);
-		remoteLogDir = ec2Server.log_dir.replace(/^~/, homeDir);
+		const homeDir = (await exec(conn, 'echo $HOME')).stdout.trim();
+		const remoteDir = ec2Server.remote_dir.replace(/^~/, homeDir);
+		const remoteLogDir = ec2Server.log_dir.replace(/^~/, homeDir);
+		const remoteCliLogDir = (ec2Server.cli_log_dir || '/tmp/gocli-logs').replace(/^~/, homeDir);
 
-		// Ensure remote directory exists
-		await exec(conn, `mkdir -p ${shellQuote(remoteDir)}`);
+		// Exec log: structured events + progress lines written by CLI via file I/O (safe on SIGKILL)
+		// Debug log: CLI stderr captured via shell redirect (Go warnings/errors for post-mortem)
+		const execLogPath = `${remoteLogDir}/run_${sessionKey}.log`;
+		const debugLogPath = `${remoteCliLogDir}/run_${sessionKey}.log`;
+
+		// Ensure remote directories exist and store exec_log_path before launch
+		await exec(conn, `mkdir -p ${shellQuote(remoteDir)} ${shellQuote(remoteLogDir)} ${shellQuote(remoteCliLogDir)}`);
+		db.prepare(`UPDATE benchmark_runs SET exec_log_path=? WHERE id=?`).run(execLogPath, runId);
 
 		// Generate plan JSON and upload
 		const plan = generatePlan(designId, {
@@ -365,119 +442,96 @@ async function executeEc2RunAsync(
 		const remotePlanPath = `${remoteDir}/plan-${ec2RunToken}.json`;
 		await uploadFile(conn, localPlanPath, remotePlanPath);
 
-		// Build CLI command
+		// Build CLI command — runs in background, independent of this SSH session
 		const binaryPath = `${remoteDir}/mybench-runner`;
 		const remoteResultPath = `${remoteDir}/result-${ec2RunToken}.json`;
 		const cmdParts = [
+			'nohup',
 			shellQuote(binaryPath),
 			'run',
 			'--json-events',
-			'--output',
-			shellQuote(remoteResultPath),
-			'--log-dir',
-			shellQuote(remoteLogDir)
+			'--exec-log', shellQuote(execLogPath),
+			'--output', shellQuote(remoteResultPath),
+			'--log-dir', shellQuote(remoteLogDir)
 		];
-		if (profileName) {
-			cmdParts.push('--profile', shellQuote(profileName));
-		}
+		if (profileName) cmdParts.push('--profile', shellQuote(profileName));
 		cmdParts.push(shellQuote(remotePlanPath));
-		const cmd = cmdParts.join(' ');
+		cmdParts.push('>/dev/null', `2>${shellQuote(debugLogPath)}`, '&');
+		const launchCmd = cmdParts.join(' ');
 
-		// Execute remotely with live output streaming
-		emit(`Running mybench-runner on EC2...`);
-		let lineCount = 0;
+		emit(`Launching mybench-runner on EC2...`);
+		await exec(conn, launchCmd);
 
-		let exitCode: number;
-		try {
-			exitCode = await execStreaming(conn, cmd, (line) => {
-				// Intercept __MB__ structured events — never add them to the stored log
+		// Wait for exec log to appear (CLI opens it immediately on start; up to 10s)
+		const deadline = Date.now() + 10_000;
+		while (Date.now() < deadline) {
+			const r = await exec(conn, `test -f ${shellQuote(execLogPath)} && echo y || echo n`);
+			if (r.stdout.trim() === 'y') break;
+			await new Promise((r) => setTimeout(r, 200));
+		}
+
+		// Tail exec log — drives DB updates + EventEmitter; cap lifetime at 24h to avoid orphans
+		const { promise: tailPromise, cancel: stopTail } = execStreamingCancellable(
+			conn,
+			`timeout 86400 tail -n +1 -F ${shellQuote(execLogPath)}`,
+			(line) => {
 				if (line.startsWith(MB_PREFIX)) {
 					try {
 						const evt = JSON.parse(line.slice(MB_PREFIX.length)) as Record<string, unknown>;
 						handleRunEvent(runId, evt, db, (sid) => { currentStepId = sid; });
+						if (evt.event === 'run_done') stopTail();
 					} catch { /* malformed — ignore */ }
 					return;
 				}
-				if (stdoutAccum.length < LOG_CAP) stdoutAccum += line + '\n';
-				else if (!stdoutAccum.endsWith('[truncated]\n')) stdoutAccum += '[truncated]\n';
 				emit(line);
-				lineCount++;
-				if (lineCount % 50 === 0) flushStdout();
-			});
-		} catch (sshErr) {
-			// SSH connection dropped mid-run — try to reconnect and check if result already exists
-			const sshMsg = sshErr instanceof Error ? sshErr.message : String(sshErr);
-			emit(`[WARN] SSH connection lost: ${sshMsg}. Attempting recovery...`);
-			flushStdout();
-			try { conn.end(); } catch { /* ignore */ }
-			conn = await connectSsh(ec2Server);
-			const checkResult = await exec(conn, `test -f ${shellQuote(remoteResultPath)} && echo exists`);
-			if (checkResult.stdout.trim() === 'exists') {
-				emit(`Result file found on EC2 — mybench-runner completed before connection dropped. Downloading...`);
-				exitCode = 0;
-			} else {
-				throw new Error(`SSH connection dropped and mybench-runner did not produce a result file`);
 			}
-		}
+		);
+		await tailPromise;
 
-		// Final flush of accumulated output
-		flushStdout();
-
-		// Mark any still-pending/running steps as failed if the process exited non-zero
-		if (exitCode !== 0) {
-			emit(`[ERROR] mybench-runner exited with code ${exitCode}`);
+		// Mark any still-pending/running steps as failed if the process failed
+		const runRow = db.prepare('SELECT status FROM benchmark_runs WHERE id = ?').get(runId) as { status: string } | undefined;
+		if (runRow?.status === 'failed') {
 			db.prepare(
 				`UPDATE run_step_results SET status='failed', finished_at=? WHERE run_id=? AND status IN ('pending','running')`
 			).run(now(), runId);
 		}
 
-		// Always try to download and import the result — the runner writes result.json
-		// even when a step fails, so we can show partial results and step logs in the UI.
+		// Reconnect after tail: forcibly closing the tail channel from within its onData callback
+		// can leave the ssh2 connection in a state where subsequent exec() calls return empty stdout.
+		conn.end();
+		conn = await connectSsh(ec2Server);
+
+		// Download and import result
 		const remoteResultExists = (await exec(conn, `test -f ${shellQuote(remoteResultPath)} && echo yes || echo no`)).stdout.trim() === 'yes';
 		if (remoteResultExists) {
 			emit(`Downloading result from EC2...`);
 			await downloadFile(conn, remoteResultPath, localResultPath);
-
 			emit(`Importing result...`);
-			const resultJson = JSON.parse(readFileSync(localResultPath, 'utf8'));
-			importResultIntoRun(runId, resultJson);
-		} else if (exitCode !== 0) {
-			// No result file and non-zero exit — mark as failed now
-			db.prepare(`UPDATE benchmark_runs SET status = 'failed', finished_at = ? WHERE id = ?`).run(
-				now(),
-				runId
-			);
+			importResultIntoRun(runId, JSON.parse(readFileSync(localResultPath, 'utf8')));
+		} else {
+			console.error(`[ec2-executor] Run ${runId}: result file not found at ${remoteResultPath} after run_done`);
+			db.prepare(`UPDATE benchmark_runs SET status='failed', finished_at=? WHERE id=?`).run(now(), runId);
 			completeRun(runId);
 			return;
 		}
 
-		// Ensure finished_at is set (importResultIntoRun writes the value from the result JSON,
-		// but if it's missing for any reason, fall back to now)
-		db.prepare(`
-			UPDATE benchmark_runs SET finished_at = COALESCE(finished_at, ?) WHERE id = ?
-		`).run(now(), runId);
+		db.prepare(`UPDATE benchmark_runs SET finished_at=COALESCE(finished_at, ?) WHERE id=?`).run(now(), runId);
 
-		// Clean up remote files — best-effort, don't fail the run if this errors
+		// Clean up remote plan + result + step log dir; exec log and debug log stay on VPS
 		try {
-			await exec(
-				conn,
-				`rm -f ${shellQuote(remotePlanPath)} ${shellQuote(remoteResultPath)} && rm -rf ${shellQuote(remoteLogDir)}`
-			);
+			await exec(conn, `rm -f ${shellQuote(remotePlanPath)} ${shellQuote(remoteResultPath)} && rm -rf ${shellQuote(remoteLogDir)}`);
 		} catch { /* ignore */ }
 
 		emit(`\n=== EC2 benchmark completed ===`);
 		completeRun(runId);
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
+		console.error(`[ec2-executor] Run ${runId} FATAL ERROR:`, err);
 		emit(`[FATAL ERROR] ${msg}`);
-		flushStdout();
 		db.prepare(
 			`UPDATE run_step_results SET status='failed', finished_at=? WHERE run_id=? AND status IN ('pending','running')`
 		).run(now(), runId);
-		db.prepare(`UPDATE benchmark_runs SET status = 'failed', finished_at = ? WHERE id = ?`).run(
-			now(),
-			runId
-		);
+		db.prepare(`UPDATE benchmark_runs SET status='failed', finished_at=? WHERE id=?`).run(now(), runId);
 		completeRun(runId);
 	} finally {
 		conn?.end();

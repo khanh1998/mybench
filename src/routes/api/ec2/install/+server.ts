@@ -23,6 +23,7 @@ export const POST: RequestHandler = async ({ request }) => {
 		port: port ?? 22, private_key,
 		remote_dir: remote_dir ?? '~/mybench-bench',
 		log_dir: log_dir ?? '/tmp/mybench-logs',
+		cli_log_dir: '/tmp/gocli-logs',
 		vpc: ''
 	};
 

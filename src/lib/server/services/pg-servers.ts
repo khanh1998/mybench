@@ -293,6 +293,7 @@ export async function testPgServerSsh(serverId: number): Promise<{ ok: boolean; 
 		private_key: server.ssh_private_key,
 		remote_dir: '',
 		log_dir: '',
+		cli_log_dir: '/tmp/gocli-logs',
 		vpc: ''
 	};
 

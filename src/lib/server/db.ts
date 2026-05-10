@@ -646,8 +646,9 @@ function migrate(db: Database.Database) {
       user        TEXT    NOT NULL DEFAULT 'ec2-user',
       port        INTEGER NOT NULL DEFAULT 22,
       private_key TEXT    NOT NULL DEFAULT '',
-      remote_dir  TEXT    NOT NULL DEFAULT '~/mybench-bench',
-      log_dir     TEXT    NOT NULL DEFAULT '/tmp/mybench-logs'
+      remote_dir   TEXT    NOT NULL DEFAULT '~/mybench-bench',
+      log_dir      TEXT    NOT NULL DEFAULT '/tmp/mybench-logs',
+      cli_log_dir  TEXT    NOT NULL DEFAULT '/tmp/gocli-logs'
     );
   `);
 
@@ -716,6 +717,27 @@ function migrate(db: Database.Database) {
 
   const ec2ServerCols = (db.prepare(`PRAGMA table_info(ec2_servers)`).all() as { name: string }[]).map(c => c.name);
   if (!ec2ServerCols.includes('vpc')) db.exec(`ALTER TABLE ec2_servers ADD COLUMN vpc TEXT NOT NULL DEFAULT ''`);
+  if (!ec2ServerCols.includes('cli_log_dir')) db.exec(`ALTER TABLE ec2_servers ADD COLUMN cli_log_dir TEXT NOT NULL DEFAULT '/tmp/gocli-logs'`);
+
+  // Add cli_log column for persisting Go CLI stderr (warnings, errors) downloaded after each run
+  const runColsCliLog = (db.prepare(`PRAGMA table_info(benchmark_runs)`).all() as { name: string }[]).map(c => c.name);
+  if (!runColsCliLog.includes('cli_log')) db.exec(`ALTER TABLE benchmark_runs ADD COLUMN cli_log TEXT NOT NULL DEFAULT ''`);
+  const seriesColsCliLog = (db.prepare(`PRAGMA table_info(benchmark_series)`).all() as { name: string }[]).map(c => c.name);
+  if (!seriesColsCliLog.includes('cli_log')) db.exec(`ALTER TABLE benchmark_series ADD COLUMN cli_log TEXT NOT NULL DEFAULT ''`);
+  const suiteColsCliLog = (db.prepare(`PRAGMA table_info(decision_suites)`).all() as { name: string }[]).map(c => c.name);
+  if (!suiteColsCliLog.includes('cli_log')) db.exec(`ALTER TABLE decision_suites ADD COLUMN cli_log TEXT NOT NULL DEFAULT ''`);
+
+  // Add exec_log_path for tail-based SSE streaming (the VPS path of the exec log written by Go CLI)
+  const runColsExecLog = (db.prepare(`PRAGMA table_info(benchmark_runs)`).all() as { name: string }[]).map(c => c.name);
+  if (!runColsExecLog.includes('exec_log_path')) db.exec(`ALTER TABLE benchmark_runs ADD COLUMN exec_log_path TEXT NOT NULL DEFAULT ''`);
+  const seriesColsExecLog = (db.prepare(`PRAGMA table_info(benchmark_series)`).all() as { name: string }[]).map(c => c.name);
+  if (!seriesColsExecLog.includes('exec_log_path')) db.exec(`ALTER TABLE benchmark_series ADD COLUMN exec_log_path TEXT NOT NULL DEFAULT ''`);
+  const suiteColsExecLog = (db.prepare(`PRAGMA table_info(decision_suites)`).all() as { name: string }[]).map(c => c.name);
+  if (!suiteColsExecLog.includes('exec_log_path')) db.exec(`ALTER TABLE decision_suites ADD COLUMN exec_log_path TEXT NOT NULL DEFAULT ''`);
+
+  // Add output_file to run_step_results to store per-step log file path emitted in step_start events
+  const stepResultColsOutputFile = (db.prepare(`PRAGMA table_info(run_step_results)`).all() as { name: string }[]).map(c => c.name);
+  if (!stepResultColsOutputFile.includes('output_file')) db.exec(`ALTER TABLE run_step_results ADD COLUMN output_file TEXT NOT NULL DEFAULT ''`);
 
   // One-time backfill: migrate existing pgbench step scripts (idempotent)
   db.exec(`

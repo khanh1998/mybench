@@ -22,22 +22,37 @@ type RunOpts struct {
 	Plan         *plan.Plan
 	LogDir       string
 	Progress     bool
-	Timestamp    string // formatted timestamp used in file names
-	LogTailLines int    // trailing log lines per step to embed in result (0 = skip)
-	JSONEvents   bool   // emit __MB__-prefixed JSON event lines to stdout
-	RunIndex     int    // 0 for standalone runs; index within a series
+	Timestamp    string   // formatted timestamp used in file names
+	LogTailLines int      // trailing log lines per step to embed in result (0 = skip)
+	JSONEvents   bool     // emit __MB__-prefixed JSON event lines to stdout
+	RunIndex     int      // 0 for standalone runs; index within a series
+	ExecLog      *os.File // exec log file for structured events + progress (written via file I/O)
 }
 
-// emitEvent writes a __MB__-prefixed JSON line to stdout when JSONEvents is enabled.
-// The os.Stdout.Sync() call ensures the line is flushed immediately — stdout may be
-// line-buffered when piped through SSH.
+// emitEvent writes a __MB__-prefixed JSON line to stdout (if JSONEvents) and to ExecLog (if set).
 func (opts *RunOpts) emitEvent(v any) {
-	if !opts.JSONEvents {
-		return
-	}
 	b, _ := json.Marshal(v)
-	fmt.Printf("__MB__%s\n", b)
-	os.Stdout.Sync()
+	line := fmt.Sprintf("__MB__%s\n", b)
+	if opts.JSONEvents {
+		fmt.Print(line)
+		os.Stdout.Sync()
+	}
+	if opts.ExecLog != nil {
+		opts.ExecLog.WriteString(line)
+	}
+}
+
+// logInfo writes a timestamped progress line to ExecLog (and stdout if Progress is set).
+func (opts *RunOpts) logInfo(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	ts := time.Now().UTC().Format(time.RFC3339)
+	line := fmt.Sprintf("%s %s\n", ts, msg)
+	if opts.Progress {
+		fmt.Print(line)
+	}
+	if opts.ExecLog != nil {
+		opts.ExecLog.WriteString(line)
+	}
 }
 
 // Run executes all enabled steps in the plan in order and returns a Result.
@@ -127,15 +142,20 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 			lastPhase = phase
 		}
 
-		// Emit step_start event.
-		opts.emitEvent(map[string]any{"event": "step_start", "run_index": opts.RunIndex, "step_id": step.ID, "position": step.Position, "name": step.Name, "type": step.Type})
+		// Compute the step output log path (used by pgbench/sysbench/sql steps).
+		stepLogPath := filepath.Join(opts.LogDir, fmt.Sprintf("mybench-%s-%s.log", opts.Timestamp, sanitizeName(step.Name)))
+
+		// Emit step_start event; include output_file path for step types that produce one.
+		stepStartEvt := map[string]any{"event": "step_start", "run_index": opts.RunIndex, "step_id": step.ID, "position": step.Position, "name": step.Name, "type": step.Type}
+		if step.Type == "pgbench" || step.Type == "sysbench" || step.Type == "sql" {
+			stepStartEvt["output_file"] = stepLogPath
+		}
+		opts.emitEvent(stepStartEvt)
+		opts.logInfo("[step %d] %q (%s) starting", step.Position, step.Name, step.Type)
 
 		switch step.Type {
 		case "sql":
 			script := plan.SubstituteParams(step.Script, opts.Plan.Params)
-			if opts.Progress {
-				fmt.Printf("[sql] %s\n", step.Name)
-			}
 			var logPath string
 			stepRes.Command, logPath, stepErr = runSQLStep(opts, step.Name, script, step.NoTransaction)
 			stepRes.Log = tailFile(logPath, opts.LogTailLines)
@@ -150,9 +170,7 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 			}
 
 		case "collect":
-			if opts.Progress {
-				fmt.Printf("[collect] %s (phase=%s, duration=%ds)\n", step.Name, phase, step.DurationSecs)
-			}
+			opts.logInfo("[collect] %s (phase=%s, duration=%ds)", step.Name, phase, step.DurationSecs)
 			stepRes.Command = fmt.Sprintf("collect phase=%s duration=%ds interval=%ds", phase, step.DurationSecs, opts.Plan.RunSettings.SnapshotIntervalSeconds)
 			if err := runCollectStep(ctx, opts, step, pool, res.Snapshots, phase); err != nil {
 				// Collect errors are non-fatal (warn and continue).
@@ -160,9 +178,7 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 			}
 
 		case "pg_stat_statements_reset":
-			if opts.Progress {
-				fmt.Printf("[pg_stat_statements reset] %s\n", step.Name)
-			}
+			opts.logInfo("[pg_stat_statements reset] %s", step.Name)
 			stepRes.Command = "pg_stat_statements_reset()"
 			msg, err := runPgStatStatementsResetStep(ctx, opts, pool)
 			if err != nil {
@@ -173,9 +189,7 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 			}
 
 		case "pg_stat_statements_collect":
-			if opts.Progress {
-				fmt.Printf("[pg_stat_statements collect] %s\n", step.Name)
-			}
+			opts.logInfo("[pg_stat_statements collect] %s", step.Name)
 			stepRes.Command = fmt.Sprintf("collect pg_stat_statements for database=%s", opts.Plan.Server.Database)
 			msg, err := runPgStatStatementsCollectStep(ctx, opts, step, pool, res.Snapshots)
 			if err != nil {
@@ -186,9 +200,7 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 			}
 
 		case "pgbench":
-			if opts.Progress {
-				fmt.Printf("[pgbench] %s\n", step.Name)
-			}
+			opts.logInfo("[pgbench] %s", step.Name)
 			benchStartTime = time.Now().UTC()
 			res.Run.BenchStartedAt = benchStartTime.Format(time.RFC3339)
 			pbRes, err := runPgbenchStep(ctx, opts, step, pool, res.Snapshots, opts.Plan.RunSettings.SnapshotIntervalSeconds)
@@ -225,9 +237,7 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 			}
 
 		case "sysbench":
-			if opts.Progress {
-				fmt.Printf("[sysbench] %s\n", step.Name)
-			}
+			opts.logInfo("[sysbench] %s", step.Name)
 			benchStartTime = time.Now().UTC()
 			res.Run.BenchStartedAt = benchStartTime.Format(time.RFC3339)
 			sbRes, err := runSysbenchStep(ctx, opts, step, pool, res.Snapshots, opts.Plan.RunSettings.SnapshotIntervalSeconds)
@@ -266,6 +276,7 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 		stepRes.Status = "completed"
 		stepRes.FinishedAt = time.Now().UTC().Format(time.RFC3339)
 		opts.emitEvent(map[string]any{"event": "step_done", "run_index": opts.RunIndex, "step_id": step.ID, "status": "completed", "exit_code": 0})
+		opts.logInfo("[step %d] %q done", step.Position, step.Name)
 		res.Steps = append(res.Steps, stepRes)
 
 		// Update phase for next step if we just ran a bench step.

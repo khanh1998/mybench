@@ -19,14 +19,28 @@ import (
 	"github.com/khanh1998/mybench/cli/internal/runner"
 )
 
-// emitSeriesEvent writes a __MB__-prefixed JSON event line to stdout when jsonEvents is true.
-func emitSeriesEvent(jsonEvents bool, v any) {
-	if !jsonEvents {
-		return
-	}
+// emitSeriesEvent writes a __MB__-prefixed JSON event line to stdout and to execLog (if non-nil).
+func emitSeriesEvent(jsonEvents bool, execLog *os.File, v any) {
 	b, _ := json.Marshal(v)
-	fmt.Printf("__MB__%s\n", b)
-	os.Stdout.Sync()
+	line := fmt.Sprintf("__MB__%s\n", b)
+	if jsonEvents {
+		fmt.Print(line)
+		os.Stdout.Sync()
+	}
+	if execLog != nil {
+		execLog.WriteString(line)
+	}
+}
+
+// seriesLog writes a timestamped progress line to stdout and to execLog (if non-nil).
+func seriesLog(execLog *os.File, format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	ts := time.Now().UTC().Format(time.RFC3339)
+	line := fmt.Sprintf("%s %s\n", ts, msg)
+	fmt.Print(line)
+	if execLog != nil {
+		execLog.WriteString(line)
+	}
 }
 
 // runSpec holds a parsed --run "plan.json,profileName,output.json" entry.
@@ -55,11 +69,23 @@ func newSeriesCmd() *cobra.Command {
 	var progress bool
 	var logTailLines int
 	var jsonEvents bool
+	var execLogPath string
 
 	cmd := &cobra.Command{
 		Use:   "series",
 		Short: "Run multiple benchmark plans sequentially with a delay between each",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			var execLog *os.File
+			if execLogPath != "" {
+				var err error
+				execLog, err = os.OpenFile(execLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "warning: could not open exec log %q: %v\n", execLogPath, err)
+				} else {
+					defer execLog.Close()
+				}
+			}
+
 			if len(runSpecs) == 0 {
 				return fmt.Errorf("at least one --run spec is required")
 			}
@@ -103,8 +129,8 @@ func newSeriesCmd() *cobra.Command {
 				}
 
 				if i > 0 && delaySecs > 0 {
-					fmt.Printf("[series] Sleeping %ds before run %d/%d...\n", delaySecs, i+1, len(specs))
-					emitSeriesEvent(jsonEvents, map[string]any{"event": "delay", "run_index": i, "seconds": delaySecs})
+					seriesLog(execLog, "[series] Sleeping %ds before run %d/%d...", delaySecs, i+1, len(specs))
+					emitSeriesEvent(jsonEvents, execLog, map[string]any{"event": "delay", "run_index": i, "seconds": delaySecs})
 					select {
 					case <-time.After(time.Duration(delaySecs) * time.Second):
 					case <-ctx.Done():
@@ -116,8 +142,8 @@ func newSeriesCmd() *cobra.Command {
 					}
 				}
 
-				fmt.Printf("\n[series] Run %d/%d — profile: %q\n", i+1, len(specs), spec.profileName)
-				emitSeriesEvent(jsonEvents, map[string]any{"event": "run_start", "run_index": i, "profile": spec.profileName})
+				seriesLog(execLog, "[series] Run %d/%d — profile: %q", i+1, len(specs), spec.profileName)
+				emitSeriesEvent(jsonEvents, execLog, map[string]any{"event": "run_start", "run_index": i, "profile": spec.profileName})
 
 				// Load and configure plan.
 				p, err := plan.ReadPlan(spec.planPath)
@@ -162,6 +188,7 @@ func newSeriesCmd() *cobra.Command {
 					LogTailLines: logTailLines,
 					JSONEvents:   jsonEvents,
 					RunIndex:     i,
+					ExecLog:      execLog,
 				}
 
 				pool, err := pgconn.NewPool(ctx,
@@ -221,11 +248,11 @@ func newSeriesCmd() *cobra.Command {
 			signal.Stop(sigCh)
 			cancel()
 
-			emitSeriesEvent(jsonEvents, map[string]any{"event": "series_done"})
+			emitSeriesEvent(jsonEvents, execLog, map[string]any{"event": "series_done"})
 			if anyFailed {
 				return fmt.Errorf("one or more runs in the series failed")
 			}
-			fmt.Printf("\n[series] All %d runs completed.\n", len(specs))
+			seriesLog(execLog, "[series] All %d runs completed.", len(specs))
 			return nil
 		},
 	}
@@ -236,6 +263,7 @@ func newSeriesCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&progress, "progress", false, "tee subprocess output to terminal")
 	cmd.Flags().IntVar(&logTailLines, "log-tail-lines", 100, "trailing log lines per step in result (0 to disable)")
 	cmd.Flags().BoolVar(&jsonEvents, "json-events", false, "emit __MB__-prefixed JSON event lines to stdout for structured progress tracking")
+	cmd.Flags().StringVar(&execLogPath, "exec-log", "", "path to write execution log (structured events + progress); written directly via file I/O")
 
 	return cmd
 }

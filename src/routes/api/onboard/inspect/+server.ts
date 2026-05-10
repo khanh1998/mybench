@@ -16,7 +16,7 @@ export const POST: RequestHandler = async ({ request }) => {
 	if (!private_key) throw error(400, 'private_key is required');
 	if (!role || !['client', 'db'].includes(role)) throw error(400, 'role must be client or db');
 
-	const server = { id: 0, name: '', host, user: user ?? 'root', port: 22, private_key, remote_dir: '~/mybench-bench', log_dir: '/tmp/mybench-logs', vpc: '' };
+	const server = { id: 0, name: '', host, user: user ?? 'root', port: 22, private_key, remote_dir: '~/mybench-bench', log_dir: '/tmp/mybench-logs', cli_log_dir: '/tmp/gocli-logs', vpc: '' };
 
 	let conn;
 	try {
