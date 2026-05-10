@@ -177,6 +177,60 @@
   let copyFlashY = $state(0);
   let copyFlashTimer: ReturnType<typeof setTimeout> | null = null;
 
+  let headerCopied = $state(false);
+  let headerCopyTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function colorToRgba(color: string, alpha: number): string {
+    if (color.startsWith('#')) {
+      const r = parseInt(color.slice(1, 3), 16);
+      const g = parseInt(color.slice(3, 5), 16);
+      const b = parseInt(color.slice(5, 7), 16);
+      return `rgba(${r},${g},${b},${alpha})`;
+    }
+    const hsl = color.match(/hsl\(\s*([\d.]+)\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%/);
+    if (hsl) {
+      const h = +hsl[1], s = +hsl[2] / 100, l = +hsl[3] / 100;
+      const c = (1 - Math.abs(2 * l - 1)) * s;
+      const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+      const m = l - c / 2;
+      const seg = h < 60 ? [c,x,0] : h < 120 ? [x,c,0] : h < 180 ? [0,c,x] : h < 240 ? [0,x,c] : h < 300 ? [x,0,c] : [c,0,x];
+      const [r, g, b] = seg.map(v => Math.round((v + m) * 255));
+      return `rgba(${r},${g},${b},${alpha})`;
+    }
+    return color;
+  }
+
+  function copyChartJson() {
+    const config = {
+      type: 'line',
+      data: {
+        datasets: series.map(s => ({
+          label: s.label,
+          data: (() => {
+            const m = new Map<number, number>();
+            for (const p of s.points) m.set(+(p.t / 1000).toFixed(1), +p.v.toFixed(4));
+            return [...m.entries()].map(([x, y]) => ({ x, y }));
+          })(),
+          borderColor: colorToRgba(s.color, 1),
+          backgroundColor: colorToRgba(s.color, 0.13),
+          tension: 0.2,
+          pointRadius: 2,
+          fill: false,
+        }))
+      },
+      options: {
+        interaction: { mode: 'index', intersect: false },
+        scales: {
+          x: { type: 'linear', title: { display: true, text: 'time (s)' } }
+        }
+      }
+    };
+    navigator.clipboard.writeText(JSON.stringify(config, null, 2));
+    headerCopied = true;
+    if (headerCopyTimer) clearTimeout(headerCopyTimer);
+    headerCopyTimer = setTimeout(() => { headerCopied = false; }, 1600);
+  }
+
   function onChartClick(e: MouseEvent) {
     if (hoveredTime === null || tooltipRows.length === 0) return;
     const lines = [fmtTimestamp(hoveredTime), ...tooltipRows.map(r => `${r.label}: ${fmtVal(r.v)}`)];
@@ -209,6 +263,15 @@
         </button>
       {/each}
     </span>
+    <button type="button" class="copy-btn" class:copied={headerCopied} title="Copy as Chart.js JSON" onclick={copyChartJson}>
+      {#if headerCopied}
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0z"/></svg>
+        Copied
+      {:else}
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"/><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"/></svg>
+        Copy
+      {/if}
+    </button>
   </div>
 
   {#if series.length > 0 && visibleSeries.length === 0}
@@ -314,6 +377,15 @@
   .chart-wrap { border: 1px solid #e8e8e8; border-radius: 6px; padding: 10px 12px; background: #fff; position: relative; }
   .chart-header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 6px; flex-wrap: wrap; }
   .chart-title { font-size: 12px; font-weight: 700; color: #333; font-family: monospace; }
+  .copy-btn {
+    display: inline-flex; align-items: center; gap: 4px;
+    margin-left: auto; flex-shrink: 0;
+    font-size: 11px; color: #888;
+    background: none; border: 1px solid #e3e3e3; border-radius: 4px;
+    padding: 2px 7px; cursor: pointer; line-height: 1.4;
+  }
+  .copy-btn:hover { color: #333; border-color: #bbb; background: #f7f7f7; }
+  .copy-btn.copied { color: #16a34a; border-color: #86efac; background: #f0fdf4; }
   .chart-legend { display: flex; gap: 10px; flex-wrap: wrap; }
   .leg-item {
     display: inline-flex;

@@ -207,6 +207,62 @@
   });
 
   const hoveredTotal = $derived(tooltipRows.reduce((s, r) => s + r.v, 0));
+
+  let headerCopied = $state(false);
+  let headerCopyTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function colorToRgba(color: string, alpha: number): string {
+    if (color.startsWith('#')) {
+      const r = parseInt(color.slice(1, 3), 16);
+      const g = parseInt(color.slice(3, 5), 16);
+      const b = parseInt(color.slice(5, 7), 16);
+      return `rgba(${r},${g},${b},${alpha})`;
+    }
+    const hsl = color.match(/hsl\(\s*([\d.]+)\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%/);
+    if (hsl) {
+      const h = +hsl[1], s = +hsl[2] / 100, l = +hsl[3] / 100;
+      const c = (1 - Math.abs(2 * l - 1)) * s;
+      const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+      const m = l - c / 2;
+      const seg = h < 60 ? [c,x,0] : h < 120 ? [x,c,0] : h < 180 ? [0,c,x] : h < 240 ? [0,x,c] : h < 300 ? [x,0,c] : [c,0,x];
+      const [r, g, b] = seg.map(v => Math.round((v + m) * 255));
+      return `rgba(${r},${g},${b},${alpha})`;
+    }
+    return color;
+  }
+
+  function copyChartJson() {
+    const times = allTimes;
+    const config = {
+      type: 'line',
+      data: {
+        labels: times.map(t => +(t / 1000).toFixed(1)),
+        datasets: visibleSeries.map((s, i) => ({
+          label: s.label,
+          data: times.map((_, j) => {
+            const v = (stacked.tops[i]?.[j] ?? 0) - (stacked.bottoms[i]?.[j] ?? 0);
+            return +v.toFixed(4);
+          }),
+          backgroundColor: colorToRgba(s.color, 0.7),
+          borderColor: colorToRgba(s.color, 1),
+          fill: true,
+          tension: 0.2,
+          pointRadius: 0,
+        }))
+      },
+      options: {
+        interaction: { mode: 'index', intersect: false },
+        scales: {
+          x: { title: { display: true, text: 'time (s)' } },
+          y: { stacked: true }
+        }
+      }
+    };
+    navigator.clipboard.writeText(JSON.stringify(config, null, 2));
+    headerCopied = true;
+    if (headerCopyTimer) clearTimeout(headerCopyTimer);
+    headerCopyTimer = setTimeout(() => { headerCopied = false; }, 1600);
+  }
 </script>
 
 <div class="chart-wrap" bind:this={wrapperEl}>
@@ -229,12 +285,23 @@
         {/if}
       {/each}
     </span>
-    {#if rawRows.length > 0 && showDetailToggle && granularity === undefined}
-      <div class="gran-toggle">
-        <button class:active={tooltipGranularity === 'detail'} onclick={() => tooltipGranularity = 'detail'}>Detail</button>
-        <button class:active={tooltipGranularity === 'broad'} onclick={() => tooltipGranularity = 'broad'}>Broad</button>
-      </div>
-    {/if}
+    <div class="header-right">
+      {#if rawRows.length > 0 && showDetailToggle && granularity === undefined}
+        <div class="gran-toggle">
+          <button class:active={tooltipGranularity === 'detail'} onclick={() => tooltipGranularity = 'detail'}>Detail</button>
+          <button class:active={tooltipGranularity === 'broad'} onclick={() => tooltipGranularity = 'broad'}>Broad</button>
+        </div>
+      {/if}
+      <button type="button" class="copy-btn" class:copied={headerCopied} title="Copy as Chart.js JSON" onclick={copyChartJson}>
+        {#if headerCopied}
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0z"/></svg>
+          Copied
+        {:else}
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"/><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"/></svg>
+          Copy
+        {/if}
+      </button>
+    </div>
   </div>
 
   {#if !hasData}
@@ -333,7 +400,16 @@
   .leg-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .no-data { font-size: 12px; color: #aaa; padding: 20px 0; text-align: center; }
 
-  .gran-toggle { display: flex; border: 1px solid #e0e0e0; border-radius: 4px; overflow: hidden; margin-left: auto; flex-shrink: 0; }
+  .header-right { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-shrink: 0; }
+  .gran-toggle { display: flex; border: 1px solid #e0e0e0; border-radius: 4px; overflow: hidden; }
+  .copy-btn {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 11px; color: #888;
+    background: none; border: 1px solid #e3e3e3; border-radius: 4px;
+    padding: 2px 7px; cursor: pointer; line-height: 1.4; flex-shrink: 0;
+  }
+  .copy-btn:hover { color: #333; border-color: #bbb; background: #f7f7f7; }
+  .copy-btn.copied { color: #16a34a; border-color: #86efac; background: #f0fdf4; }
   .gran-toggle button { background: none; border: none; padding: 2px 9px; font-size: 11px; cursor: pointer; color: #666; }
   .gran-toggle button:hover { background: #f5f5f5; }
   .gran-toggle button.active { background: #0066cc; color: #fff; }
