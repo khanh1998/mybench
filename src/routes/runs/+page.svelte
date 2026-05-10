@@ -104,8 +104,8 @@
   }
 
   async function deleteOne(kind: string, id: number) {
-    if (kind === 'suite') await fetch(`/api/suites/${id}`, { method: 'DELETE' });
-    else if (kind === 'series') await fetch(`/api/series/${id}`, { method: 'DELETE' });
+    if (kind === 'suite') await fetch(`/api/suites/${id}?action=delete`, { method: 'DELETE' });
+    else if (kind === 'series') await fetch(`/api/series/${id}?action=delete`, { method: 'DELETE' });
     else await fetch(`/api/runs/${id}?action=delete`, { method: 'DELETE' });
   }
 
