@@ -160,12 +160,24 @@
     return Array.from(map.entries()).map(([name, value]) => ({ name, value }));
   }
 
-  function parseWeightField(raw: string): { weight: number; weight_expr: string | null } {
+  function parseWeightField(raw: string): { weight: number; weight_expr: string | null; error?: string } {
     const trimmed = raw.trim();
+    if (trimmed === '') return { weight: 0, weight_expr: '' };
+    if (/^\d+$/.test(trimmed)) return { weight: Math.max(0, parseInt(trimmed, 10)), weight_expr: null };
     if (/^\{\{[\w]+\}\}$/.test(trimmed)) return { weight: 1, weight_expr: trimmed };
-    const n = parseInt(trimmed, 10);
-    return { weight: isNaN(n) ? 0 : Math.max(0, n), weight_expr: null };
+    return { weight: 0, weight_expr: trimmed, error: 'Must be a number or {{PARAM_NAME}}' };
   }
+
+  function parsePerfDurationField(raw: string): { error?: string } {
+    const trimmed = raw.trim();
+    if (trimmed === '') return {};
+    if (/^\d+$/.test(trimmed)) return {};
+    if (/^\{\{[\w]+\}\}$/.test(trimmed)) return {};
+    return { error: 'Must be a number or {{PARAM_NAME}}' };
+  }
+
+  let scriptWeightErrors = $state<Record<number, string>>({});
+  let perfDurationErrors = $state<Record<number, string>>({});
 
   // All available profiles for series: decision profiles use negative IDs to distinguish source
   const allSeriesAvailableProfiles = $derived([
@@ -245,6 +257,8 @@
       const parts = [];
       if (validationErrors.length > 0) parts.push(`${validationErrors.length} undefined placeholder(s)`);
       if (weightErrors.length > 0) parts.push(`${weightErrors.length} active script weight issue(s)`);
+      if (hasScriptWeightErrors) parts.push('invalid script weight expressions');
+      if (hasPerfDurationErrors) parts.push('invalid perf duration expressions');
       msg = `Cannot run: ${parts.join(', ')}. Check validation.`;
       return;
     }
@@ -348,10 +362,19 @@
     return base.map(p => overrideMap.has(p.name) ? { ...p, value: overrideMap.get(p.name)! } : p);
   });
 
+  const effectiveDefaultParams = $derived(
+    mergeParamsHelper(
+      decisionParams.map(p => ({ name: p.name, value: p.value })),
+      design?.params.map((p: Param) => ({ name: p.name, value: p.value })) ?? []
+    )
+  );
+
   const weightErrors: WeightError[] = $derived(
     design ? validateScriptWeights(design, previewParams()) : []
   );
-  const isValid = $derived(validationErrors.length === 0 && weightErrors.length === 0);
+  const hasScriptWeightErrors = $derived(Object.keys(scriptWeightErrors).length > 0);
+  const hasPerfDurationErrors = $derived(Object.keys(perfDurationErrors).length > 0);
+  const isValid = $derived(validationErrors.length === 0 && weightErrors.length === 0 && !hasScriptWeightErrors && !hasPerfDurationErrors);
 
   function stepTypeLabel(type: DesignStepType): string {
     return STEP_TYPE_OPTIONS.find((option) => option.value === type)?.label ?? type;
@@ -359,7 +382,14 @@
 
   async function save() {
     if (!design) return;
-    if (!isValid) {
+    if (hasScriptWeightErrors || hasPerfDurationErrors) {
+      const lines: string[] = ['Cannot save — please fix these errors first:'];
+      if (hasScriptWeightErrors) lines.push('· Invalid script weight(s): must be a number or {{PARAM_NAME}}');
+      if (hasPerfDurationErrors) lines.push('· Invalid perf duration(s): must be a number or {{PARAM_NAME}}');
+      alert(lines.join('\n'));
+      return;
+    }
+    if (validationErrors.length > 0 || weightErrors.length > 0) {
       const lines: string[] = [];
       if (validationErrors.length > 0) {
         lines.push(`${validationErrors.length} undefined placeholder(s):`);
@@ -374,10 +404,20 @@
       if (!confirm(lines.join('\n'))) return;
     }
     saving = true;
+    const designToSave = {
+      ...design,
+      steps: (design.steps ?? []).map((s: Step) => ({
+        ...s,
+        pgbench_scripts: (s.pgbench_scripts ?? []).map((ps: PgbenchScript) => ({
+          ...ps,
+          weight_expr: (ps.weight_expr && /^\{\{[\w]+\}\}$/.test(ps.weight_expr)) ? ps.weight_expr : null
+        }))
+      }))
+    };
     await fetch(`/api/designs/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(design)
+      body: JSON.stringify(designToSave)
     });
     saving = false;
     msg = 'Saved!';
@@ -581,7 +621,7 @@
       class:warn={!isValid}
       class:active={showValidation}
       title="Validation status"
-    >{isValid ? '✓ Valid' : `⚠ ${validationErrors.length + weightErrors.length} issue(s)`}</button>
+    >{isValid ? '✓ Valid' : `⚠ ${validationErrors.length + weightErrors.length + Object.keys(scriptWeightErrors).length + Object.keys(perfDurationErrors).length} issue(s)`}</button>
     <button onclick={save} disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
     <button class="primary" onclick={openRunModal} disabled={startingRun}>
       {startingRun ? 'Starting…' : '▶ Run'}
@@ -606,6 +646,18 @@
       <div class="validation-title" style={validationErrors.length > 0 ? 'margin-top:8px' : ''}>⚠ Active script weight exceeds 100:</div>
       {#each weightErrors as e}
         <div class="validation-item">· "{e.step}": active total weight <strong>{e.totalWeight}</strong> (max 100)</div>
+      {/each}
+    {/if}
+    {#if hasScriptWeightErrors}
+      <div class="validation-title" style={(validationErrors.length > 0 || weightErrors.length > 0) ? 'margin-top:8px' : ''}>⚠ Invalid script weight:</div>
+      {#each Object.entries(scriptWeightErrors) as [sid, err]}
+        <div class="validation-item">· script #{sid}: {err}</div>
+      {/each}
+    {/if}
+    {#if hasPerfDurationErrors}
+      <div class="validation-title" style={(validationErrors.length > 0 || weightErrors.length > 0 || hasScriptWeightErrors) ? 'margin-top:8px' : ''}>⚠ Invalid perf duration:</div>
+      {#each Object.entries(perfDurationErrors) as [sid, err]}
+        <div class="validation-item">· step #{sid}: {err}</div>
       {/each}
     {/if}
   </div>
@@ -1121,10 +1173,25 @@
             <label class="perf-duration-label" title={'Seconds perf should run on the DB host; enter a number or a param like {{DURATION_SECS}}'}>
               Perf duration
               <input
-                bind:value={selectedStep.perf_duration}
+                value={selectedStep.perf_duration}
+                oninput={(e) => {
+                  const val = (e.currentTarget as HTMLInputElement).value;
+                  selectedStep!.perf_duration = val;
+                  const result = parsePerfDurationField(val);
+                  if (result.error) perfDurationErrors[selectedStep!.id] = result.error;
+                  else delete perfDurationErrors[selectedStep!.id];
+                }}
                 placeholder={'180 or {{DURATION_SECS}}'}
                 spellcheck="false"
+                class:weight-input-error={!!perfDurationErrors[selectedStep.id]}
               />
+              {#if perfDurationErrors[selectedStep.id]}
+                <span class="weight-error-badge" title={perfDurationErrors[selectedStep.id]}>!</span>
+              {:else if selectedStep.perf_duration && /^\{\{[\w]+\}\}$/.test(selectedStep.perf_duration.trim())}
+                {@const paramName = selectedStep.perf_duration.trim().slice(2, -2)}
+                {@const resolved = effectiveDefaultParams.find(p => p.name === paramName)?.value ?? '?'}
+                <span class="weight-preview" title="Resolved value using default params">→{resolved}s</span>
+              {/if}
               <span>s</span>
             </label>
           {/if}
@@ -1163,8 +1230,7 @@
       {:else if selectedStep.type === 'pgbench'}
         {@const scripts = selectedStep.pgbench_scripts ?? []}
         {@const runnableScripts = getRunnablePgbenchScripts(scripts)}
-        {@const defaultParams = design?.params.map((p: Param) => ({ name: p.name, value: p.value })) ?? []}
-        {@const totalWeight = runnableScripts.reduce((sum, ps) => sum + resolveScriptWeight(ps, defaultParams), 0)}
+        {@const totalWeight = runnableScripts.reduce((sum, ps) => sum + resolveScriptWeight(ps, effectiveDefaultParams), 0)}
         <div class="pgbench-split">
           <div class="scripts-panel">
             <div class="scripts-list">
@@ -1172,7 +1238,7 @@
                 <div
                   class="script-item"
                   class:script-selected={selectedScriptIdx === i}
-                  class:script-ignored={ps.weight_expr == null ? (ps.weight ?? 1) <= 0 : resolveScriptWeight(ps, defaultParams) <= 0}
+                  class:script-ignored={ps.weight_expr == null ? (ps.weight ?? 1) <= 0 : resolveScriptWeight(ps, effectiveDefaultParams) <= 0}
                   role="button"
                   tabindex="0"
                   onclick={() => selectedScriptIdx = i}
@@ -1201,19 +1267,24 @@
                         const parsed = parseWeightField((e.currentTarget as HTMLInputElement).value);
                         ps.weight = parsed.weight;
                         ps.weight_expr = parsed.weight_expr;
+                        if (parsed.error) scriptWeightErrors[ps.id] = parsed.error;
+                        else delete scriptWeightErrors[ps.id];
                       }}
+                      class:weight-input-error={!!scriptWeightErrors[ps.id]}
                       onclick={(e) => e.stopPropagation()}
                       placeholder="0–100 or &#123;&#123;PARAM&#125;&#125;"
                       title="Enter a number (0–100) or a parameter expression like &#123;&#123;WEIGHT_WRITE&#125;&#125;"
                     />
-                    {#if ps.weight_expr}
-                      {@const resolved = resolveScriptWeight(ps, defaultParams)}
+                    {#if scriptWeightErrors[ps.id]}
+                      <span class="weight-error-badge" title={scriptWeightErrors[ps.id]}>!</span>
+                    {:else if ps.weight_expr}
+                      {@const resolved = resolveScriptWeight(ps, effectiveDefaultParams)}
                       <span class="weight-preview" title="Resolved value using default params">→{resolved}</span>
-                    {/if}
-                    {#if ps.weight_expr == null && (ps.weight ?? 1) <= 0}
+                      {#if resolved <= 0}
+                        <span class="script-ignored-tag" title="Resolves to 0 — this script will be skipped">ignored</span>
+                      {/if}
+                    {:else if (ps.weight ?? 1) <= 0}
                       <span class="script-ignored-tag" title="Scripts with weight 0 are skipped when this step runs">ignored</span>
-                    {:else if ps.weight_expr != null && resolveScriptWeight(ps, defaultParams) <= 0}
-                      <span class="script-ignored-tag" title="Resolves to 0 — this script will be skipped">ignored</span>
                     {/if}
                     <button
                       class="icon-btn danger-icon"
@@ -1925,6 +1996,17 @@
     border-radius: 3px;
     text-align: center;
     flex-shrink: 0;
+  }
+  .weight-input-error {
+    border-color: #f38ba8 !important;
+    color: #f38ba8;
+  }
+  .weight-error-badge {
+    color: #f38ba8;
+    font-size: 10px;
+    font-weight: 700;
+    flex-shrink: 0;
+    cursor: default;
   }
   .weight-preview {
     color: #a6e3a1;

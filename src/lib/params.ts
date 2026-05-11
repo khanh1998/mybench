@@ -29,7 +29,7 @@ export interface DesignLike {
 }
 
 export function getRunnablePgbenchScripts<T extends { weight?: number; weight_expr?: string | null }>(scripts: T[]): T[] {
-	return scripts.filter((script) => (script.weight_expr != null || (script.weight ?? 1) > 0));
+	return scripts.filter((script) => (script.weight_expr ? true : (script.weight ?? 1) > 0));
 }
 
 /**
