@@ -473,23 +473,6 @@
     <span class="compare-section-note">{runs.length} runs</span>
   </div>
 
-  {#if summaryRows.length > 0}
-    <div class="summary-compare-grid">
-      {#each summaryRows as row}
-        <div class="summary-compare-card">
-          <div class="summary-compare-label">{row.label}</div>
-          <div class="summary-compare-values">
-            {#each runs as run}
-              <div class="summary-compare-row">
-                <span class="summary-run-label" style={`color:${run.color}`}>{run.label}</span>
-                <strong>{formatValue(row.values[run.id], row.kind)}</strong>
-              </div>
-            {/each}
-          </div>
-        </div>
-      {/each}
-    </div>
-  {/if}
 
   {#if isHostProcessesSection ? (processOptions.length > 0 || seriesOptions.length > 1) : (metricOptions.length > 0 || seriesOptions.length > 1)}
     {#if !isHostProcessesSection && metricGroups.length > 1}
@@ -651,45 +634,6 @@
     font-size: 12px;
   }
 
-  .summary-compare-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-    gap: 10px;
-  }
-
-  .summary-compare-card {
-    border: 1px solid #e6ebf2;
-    border-radius: 12px;
-    padding: 12px;
-    background: linear-gradient(180deg, #ffffff 0%, #f9fbfd 100%);
-  }
-
-  .summary-compare-label {
-    font-size: 11px;
-    color: #666;
-    text-transform: uppercase;
-    font-weight: 700;
-    margin-bottom: 8px;
-  }
-
-  .summary-compare-values {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  .summary-compare-row {
-    display: flex;
-    justify-content: space-between;
-    gap: 12px;
-    align-items: baseline;
-    font-size: 13px;
-  }
-
-  .summary-run-label {
-    font-weight: 700;
-  }
-
   .chart-group-tabs {
     display: flex;
     gap: 2px;
@@ -799,9 +743,4 @@
     color: #6b7280;
   }
 
-  @media (max-width: 720px) {
-    .summary-compare-grid {
-      grid-template-columns: 1fr;
-    }
-  }
 </style>
