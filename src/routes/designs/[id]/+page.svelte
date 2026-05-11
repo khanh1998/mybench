@@ -51,12 +51,16 @@
   interface Ec2Server { id: number; name: string; host: string; user: string; port: number; vpc?: string; }
   interface Run { id: number; status: string; tps: number|null; latency_avg_ms: number|null; started_at: string; profile_name: string; name: string; }
   interface Profile { id: number; design_id: number; name: string; values: { param_name: string; value: string }[]; }
+  interface DecisionParam { id: number; decision_id: number; position: number; name: string; value: string; }
+  interface DecisionProfile { id: number; decision_id: number; name: string; values: { param_name: string; value: string }[]; }
 
   let design = $state<Design | null>(null);
   let servers = $state<Server[]>([]);
   let ec2Servers = $state<Ec2Server[]>([]);
   let runs = $state<Run[]>([]);
   let profiles = $state<Profile[]>([]);
+  let decisionParams = $state<DecisionParam[]>([]);
+  let decisionProfiles = $state<DecisionProfile[]>([]);
   let selectedStepId = $state<number|null>(null);
   let selectedScriptIdx = $state(0);
   let saving = $state(false);
@@ -91,7 +95,7 @@
   let runServer = $state<number|null>(null);
   let runDatabase = $state('');
   let runSnapshotInterval = $state(30);
-  let runProfile = $state<number|null>(null);
+  let runProfile = $state<string|null>(null); // 'decision:ID' | 'design:ID' | null
   let runName = $state('');
   let runEc2ServerId = $state<number|null>(null);
   let runUsePrivateIp = $state(false);
@@ -141,9 +145,20 @@
     ec2Servers = [...((data.ec2Servers ?? []) as Ec2Server[])];
     runs = [...((data.runs ?? []) as Run[])];
     profiles = [...((data.profiles ?? []) as Profile[])];
+    decisionParams = [...((data.decisionParams ?? []) as DecisionParam[])];
+    decisionProfiles = [...((data.decisionProfiles ?? []) as DecisionProfile[])];
     selectedStepId = nextDesign?.steps?.find(s => s.enabled)?.id ?? nextDesign?.steps?.[0]?.id ?? null;
     selectedScriptIdx = 0;
   });
+
+  function mergeParamsHelper(
+    base: { name: string; value: string }[],
+    override: { name: string; value: string }[]
+  ): { name: string; value: string }[] {
+    const map = new Map(base.map(p => [p.name, p.value]));
+    for (const p of override) map.set(p.name, p.value);
+    return Array.from(map.entries()).map(([name, value]) => ({ name, value }));
+  }
 
   function parseWeightField(raw: string): { weight: number; weight_expr: string | null } {
     const trimmed = raw.trim();
@@ -152,16 +167,27 @@
     return { weight: isNaN(n) ? 0 : Math.max(0, n), weight_expr: null };
   }
 
+  // All available profiles for series: decision profiles use negative IDs to distinguish source
+  const allSeriesAvailableProfiles = $derived([
+    ...decisionProfiles.map(p => ({ id: -p.id, name: `${p.name} (decision)` })),
+    ...profiles.map(p => ({ id: p.id, name: p.name }))
+  ]);
+
   function openSeriesModal() {
     if (!design) return;
-    if (profiles.length < 2) {
+    const totalProfiles = decisionProfiles.length + profiles.length;
+    if (totalProfiles < 2) {
       msg = 'Series requires at least 2 profiles.';
       setTimeout(() => msg = '', 3000);
       return;
     }
     seriesName = '';
     seriesDelay = 0;
-    seriesProfiles = profiles.map(p => p.id);
+    // Pre-populate with all available profiles: design first, then decision
+    seriesProfiles = [
+      ...profiles.map(p => p.id),
+      ...decisionProfiles.map(p => -p.id)
+    ];
     seriesEc2ServerId = null;
     seriesServer = design.server_id;
     seriesDatabase = design.database;
@@ -233,17 +259,22 @@
   }
 
   function openProfileForm(profile?: Profile) {
+    // Effective params = decision params + design overrides (design wins)
+    const effectiveParams = mergeParamsHelper(
+      decisionParams.map(p => ({ name: p.name, value: p.value })),
+      design?.params.map((p: Param) => ({ name: p.name, value: p.value })) ?? []
+    );
     if (profile) {
       editingProfileId = profile.id;
       profileFormName = profile.name;
-      profileFormValues = design?.params.map(p => {
+      profileFormValues = effectiveParams.map(p => {
         const ov = profile.values.find(v => v.param_name === p.name);
         return { param_name: p.name, value: ov ? ov.value : p.value };
-      }) ?? [];
+      });
     } else {
       editingProfileId = null;
       profileFormName = '';
-      profileFormValues = design?.params.map(p => ({ param_name: p.name, value: p.value })) ?? [];
+      profileFormValues = effectiveParams.map(p => ({ param_name: p.name, value: p.value }));
     }
     showProfileForm = true;
   }
@@ -280,21 +311,40 @@
     (design as Design | null)?.steps.find((s: Step) => s.id === selectedStepId) ?? null
   );
 
-  const paramNames: string[] = $derived(
-    (design as Design | null)?.params?.map((p: Param) => p.name).filter(Boolean) ?? []
-  );
+  // Effective param names: union of decision params + design params (design overrides on same name)
+  const paramNames: string[] = $derived((() => {
+    const designNames = new Set((design as Design | null)?.params?.map((p: Param) => p.name).filter(Boolean) ?? []);
+    const inherited = decisionParams.map(p => p.name).filter(n => !designNames.has(n));
+    return [...inherited, ...Array.from(designNames)];
+  })());
 
   const validationErrors: ValidationError[] = $derived(
-    design ? validateDesignParams(design) : []
+    design ? validateDesignParams({
+      ...design,
+      params: mergeParamsHelper(
+        decisionParams.map(p => ({ name: p.name, value: p.value })),
+        (design as Design).params.map((p: Param) => ({ name: p.name, value: p.value }))
+      )
+    }) : []
   );
 
-  // Resolved params for weight preview and validation: merges default params with selected profile overrides
+  // Resolved params: merges decision + design params, then applies selected profile overrides
   const previewParams = $derived((): { name: string; value: string }[] => {
     if (!design) return [];
-    const base = design.params.map((p: Param) => ({ name: p.name, value: p.value }));
-    const profile = runProfile ? profiles.find(p => p.id === runProfile) : null;
-    if (!profile) return base;
-    const overrideMap = new Map(profile.values.map((v: { param_name: string; value: string }) => [v.param_name, v.value]));
+    const base = mergeParamsHelper(
+      decisionParams.map(p => ({ name: p.name, value: p.value })),
+      (design as Design).params.map((p: Param) => ({ name: p.name, value: p.value }))
+    );
+    if (!runProfile) return base;
+    let profileValues: { param_name: string; value: string }[] = [];
+    if (runProfile.startsWith('decision:')) {
+      const pid = Number(runProfile.slice(9));
+      profileValues = decisionProfiles.find(p => p.id === pid)?.values ?? [];
+    } else if (runProfile.startsWith('design:')) {
+      const pid = Number(runProfile.slice(7));
+      profileValues = profiles.find(p => p.id === pid)?.values ?? [];
+    }
+    const overrideMap = new Map(profileValues.map(v => [v.param_name, v.value]));
     return base.map(p => overrideMap.has(p.name) ? { ...p, value: overrideMap.get(p.name)! } : p);
   });
 
@@ -338,12 +388,19 @@
     if (!design) return;
     showRunModal = false;
     startingRun = true;
+    let profileId: number | undefined;
+    let profileSource: 'decision' | 'design' | undefined;
+    if (runProfile) {
+      if (runProfile.startsWith('decision:')) { profileId = Number(runProfile.slice(9)); profileSource = 'decision'; }
+      else if (runProfile.startsWith('design:')) { profileId = Number(runProfile.slice(7)); profileSource = 'design'; }
+    }
     const body: Record<string, unknown> = {
       design_id: id,
       server_id: runServer,
       database: runDatabase,
       snapshot_interval_seconds: runSnapshotInterval,
-      profile_id: runProfile ?? undefined,
+      profile_id: profileId,
+      profile_source: profileSource,
       name: runName || undefined,
       ec2_server_id: runEc2ServerId
     };
@@ -611,14 +668,25 @@
         <label for="run-name">Run name <span style="color:#aaa;font-weight:400">(optional)</span></label>
         <input id="run-name" bind:value={runName} placeholder="optional name" />
       </div>
-      {#if profiles.length > 0}
+      {#if decisionProfiles.length > 0 || profiles.length > 0}
         <div class="form-group">
           <label for="run-profile">Profile</label>
           <select id="run-profile" bind:value={runProfile}>
             <option value={null}>— no profile —</option>
-            {#each profiles as p}
-              <option value={p.id}>{p.name}</option>
-            {/each}
+            {#if decisionProfiles.length > 0}
+              <optgroup label="Decision Profiles">
+                {#each decisionProfiles as p}
+                  <option value={`decision:${p.id}`}>{p.name}</option>
+                {/each}
+              </optgroup>
+            {/if}
+            {#if profiles.length > 0}
+              <optgroup label="Design Profiles">
+                {#each profiles as p}
+                  <option value={`design:${p.id}`}>{p.name}</option>
+                {/each}
+              </optgroup>
+            {/if}
           </select>
         </div>
       {/if}
@@ -742,7 +810,7 @@
         <label>Run order <span style="color:#aaa;font-weight:400">(drag or use arrows)</span></label>
         <div class="series-profiles-list">
           {#each seriesProfiles as pid, i}
-            {@const prof = profiles.find(p => p.id === pid)}
+            {@const prof = allSeriesAvailableProfiles.find(p => p.id === pid)}
             {#if prof}
               <div class="series-profile-row">
                 <span class="series-profile-num">{i + 1}</span>
@@ -755,13 +823,24 @@
               </div>
             {/if}
           {/each}
-          {#if seriesProfiles.length < profiles.length}
+          {#if seriesProfiles.length < allSeriesAvailableProfiles.length}
             <div class="series-add-profile">
-              <select onchange={(e) => { const v = Number((e.currentTarget as HTMLSelectElement).value); if (v) addSeriesProfile(v); (e.currentTarget as HTMLSelectElement).value = ''; }}>
+              <select onchange={(e) => { const v = Number((e.currentTarget as HTMLSelectElement).value); if (!isNaN(v)) addSeriesProfile(v); (e.currentTarget as HTMLSelectElement).value = ''; }}>
                 <option value="">+ Add profile…</option>
-                {#each profiles.filter(p => !seriesProfiles.includes(p.id)) as p}
-                  <option value={p.id}>{p.name}</option>
-                {/each}
+                {#if decisionProfiles.filter(p => !seriesProfiles.includes(-p.id)).length > 0}
+                  <optgroup label="Decision Profiles">
+                    {#each decisionProfiles.filter(p => !seriesProfiles.includes(-p.id)) as p}
+                      <option value={-p.id}>{p.name}</option>
+                    {/each}
+                  </optgroup>
+                {/if}
+                {#if profiles.filter(p => !seriesProfiles.includes(p.id)).length > 0}
+                  <optgroup label="Design Profiles">
+                    {#each profiles.filter(p => !seriesProfiles.includes(p.id)) as p}
+                      <option value={p.id}>{p.name}</option>
+                    {/each}
+                  </optgroup>
+                {/if}
               </select>
             </div>
           {/if}
@@ -1183,11 +1262,25 @@
         <button onclick={addParam} class="add-btn">+ Add</button>
       </div>
       <div class="params-panel-body">
-        {#if design.params.length === 0}
+        <!-- Inherited decision params (read-only) -->
+        {#if decisionParams.length > 0}
+          <div class="params-section-label">From decision (inherited)</div>
+          {#each decisionParams as p}
+            <div class="param-item param-item-inherited">
+              <span class="param-item-name param-item-name-ro">{p.name}</span>
+              <span class="param-item-value param-item-value-ro">{p.value}</span>
+            </div>
+          {/each}
+          {#if design.params.length > 0}
+            <div class="params-section-label" style="margin-top:6px">Local overrides</div>
+          {/if}
+        {/if}
+
+        {#if design.params.length === 0 && decisionParams.length === 0}
           <div class="params-empty">No parameters yet</div>
         {/if}
         {#each design.params as p, i (p.id)}
-          <div class="param-item">
+          <div class="param-item" class:param-item-override={decisionParams.some(d => d.name === p.name)}>
             <input class="param-item-name" bind:value={p.name} placeholder="NAME" spellcheck="false" />
             <input class="param-item-value" bind:value={p.value} placeholder="value" spellcheck="false" />
             <button class="icon-btn danger-icon" onclick={() => removeParam(i)} title="Remove">✕</button>
@@ -1195,12 +1288,34 @@
         {/each}
 
         <!-- Profiles section -->
-        {#if design.params.length > 0}
+        {#if decisionParams.length > 0 || design.params.length > 0}
           <div class="profiles-section-header">
             <span class="steps-title" style="font-size:10px">Profiles</span>
             <button class="add-btn" style="font-size:10px" onclick={() => openProfileForm()}>+ Add</button>
           </div>
-          {#if profiles.length === 0}
+          <!-- Inherited decision profiles (read-only) -->
+          {#if decisionProfiles.length > 0}
+            <div class="params-section-label" style="font-size:9px">From decision</div>
+            {#each decisionProfiles as prof}
+              <div class="profile-item profile-item-inherited">
+                <div class="profile-item-header">
+                  <span class="profile-name" style="color:#888; font-style:italic">{prof.name}</span>
+                </div>
+                {#if prof.values.length > 0}
+                  <div class="profile-values">
+                    {#each prof.values as v}
+                      <span class="profile-value-pill" style="opacity:0.7">{v.param_name}={v.value}</span>
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+            {/each}
+          {/if}
+          <!-- Local design profiles -->
+          {#if decisionProfiles.length > 0 && profiles.length > 0}
+            <div class="params-section-label" style="font-size:9px">Local</div>
+          {/if}
+          {#if profiles.length === 0 && decisionProfiles.length === 0}
             <div class="params-empty">No profiles yet</div>
           {/if}
           {#each profiles as prof (prof.id)}
@@ -1497,6 +1612,12 @@
     font-size: 10px;
     line-height: 1.6;
   }
+  .params-section-label { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #585b70; padding: 2px 4px; margin-bottom: 4px; }
+  .param-item-inherited { opacity: 0.65; margin-bottom: 6px; flex-direction: row; align-items: center; gap: 4px; }
+  .param-item-name-ro { font-family: monospace; font-size: 11px; color: #a6adc8; font-style: italic; flex: 0 0 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .param-item-value-ro { font-size: 11px; color: #7c7f93; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .param-item-override { border-left: 2px solid #f9e2af; padding-left: 4px; }
+  .profile-item-inherited { opacity: 0.65; }
 
   /* Split pane — fills remaining height after topbar (+config) */
   .split-pane {

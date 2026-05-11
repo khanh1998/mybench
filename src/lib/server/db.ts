@@ -1102,6 +1102,30 @@ FROM snap_pg_stat_bgwriter WHERE _run_id = ? ORDER BY _collected_at DESC LIMIT 1
 	if (!seriesCols.includes('suite_id')) {
 		db.exec(`ALTER TABLE benchmark_series ADD COLUMN suite_id INTEGER REFERENCES decision_suites(id)`);
 	}
+
+	// decision-level shared params and profiles
+	db.exec(`
+    CREATE TABLE IF NOT EXISTS decision_params (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      decision_id INTEGER NOT NULL REFERENCES decisions(id) ON DELETE CASCADE,
+      position    INTEGER NOT NULL DEFAULT 0,
+      name        TEXT    NOT NULL DEFAULT '',
+      value       TEXT    NOT NULL DEFAULT ''
+    );
+
+    CREATE TABLE IF NOT EXISTS decision_param_profiles (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      decision_id INTEGER NOT NULL REFERENCES decisions(id) ON DELETE CASCADE,
+      name        TEXT    NOT NULL DEFAULT ''
+    );
+
+    CREATE TABLE IF NOT EXISTS decision_param_profile_values (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      profile_id INTEGER NOT NULL REFERENCES decision_param_profiles(id) ON DELETE CASCADE,
+      param_name TEXT    NOT NULL DEFAULT '',
+      value      TEXT    NOT NULL DEFAULT ''
+    );
+  `);
 }
 
 export default getDb;

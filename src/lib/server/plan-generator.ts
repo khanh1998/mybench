@@ -1,6 +1,6 @@
 import getDb from '$lib/server/db';
 import { SNAP_TABLE_MAP } from '$lib/server/pg-stats';
-import type { PgbenchScript, DesignParam, DesignStep, PgServer } from '$lib/types';
+import type { PgbenchScript, DesignParam, DesignStep, PgServer, DecisionParam } from '$lib/types';
 
 const EXCLUDED_SNAP_COLS = new Set(['_id', '_run_id', '_collected_at', '_phase', '_is_baseline', '_step_id']);
 
@@ -9,6 +9,16 @@ export interface PlanRunSettingsOverride {
 	database?: string;
 	snapshot_interval_seconds?: number;
 	use_private_ip?: boolean;
+	suiteMode?: boolean;
+}
+
+function mergeParams(
+	base: { name: string; value: string }[],
+	override: { name: string; value: string }[]
+): { name: string; value: string }[] {
+	const map = new Map(base.map(p => [p.name, p.value]));
+	for (const p of override) map.set(p.name, p.value);
+	return Array.from(map.entries()).map(([name, value]) => ({ name, value }));
 }
 
 /**
@@ -70,7 +80,29 @@ export function generatePlan(designId: number, overrides: PlanRunSettingsOverrid
 		'SELECT * FROM design_params WHERE design_id = ? ORDER BY position'
 	).all(designId) as DesignParam[];
 
-	// Load profiles with their values
+	// Load decision-level params and profiles
+	const decisionParams = db.prepare(
+		'SELECT * FROM decision_params WHERE decision_id = ? ORDER BY position'
+	).all(design.decision_id) as DecisionParam[];
+
+	const decisionProfileRows = db.prepare(
+		'SELECT * FROM decision_param_profiles WHERE decision_id = ? ORDER BY id'
+	).all(design.decision_id) as { id: number; name: string }[];
+	const decisionProfileValueRows = db.prepare(
+		'SELECT * FROM decision_param_profile_values WHERE profile_id IN (SELECT id FROM decision_param_profiles WHERE decision_id = ?) ORDER BY profile_id, id'
+	).all(design.decision_id) as { profile_id: number; param_name: string; value: string }[];
+	const decisionProfileValuesById = new Map<number, { param_name: string; value: string }[]>();
+	for (const v of decisionProfileValueRows) {
+		const arr = decisionProfileValuesById.get(v.profile_id) ?? [];
+		arr.push({ param_name: v.param_name, value: v.value });
+		decisionProfileValuesById.set(v.profile_id, arr);
+	}
+	const decisionProfiles = decisionProfileRows.map(p => ({
+		name: p.name,
+		values: decisionProfileValuesById.get(p.id) ?? []
+	}));
+
+	// Load design-level profiles with their values
 	const profileRows = db.prepare(
 		'SELECT * FROM design_param_profiles WHERE design_id = ? ORDER BY id'
 	).all(designId) as { id: number; name: string }[];
@@ -83,10 +115,18 @@ export function generatePlan(designId: number, overrides: PlanRunSettingsOverrid
 		arr.push({ param_name: v.param_name, value: v.value });
 		profileValuesById.set(v.profile_id, arr);
 	}
-	const profiles = profileRows.map(p => ({
+	const designProfiles = profileRows.map(p => ({
 		name: p.name,
 		values: profileValuesById.get(p.id) ?? []
 	}));
+
+	const suiteMode = overrides.suiteMode ?? false;
+	const effectiveParams = suiteMode
+		? decisionParams.map(p => ({ name: p.name, value: p.value }))
+		: mergeParams(decisionParams.map(p => ({ name: p.name, value: p.value })), designParams.map(p => ({ name: p.name, value: p.value })));
+	const profiles = suiteMode
+		? decisionProfiles
+		: [...decisionProfiles, ...designProfiles];
 
 	// Load server info
 	let serverInfo = {
@@ -191,7 +231,7 @@ export function generatePlan(designId: number, overrides: PlanRunSettingsOverrid
 			pre_collect_secs: design.pre_collect_secs,
 			post_collect_secs: design.post_collect_secs
 		},
-		params: designParams.map(p => ({ name: p.name, value: p.value })),
+		params: effectiveParams,
 		profiles,
 		steps: stepsWithScripts,
 		enabled_snap_tables: enabledSnapTables

@@ -18,14 +18,29 @@
   let formError = $state('');
   let showForm = $state(false);
 
+  // Tab state
+  type DecisionTab = 'designs' | 'parameters';
+  let activeTab = $state<DecisionTab>('designs');
+
+  // Decision params state
+  let decisionParams = $state<{id:number; decision_id:number; position:number; name:string; value:string}[]>([]);
+  let decisionParamsDirty = $state<{position:number; name:string; value:string}[]>([]);
+  let decisionParamsSaving = $state(false);
+
+  // Decision profiles state
+  let decisionProfiles = $state<{id:number; decision_id:number; name:string; values:{param_name:string;value:string}[]}[]>([]);
+  let showDecisionProfileForm = $state(false);
+  let editingDecisionProfileId = $state<number|null>(null);
+  let decisionProfileFormName = $state('');
+  let decisionProfileFormValues = $state<{param_name:string;value:string}[]>([]);
+  let decisionProfileSaving = $state(false);
+
   // Suite modal state
   interface SuiteDesignEntry {
     design_id: number;
     design_name: string;
     database: string;
     enabled: boolean;
-    profiles: {id: number; name: string}[];
-    profile_ids: number[];
   }
   let showSuiteModal = $state(false);
   let startingSuite = $state(false);
@@ -37,6 +52,8 @@
   let suiteSnapshotInterval = $state(30);
   let suiteUsePrivateIp = $state(false);
   let suiteDesigns = $state<SuiteDesignEntry[]>([]);
+  let suiteDecisionProfileIds = $state<number[]>([]);
+  let suiteAvailableDecisionProfiles = $state<{id:number; name:string}[]>([]);
   let suiteLoadingProfiles = $state(false);
 
   const suitePrivateIpApplicable = $derived((() => {
@@ -45,7 +62,7 @@
     return !!(srv?.private_host && srv.vpc && runner?.vpc && srv.vpc === runner.vpc);
   })());
 
-  const suiteEnabledDesigns = $derived(suiteDesigns.filter(d => d.enabled && d.profile_ids.length >= 1));
+  const suiteEnabledDesigns = $derived(suiteDesigns.filter(d => d.enabled));
 
   async function openSuiteModal() {
     suiteLoadingProfiles = true;
@@ -59,51 +76,45 @@
     showSuiteModal = true;
 
     const DEFAULT_PROFILE = { id: 0, name: 'Default' };
-    const entries: SuiteDesignEntry[] = await Promise.all(designs.map(async (d) => {
-      const r = await fetch(`/api/designs/${d.id}/profiles`);
-      const custom: {id: number; name: string}[] = await r.json();
-      const profiles = [DEFAULT_PROFILE, ...custom];
-      return {
-        design_id: d.id,
-        design_name: d.name,
-        database: d.database,
-        enabled: true,
-        profiles,
-        profile_ids: custom.length > 0 ? custom.map(p => p.id) : [DEFAULT_PROFILE.id]
-      };
+    const dprRes = await fetch(`/api/decisions/${id}/profiles`);
+    const customProfiles: {id:number; name:string}[] = await dprRes.json();
+    suiteAvailableDecisionProfiles = [DEFAULT_PROFILE, ...customProfiles];
+    suiteDecisionProfileIds = customProfiles.length > 0 ? customProfiles.map(p => p.id) : [DEFAULT_PROFILE.id];
+
+    suiteDesigns = designs.map(d => ({
+      design_id: d.id,
+      design_name: d.name,
+      database: d.database,
+      enabled: true,
     }));
-    suiteDesigns = entries;
     suiteLoadingProfiles = false;
   }
 
-  function moveSuiteProfile(designIdx: number, profileIdx: number, dir: -1 | 1) {
-    const entry = suiteDesigns[designIdx];
-    const arr = [...entry.profile_ids];
-    const target = profileIdx + dir;
+  function moveSuiteDecisionProfile(idx: number, dir: -1 | 1) {
+    const arr = [...suiteDecisionProfileIds];
+    const target = idx + dir;
     if (target < 0 || target >= arr.length) return;
-    [arr[profileIdx], arr[target]] = [arr[target], arr[profileIdx]];
-    suiteDesigns[designIdx] = { ...entry, profile_ids: arr };
+    [arr[idx], arr[target]] = [arr[target], arr[idx]];
+    suiteDecisionProfileIds = arr;
   }
 
-  function removeSuiteProfile(designIdx: number, profileIdx: number) {
-    const entry = suiteDesigns[designIdx];
-    suiteDesigns[designIdx] = { ...entry, profile_ids: entry.profile_ids.filter((_, i) => i !== profileIdx) };
+  function removeSuiteDecisionProfile(idx: number) {
+    suiteDecisionProfileIds = suiteDecisionProfileIds.filter((_, i) => i !== idx);
   }
 
-  function addSuiteProfile(designIdx: number, profileId: number) {
-    const entry = suiteDesigns[designIdx];
-    if (!entry.profile_ids.includes(profileId)) {
-      suiteDesigns[designIdx] = { ...entry, profile_ids: [...entry.profile_ids, profileId] };
+  function addSuiteDecisionProfile(profileId: number) {
+    if (!suiteDecisionProfileIds.includes(profileId)) {
+      suiteDecisionProfileIds = [...suiteDecisionProfileIds, profileId];
     }
   }
 
   async function startSuite() {
-    if (suiteEnabledDesigns.length === 0) return;
+    if (suiteEnabledDesigns.length === 0 || suiteDecisionProfileIds.length === 0) return;
     showSuiteModal = false;
     startingSuite = true;
     const body: Record<string, unknown> = {
       decision_id: id,
-      designs: suiteEnabledDesigns.map(d => ({ design_id: d.design_id, profile_ids: d.profile_ids })),
+      designs: suiteEnabledDesigns.map(d => ({ design_id: d.design_id, decision_profile_ids: suiteDecisionProfileIds })),
       delay_seconds: suiteDelay,
       name: suiteName || undefined,
       server_id: suiteServerId,
@@ -122,17 +133,89 @@
     goto(`/decisions/${id}/suites/${suite_id}`);
   }
 
+  // Decision params CRUD
+  function addDecisionParam() {
+    decisionParamsDirty = [...decisionParamsDirty, { position: decisionParamsDirty.length, name: '', value: '' }];
+  }
+
+  function removeDecisionParam(idx: number) {
+    decisionParamsDirty = decisionParamsDirty.filter((_, i) => i !== idx);
+  }
+
+  async function saveDecisionParams() {
+    decisionParamsSaving = true;
+    const res = await fetch(`/api/decisions/${id}/params`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ params: decisionParamsDirty.map((p, i) => ({ position: i, name: p.name, value: p.value })) })
+    });
+    decisionParams = await res.json();
+    decisionParamsDirty = decisionParams.map(p => ({ position: p.position, name: p.name, value: p.value }));
+    decisionParamsSaving = false;
+  }
+
+  // Decision profiles CRUD
+  function openDecisionProfileForm(profile?: {id:number; name:string; values:{param_name:string;value:string}[]}) {
+    if (profile) {
+      editingDecisionProfileId = profile.id;
+      decisionProfileFormName = profile.name;
+      decisionProfileFormValues = decisionParamsDirty.map(p => ({
+        param_name: p.name,
+        value: profile.values.find(v => v.param_name === p.name)?.value ?? ''
+      }));
+    } else {
+      editingDecisionProfileId = null;
+      decisionProfileFormName = '';
+      decisionProfileFormValues = decisionParamsDirty.map(p => ({ param_name: p.name, value: '' }));
+    }
+    showDecisionProfileForm = true;
+  }
+
+  async function saveDecisionProfile() {
+    if (!decisionProfileFormName.trim()) return;
+    decisionProfileSaving = true;
+    const values = decisionProfileFormValues.filter(v => v.value !== '');
+    if (editingDecisionProfileId) {
+      await fetch(`/api/decisions/${id}/profiles/${editingDecisionProfileId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: decisionProfileFormName, values })
+      });
+    } else {
+      await fetch(`/api/decisions/${id}/profiles`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: decisionProfileFormName, values })
+      });
+    }
+    const r = await fetch(`/api/decisions/${id}/profiles`);
+    decisionProfiles = await r.json();
+    showDecisionProfileForm = false;
+    decisionProfileSaving = false;
+  }
+
+  async function deleteDecisionProfile(profileId: number) {
+    if (!confirm('Delete this profile?')) return;
+    await fetch(`/api/decisions/${id}/profiles/${profileId}`, { method: 'DELETE' });
+    decisionProfiles = decisionProfiles.filter(p => p.id !== profileId);
+  }
+
   async function load() {
-    const [dRes, dsRes, sRes, ec2Res] = await Promise.all([
+    const [dRes, dsRes, sRes, ec2Res, dpRes, dprRes] = await Promise.all([
       fetch(`/api/decisions/${id}`),
       fetch(`/api/designs?decision_id=${id}`),
       fetch('/api/connections'),
-      fetch('/api/ec2')
+      fetch('/api/ec2'),
+      fetch(`/api/decisions/${id}/params`),
+      fetch(`/api/decisions/${id}/profiles`)
     ]);
     decision = await dRes.json();
     designs = await dsRes.json();
     servers = await sRes.json();
     ec2Servers = await ec2Res.json();
+    decisionParams = await dpRes.json();
+    decisionProfiles = await dprRes.json();
+    decisionParamsDirty = decisionParams.map(p => ({ position: p.position, name: p.name, value: p.value }));
 
     // Load latest run for each design
     for (const design of designs) {
@@ -186,6 +269,14 @@
     <button class="danger" onclick={deleteDecision}>Delete</button>
   </div>
 
+  <div class="tab-bar">
+    <button class:tab-active={activeTab === 'designs'} onclick={() => activeTab = 'designs'}>Designs</button>
+    <button class:tab-active={activeTab === 'parameters'} onclick={() => activeTab = 'parameters'}>
+      Parameters{#if decisionParams.length > 0} <span class="tab-badge">{decisionParams.length}</span>{/if}
+    </button>
+  </div>
+
+  {#if activeTab === 'designs'}
   <div class="row" style="margin-bottom: 12px;">
     <h2>Designs</h2>
     <span class="spacer"></span>
@@ -295,9 +386,48 @@
         </div>
 
         <div class="form-group">
-          <label>Designs & profiles</label>
+          <label>Profiles <span style="color:#aaa; font-weight:400; font-size:11px">(run order — applied to all designs)</span></label>
           {#if suiteLoadingProfiles}
-            <p style="color:#999; font-size:12px">Loading profiles…</p>
+            <p style="color:#999; font-size:12px">Loading…</p>
+          {:else if suiteAvailableDecisionProfiles.length === 0}
+            <p style="color:#f38ba8; font-size:12px">No decision-level profiles defined. Go to the Parameters tab to add profiles.</p>
+          {:else}
+            <div class="suite-profiles-block">
+              {#each suiteDecisionProfileIds as pid, pi}
+                {@const prof = suiteAvailableDecisionProfiles.find(p => p.id === pid)}
+                {#if prof}
+                  <div class="series-profile-row">
+                    <span class="series-profile-num">{pi + 1}</span>
+                    <span class="series-profile-name">{prof.name}</span>
+                    <div class="series-profile-controls">
+                      <button type="button" onclick={() => moveSuiteDecisionProfile(pi, -1)} disabled={pi === 0} class="icon-btn">↑</button>
+                      <button type="button" onclick={() => moveSuiteDecisionProfile(pi, 1)} disabled={pi === suiteDecisionProfileIds.length - 1} class="icon-btn">↓</button>
+                      <button type="button" onclick={() => removeSuiteDecisionProfile(pi)} class="icon-btn danger-icon">✕</button>
+                    </div>
+                  </div>
+                {/if}
+              {/each}
+              {#if suiteDecisionProfileIds.length < suiteAvailableDecisionProfiles.length}
+                <div class="series-add-profile">
+                  <select onchange={(e) => { const v = Number((e.currentTarget as HTMLSelectElement).value); if (v !== undefined) addSuiteDecisionProfile(v); (e.currentTarget as HTMLSelectElement).value = ''; }}>
+                    <option value="">+ Add profile…</option>
+                    {#each suiteAvailableDecisionProfiles.filter(p => !suiteDecisionProfileIds.includes(p.id)) as p}
+                      <option value={p.id}>{p.name}</option>
+                    {/each}
+                  </select>
+                </div>
+              {/if}
+              {#if suiteDecisionProfileIds.length === 0}
+                <p style="color:#f38ba8; font-size:12px; margin:6px 0 0">Add at least one profile</p>
+              {/if}
+            </div>
+          {/if}
+        </div>
+
+        <div class="form-group">
+          <label>Designs</label>
+          {#if suiteLoadingProfiles}
+            <p style="color:#999; font-size:12px">Loading…</p>
           {:else}
             <div class="suite-designs-list">
               {#each suiteDesigns as entry, di}
@@ -310,43 +440,11 @@
                       {entry.design_name}
                     </label>
                   </div>
-
-                  {#if entry.enabled}
-                    <div class="suite-profiles-list">
-                      {#each entry.profile_ids as pid, pi}
-                        {@const prof = entry.profiles.find(p => p.id === pid)}
-                        {#if prof}
-                          <div class="series-profile-row">
-                            <span class="series-profile-num">{pi + 1}</span>
-                            <span class="series-profile-name">{prof.name}</span>
-                            <div class="series-profile-controls">
-                              <button type="button" onclick={() => moveSuiteProfile(di, pi, -1)} disabled={pi === 0} class="icon-btn">↑</button>
-                              <button type="button" onclick={() => moveSuiteProfile(di, pi, 1)} disabled={pi === entry.profile_ids.length - 1} class="icon-btn">↓</button>
-                              <button type="button" onclick={() => removeSuiteProfile(di, pi)} class="icon-btn danger-icon">✕</button>
-                            </div>
-                          </div>
-                        {/if}
-                      {/each}
-                      {#if entry.profile_ids.length < entry.profiles.length}
-                        <div class="series-add-profile">
-                          <select onchange={(e) => { const v = Number((e.currentTarget as HTMLSelectElement).value); if (v) addSuiteProfile(di, v); (e.currentTarget as HTMLSelectElement).value = ''; }}>
-                            <option value="">+ Add profile…</option>
-                            {#each entry.profiles.filter(p => !entry.profile_ids.includes(p.id)) as p}
-                              <option value={p.id}>{p.name}</option>
-                            {/each}
-                          </select>
-                        </div>
-                      {/if}
-                      {#if entry.profile_ids.length === 0}
-                        <div style="padding:6px 10px; color:#f38ba8; font-size:11px">Add at least one profile</div>
-                      {/if}
-                    </div>
-                  {/if}
                 </div>
               {/each}
             </div>
             {#if suiteEnabledDesigns.length === 0}
-              <p style="color:#dc3545; font-size:12px; margin:6px 0 0">Enable at least one design with profiles</p>
+              <p style="color:#dc3545; font-size:12px; margin:6px 0 0">Enable at least one design</p>
             {/if}
           {/if}
         </div>
@@ -354,7 +452,7 @@
         <div class="modal-actions">
           <button onclick={() => showSuiteModal = false}>Cancel</button>
           <button class="primary" onclick={startSuite}
-            disabled={suiteLoadingProfiles || suiteEnabledDesigns.length === 0 || !suiteEc2ServerId}>
+            disabled={suiteLoadingProfiles || suiteEnabledDesigns.length === 0 || suiteDecisionProfileIds.length === 0 || !suiteEc2ServerId}>
             ⊞ Start Suite
           </button>
         </div>
@@ -391,6 +489,112 @@
       </div>
     </div>
   {/each}
+  {/if}<!-- end designs tab -->
+
+  {#if activeTab === 'parameters'}
+  <div class="params-tab">
+    <div class="params-section">
+      <div class="row" style="margin-bottom:8px">
+        <h3 style="margin:0">Parameters</h3>
+        <span class="spacer"></span>
+        <button class="primary" onclick={addDecisionParam}>+ Add</button>
+      </div>
+      {#if decisionParamsDirty.length === 0}
+        <p style="color:#888; font-size:13px">No parameters yet. Add shared parameters that all designs will inherit.</p>
+      {:else}
+        <div class="params-list">
+          {#each decisionParamsDirty as param, i}
+            <div class="param-row">
+              <input class="param-name-input" bind:value={param.name} placeholder="NAME" />
+              <input class="param-value-input" bind:value={param.value} placeholder="default value" />
+              <button class="icon-btn danger-icon" onclick={() => removeDecisionParam(i)}>✕</button>
+            </div>
+          {/each}
+        </div>
+      {/if}
+      <div style="margin-top:12px">
+        <button class="primary" onclick={saveDecisionParams} disabled={decisionParamsSaving}>
+          {decisionParamsSaving ? 'Saving…' : 'Save Parameters'}
+        </button>
+      </div>
+    </div>
+
+    {#if decisionParamsDirty.length > 0}
+    <div class="params-section" style="margin-top:20px">
+      <div class="row" style="margin-bottom:8px">
+        <h3 style="margin:0">Profiles</h3>
+        <span class="spacer"></span>
+        <button onclick={() => openDecisionProfileForm()}>+ Add Profile</button>
+      </div>
+      <p style="color:#888; font-size:12px; margin:0 0 10px">Profiles override parameter values for specific run scenarios (e.g. "small", "large"). Used when running suites.</p>
+      {#if decisionProfiles.length === 0}
+        <p style="color:#888; font-size:13px">No profiles yet.</p>
+      {:else}
+        <div class="profiles-list">
+          {#each decisionProfiles as prof}
+            <div class="profile-item">
+              <div class="profile-item-header">
+                <span class="profile-name">{prof.name}</span>
+                <div class="profile-actions">
+                  <button class="icon-btn" onclick={() => openDecisionProfileForm(prof)}>✎</button>
+                  <button class="icon-btn danger-icon" onclick={() => deleteDecisionProfile(prof.id)}>✕</button>
+                </div>
+              </div>
+              {#if prof.values.length > 0}
+                <div class="profile-values">
+                  {#each prof.values as v}
+                    <span class="profile-pill">{v.param_name}={v.value}</span>
+                  {/each}
+                </div>
+              {:else}
+                <p style="font-size:11px; color:#aaa; margin:4px 0 0">No overrides</p>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      {/if}
+    </div>
+    {/if}
+  </div>
+  {/if}<!-- end parameters tab -->
+
+  <!-- Decision profile form modal -->
+  {#if showDecisionProfileForm}
+    <div
+      class="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      tabindex="-1"
+      onclick={(e) => { if (e.currentTarget === e.target) showDecisionProfileForm = false; }}
+      onkeydown={(e) => { if (e.key === 'Escape') showDecisionProfileForm = false; }}
+    >
+      <div class="modal">
+        <h3 style="margin:0 0 16px">{editingDecisionProfileId ? 'Edit Profile' : 'New Profile'}</h3>
+        <div class="form-group">
+          <label for="dp-form-name">Profile name</label>
+          <input id="dp-form-name" bind:value={decisionProfileFormName} placeholder="e.g. small, large" />
+        </div>
+        {#if decisionProfileFormValues.length > 0}
+          <div class="form-group">
+            <label>Parameter overrides</label>
+            {#each decisionProfileFormValues as fv}
+              <div class="param-row" style="margin-bottom:6px">
+                <span class="param-name-label">{fv.param_name}</span>
+                <input bind:value={fv.value} placeholder="override value (blank = use default)" />
+              </div>
+            {/each}
+          </div>
+        {/if}
+        <div class="modal-actions">
+          <button onclick={() => showDecisionProfileForm = false}>Cancel</button>
+          <button class="primary" onclick={saveDecisionProfile} disabled={decisionProfileSaving || !decisionProfileFormName.trim()}>
+            {decisionProfileSaving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
 {:else}
   <p>Loading...</p>
 {/if}
@@ -399,6 +603,30 @@
   .btn-link { text-decoration: none; }
   .design-card { transition: box-shadow 0.15s; }
   .design-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+
+  .tab-bar { display: flex; gap: 4px; border-bottom: 1px solid #e0e0e0; margin-bottom: 16px; }
+  .tab-bar button { background: none; border: none; border-bottom: 2px solid transparent; padding: 8px 16px; font-size: 13px; font-weight: 500; color: #666; cursor: pointer; margin-bottom: -1px; border-radius: 0; }
+  .tab-bar button:hover { color: #333; }
+  .tab-bar button.tab-active { color: #0066cc; border-bottom-color: #0066cc; }
+  .tab-badge { background: #0066cc; color: #fff; border-radius: 10px; padding: 1px 6px; font-size: 10px; font-weight: 700; margin-left: 4px; }
+
+  .params-tab { max-width: 640px; }
+  .params-section { }
+  .params-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+  .param-row { display: flex; align-items: center; gap: 8px; }
+  .param-name-input { width: 180px; font-family: monospace; font-size: 13px; }
+  .param-value-input { flex: 1; font-size: 13px; }
+  .param-name-label { width: 180px; font-family: monospace; font-size: 13px; color: #555; flex-shrink: 0; }
+
+  .profiles-list { display: flex; flex-direction: column; gap: 8px; }
+  .profile-item { border: 1px solid #e0e0e0; border-radius: 6px; padding: 10px 12px; }
+  .profile-item-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+  .profile-name { font-weight: 600; font-size: 13px; }
+  .profile-actions { display: flex; gap: 4px; }
+  .profile-values { display: flex; flex-wrap: wrap; gap: 4px; }
+  .profile-pill { background: #e8f0fe; color: #1a56db; border-radius: 4px; padding: 2px 8px; font-size: 11px; font-family: monospace; }
+
+  .suite-profiles-block { border: 1px solid #e0e0e0; border-radius: 6px; overflow: hidden; }
 
   .modal-backdrop {
     position: fixed; inset: 0; background: rgba(0,0,0,0.5);

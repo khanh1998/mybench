@@ -19,6 +19,7 @@ export interface StartEc2RunOptions {
 	server_id?: number;
 	database?: string;
 	profile_id?: number;
+	profile_source?: 'decision' | 'design';
 	name?: string;
 	snapshot_interval_seconds?: number;
 	use_private_ip?: boolean;
@@ -94,11 +95,12 @@ export function startEc2Run(
 		Ec2Server | undefined;
 	if (!ec2Server) throw new Error(`EC2 server ${ec2ServerId} not found`);
 
-	// Resolve profile name
+	// Resolve profile name from decision or design profiles table
 	let profileName = '';
 	if (opts.profile_id) {
+		const table = opts.profile_source === 'decision' ? 'decision_param_profiles' : 'design_param_profiles';
 		const profile = db
-			.prepare('SELECT name FROM design_param_profiles WHERE id = ?')
+			.prepare(`SELECT name FROM ${table} WHERE id = ?`)
 			.get(opts.profile_id) as { name: string } | undefined;
 		if (profile) profileName = profile.name;
 	}
@@ -517,10 +519,10 @@ async function executeEc2RunAsync(
 
 		db.prepare(`UPDATE benchmark_runs SET finished_at=COALESCE(finished_at, ?) WHERE id=?`).run(now(), runId);
 
-		// Clean up remote plan + result + step log dir; exec log and debug log stay on VPS
-		try {
-			await exec(conn, `rm -f ${shellQuote(remotePlanPath)} ${shellQuote(remoteResultPath)} && rm -rf ${shellQuote(remoteLogDir)}`);
-		} catch { /* ignore */ }
+		// NOTE: cleanup disabled for debugging — remote files kept on VPS
+		// try {
+		// 	await exec(conn, `rm -f ${shellQuote(remotePlanPath)} ${shellQuote(remoteResultPath)} && rm -rf ${shellQuote(remoteLogDir)}`);
+		// } catch { /* ignore */ }
 
 		emit(`\n=== EC2 benchmark completed ===`);
 		completeRun(runId);

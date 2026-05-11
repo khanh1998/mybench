@@ -1,6 +1,6 @@
 import getDb from '$lib/server/db';
 import type { PageServerLoad } from './$types';
-import type { PgbenchScript, DesignParam, ParamProfile } from '$lib/types';
+import type { PgbenchScript, DesignParam, ParamProfile, DecisionParam, DecisionParamProfile } from '$lib/types';
 
 export const load: PageServerLoad = ({ params }) => {
 	const db = getDb();
@@ -46,11 +46,33 @@ export const load: PageServerLoad = ({ params }) => {
 	}
 	const profiles: ParamProfile[] = profileRows.map(p => ({ ...p, values: valuesByProfile.get(p.id) ?? [] }));
 
+	const decisionId = (design as { decision_id: number }).decision_id;
+
+	const decisionParams = db.prepare(
+		'SELECT * FROM decision_params WHERE decision_id = ? ORDER BY position'
+	).all(decisionId) as DecisionParam[];
+
+	const decisionProfileRows = db.prepare(
+		'SELECT * FROM decision_param_profiles WHERE decision_id = ? ORDER BY id'
+	).all(decisionId) as { id: number; decision_id: number; name: string }[];
+	const decisionProfileValueRows = db.prepare(
+		'SELECT * FROM decision_param_profile_values WHERE profile_id IN (SELECT id FROM decision_param_profiles WHERE decision_id = ?) ORDER BY profile_id, id'
+	).all(decisionId) as { id: number; profile_id: number; param_name: string; value: string }[];
+	const decisionValuesByProfile = new Map<number, { param_name: string; value: string }[]>();
+	for (const v of decisionProfileValueRows) {
+		const arr = decisionValuesByProfile.get(v.profile_id) ?? [];
+		arr.push({ param_name: v.param_name, value: v.value });
+		decisionValuesByProfile.set(v.profile_id, arr);
+	}
+	const decisionProfiles: DecisionParamProfile[] = decisionProfileRows.map(p => ({ ...p, values: decisionValuesByProfile.get(p.id) ?? [] }));
+
 	return {
 		design: { ...design as object, steps: stepsWithScripts, params: designParams },
 		servers,
 		ec2Servers,
 		runs,
-		profiles
+		profiles,
+		decisionParams,
+		decisionProfiles
 	};
 };

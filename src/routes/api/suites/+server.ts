@@ -20,17 +20,17 @@ export const POST: RequestHandler = async ({ request }) => {
 		return json({ error: 'decision_id and designs (non-empty array) are required' }, { status: 400 });
 	}
 	for (const d of designs) {
-		if (!d.design_id || !Array.isArray(d.profile_ids) || d.profile_ids.length < 1) {
-			return json({ error: 'Each design entry needs design_id and at least one profile_id' }, { status: 400 });
+		if (!d.design_id || !Array.isArray(d.decision_profile_ids) || d.decision_profile_ids.length < 1) {
+			return json({ error: 'Each design entry needs design_id and at least one decision_profile_id' }, { status: 400 });
 		}
 	}
 
 	try {
 		const suiteId = startSuite({
 			decision_id: Number(decision_id),
-			designs: designs.map((d: { design_id: number; profile_ids: number[] }) => ({
+			designs: designs.map((d: { design_id: number; decision_profile_ids: number[] }) => ({
 				design_id: Number(d.design_id),
-				profile_ids: d.profile_ids.map(Number)
+				decision_profile_ids: d.decision_profile_ids.map(Number)
 			})),
 			delay_seconds: Number(delay_seconds ?? 0),
 			name: name || undefined,

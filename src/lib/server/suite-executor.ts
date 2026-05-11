@@ -85,7 +85,7 @@ function handleSuiteEvent(
 
 export interface SuiteDesignConfig {
 	design_id: number;
-	profile_ids: number[];  // ordered
+	decision_profile_ids: number[];  // ordered; references decision_param_profiles.id
 }
 
 export interface StartSuiteOptions {
@@ -163,13 +163,14 @@ async function executeLocalSuiteAsync(
 		try {
 			seriesId = startSeries({
 				design_id: dc.design_id,
-				profile_ids: dc.profile_ids,
+				profile_ids: dc.decision_profile_ids,
 				delay_seconds: opts.delay_seconds,
 				name: designName,
 				server_id: opts.server_id,
 				database: opts.database,
 				snapshot_interval_seconds: opts.snapshot_interval_seconds,
 				suite_id: suiteId,
+				useDecisionProfiles: true,
 			});
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
@@ -259,10 +260,10 @@ async function executeEc2SuiteAsync(
 		).all(dc.design_id) as { id: number; position: number; name: string; type: string }[];
 
 		const runs: SuiteRunEntry[] = [];
-		for (const profileId of dc.profile_ids) {
+		for (const profileId of dc.decision_profile_ids) {
 			const profile = profileId === 0
 				? null
-				: db.prepare('SELECT name FROM design_param_profiles WHERE id = ?').get(profileId) as { name: string } | undefined;
+				: db.prepare('SELECT name FROM decision_param_profiles WHERE id = ?').get(profileId) as { name: string } | undefined;
 			const profileName = profileId === 0 ? 'Default' : (profile?.name ?? '');
 			const cliProfileName = profileId === 0 ? '' : (profile?.name ?? '');
 			const runToken = randomUUID();
@@ -330,7 +331,8 @@ async function executeEc2SuiteAsync(
 			const plan = generatePlan(de.designId, {
 				server_id: opts.server_id,
 				snapshot_interval_seconds: de.snapshot_interval_seconds,
-				use_private_ip: !!opts.use_private_ip
+				use_private_ip: !!opts.use_private_ip,
+				suiteMode: true
 			});
 			const localPlanPath = `/tmp/mybench-suite-plan-${de.designToken}.json`;
 			writeFileSync(localPlanPath, JSON.stringify(plan));

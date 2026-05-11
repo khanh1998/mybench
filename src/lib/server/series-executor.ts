@@ -27,6 +27,7 @@ export interface StartSeriesOptions {
 	snapshot_interval_seconds?: number;
 	use_private_ip?: boolean;
 	suite_id?: number;           // optional — set when series is part of a decision suite
+	useDecisionProfiles?: boolean; // resolve profile names from decision_param_profiles instead of design_param_profiles
 }
 
 export interface SeriesEmitter extends EventEmitter {
@@ -163,9 +164,13 @@ export function startSeries(opts: StartSeriesOptions): number {
 	const now = new Date().toISOString();
 
 	for (const profileId of opts.profile_ids) {
-		const profile = profileId === 0
+		// Negative IDs mean decision profiles (from design-page series modal); positive = design profiles
+		const isDecisionProfile = profileId < 0 || opts.useDecisionProfiles;
+		const resolvedId = Math.abs(profileId);
+		const profileTable = isDecisionProfile ? 'decision_param_profiles' : 'design_param_profiles';
+		const profile = resolvedId === 0
 			? null
-			: db.prepare('SELECT name FROM design_param_profiles WHERE id = ?').get(profileId) as { name: string } | undefined;
+			: db.prepare(`SELECT name FROM ${profileTable} WHERE id = ?`).get(resolvedId) as { name: string } | undefined;
 		const profileName = profileId === 0 ? 'Default' : (profile?.name ?? '');
 		const cliProfileName = profileId === 0 ? '' : (profile?.name ?? '');
 		const runToken = randomUUID();

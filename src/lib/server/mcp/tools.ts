@@ -79,11 +79,13 @@ and the recommended workflow for creating and running a benchmark plan.`
 					? ec2Servers.map(s => ({ id: s.id, name: s.name, host: s.host, user: s.user, port: s.port }))
 					: 'No EC2 runners configured yet. Add one in Settings (http://localhost:5173/settings) before using remote runs.',
 				data_model: {
-					decisions: 'Top-level question you are answering (e.g. "Which table design is faster?"). Contains one or more designs.',
-					designs: 'One candidate design to benchmark (e.g. "plain table" vs "partitioned table"). Each design is linked to a database server and has steps + params.',
+					decisions: 'Top-level question you are answering (e.g. "Which table design is faster?"). Contains one or more designs. Can define shared decision-level params and profiles.',
+					designs: 'One candidate design to benchmark (e.g. "plain table" vs "partitioned table"). Each design is linked to a database server and has steps + params. Inherits all decision-level params and profiles.',
 					steps: 'Ordered list of actions: sql setup → wait for pre-stats → optional pg_stat_statements reset → pgbench or sysbench load test → optional pg_stat_statements collect → wait for post-stats → sql teardown.',
-					params: 'Named values (e.g. NUM_USERS=1000) substituted as {{NAME}} in all step scripts.',
-					profiles: 'Named sets of param overrides (e.g. "small"=NUM_USERS:100, "large"=NUM_USERS:10000) for running the same design at different scales. Managed with upsert_profile/list_profiles/delete_profile.'
+					params: 'Named values (e.g. NUM_USERS=1000) substituted as {{NAME}} in all step scripts. Two levels: (1) decision-level params shared across all designs (managed via the Parameters tab on the decision screen); (2) design-level params local to one design (managed with set_params). Design overrides win on same name. {{PARAM}} is valid in a step if the param exists at either level.',
+					profiles: 'Named sets of param overrides (e.g. "small"=NUM_USERS:100, "large"=NUM_USERS:10000) for running the same design at different scales. Two levels: (1) decision-level profiles managed on the decision screen — used exclusively in suite runs; (2) design-level profiles managed with upsert_profile/list_profiles/delete_profile — used in single and series runs. Both levels are available in the profile picker for single/series runs (design wins).',
+					param_inheritance: 'Effective params for a design = decision params + design overrides (design wins on same name). For suite runs, only decision-level params and profiles are used (design overrides are ignored). For single/series runs, both levels are merged and either level\'s profiles are available.',
+					suite_vs_single: 'Suite run (POST /api/suites): uses ONLY decision-level params and decision-level profiles — pass decision_profile_ids per design. Single run (run_design / POST /api/runs): uses merged params; profile_id refers to a design-level profile by default, pass profile_source="decision" to use a decision-level profile.'
 				},
 				step_types: {
 					sql: {
@@ -157,14 +159,14 @@ and the recommended workflow for creating and running a benchmark plan.`
 				recommended_workflow: [
 					'1. get_context (this tool) — understand conventions and see available servers',
 					'2. list_decisions — find existing decisions, or create_decision for a new one',
-					'3. create_design(decision_id, name) — create a design candidate',
+					'3. create_design(decision_id, name) — create a design candidate (repeat for each candidate)',
 					'4. configure_design(design_id, {server_id, database}) — assign a server from the database_servers list',
 					'5. get_db_schema(design_id) — see real table/column names from the live DB',
-					'6. set_params(design_id, [{name, value}]) — define {{PARAM}} values',
+					'6. set_params(design_id, [{name, value}]) — define design-level {{PARAM}} values. TIP: for params shared across all designs in a decision (e.g. NUM_CLIENTS, DURATION_SECS), set them at the decision level via the Parameters tab in the UI instead — every design will inherit them and suite runs use only decision-level params/profiles.',
 					'7. upsert_step (repeat) — add sql setup, wait, optional pg_stat_statements reset, pgbench or sysbench load test, optional pg_stat_statements collect, wait, sql teardown steps',
-					'8. upsert_profile(design_id, name, values) — optional: create "small"/"large" profiles for different scales',
+					'8. upsert_profile(design_id, name, values) — optional: create "small"/"large" profiles for different scales. For suite runs, create profiles at the decision level via the UI Parameters tab.',
 					'9. validate_design(design_id) — check for issues (undefined params, missing server, no bench step) before running',
-					'10. run_design(design_id, {profile_id?, name?, server_id?, database?, snapshot_interval_seconds?, ec2_server_id?}) — start a local or EC2 test run and get run_id',
+					'10. run_design(design_id, {profile_id?, profile_source?, name?, server_id?, database?, snapshot_interval_seconds?, ec2_server_id?}) — start a test run and get run_id. Pass profile_source="decision" to use a decision-level profile.',
 					'11. get_run(run_id) — wait ~(bench duration + collect durations) before first poll, then every ~30s',
 					'12. export_plan(design_id) — get plan.json for production mybench-runner CLI',
 					'--- Analysis (after runs complete) ---',
@@ -511,25 +513,29 @@ and the recommended workflow for creating and running a benchmark plan.`
 	server.registerTool(
 		'get_design',
 		{
-			description: 'Returns a design with all its steps, pgbench scripts, and params. Use this to inspect an existing design before modifying it.',
+			description: 'Returns a design with all its steps, pgbench scripts, params, and inherited decision-level params. The `params` field contains design-local params; `decision_params` contains params inherited from the decision (read-only on the design, always used in suite runs). Use this to inspect an existing design before modifying it.',
 			inputSchema: {
 				design_id: z.number().int().describe('Design ID from list_decisions')
 			}
 		},
 		async ({ design_id }) => {
 			const db = getDb();
-			const design = db.prepare('SELECT * FROM designs WHERE id = ?').get(design_id);
+			const design = db.prepare('SELECT * FROM designs WHERE id = ?').get(design_id) as ({ decision_id: number } & Record<string, unknown>) | undefined;
 			if (!design) return text({ error: `Design ${design_id} not found` });
 			const steps = db.prepare('SELECT * FROM design_steps WHERE design_id = ? ORDER BY position').all(design_id) as DesignStep[];
 			const scripts = db.prepare('SELECT * FROM pgbench_scripts WHERE step_id IN (SELECT id FROM design_steps WHERE design_id = ?) ORDER BY step_id, position').all(design_id) as PgbenchScript[];
 			const params = db.prepare('SELECT * FROM design_params WHERE design_id = ? ORDER BY position').all(design_id) as DesignParam[];
+			// Decision-level inherited params (read-only on design, used in suite runs exclusively)
+			const decisionParams = design.decision_id
+				? db.prepare('SELECT * FROM decision_params WHERE decision_id = ? ORDER BY position').all(design.decision_id)
+				: [];
 			const scriptsByStep = new Map<number, PgbenchScript[]>();
 			for (const ps of scripts) {
 				const arr = scriptsByStep.get(ps.step_id) ?? [];
 				arr.push(ps);
 				scriptsByStep.set(ps.step_id, arr);
 			}
-			return text({ ...design, steps: steps.map(s => ({ ...s, pgbench_scripts: scriptsByStep.get(s.id) ?? [] })), params });
+			return text({ ...design, steps: steps.map(s => ({ ...s, pgbench_scripts: scriptsByStep.get(s.id) ?? [] })), params, decision_params: decisionParams });
 		}
 	);
 
@@ -789,7 +795,7 @@ Checks performed:
   - No enabled bench step (pgbench or sysbench) — nothing to benchmark
   - pgbench step with no scripts defined
   - wait step with duration_secs = 0
-  - {{PARAM}} placeholders used in scripts/options but not defined in design params
+  - {{PARAM}} placeholders used in scripts/options but not defined in design params or inherited decision params
   - Defined params with empty values
 Call this before run_design or export_plan to catch problems early.`,
 			inputSchema: {
@@ -810,6 +816,12 @@ Call this before run_design or export_plan to catch problems early.`,
 			const steps = db.prepare('SELECT * FROM design_steps WHERE design_id = ? ORDER BY position').all(design_id) as DesignStep[];
 			const pgbenchScripts = db.prepare('SELECT * FROM pgbench_scripts WHERE step_id IN (SELECT id FROM design_steps WHERE design_id = ?) ORDER BY step_id, position').all(design_id) as PgbenchScript[];
 			const params = db.prepare('SELECT * FROM design_params WHERE design_id = ? ORDER BY position').all(design_id) as DesignParam[];
+
+			// Load decision-level params so inherited {{PARAM}} refs are not flagged as undefined
+			const designRow = db.prepare('SELECT decision_id FROM designs WHERE id = ?').get(design_id) as { decision_id: number } | undefined;
+			const decisionParams = designRow?.decision_id
+				? db.prepare('SELECT name FROM decision_params WHERE decision_id = ? ORDER BY position').all(designRow.decision_id) as { name: string }[]
+				: [];
 
 			const scriptsByStep = new Map<number, PgbenchScript[]>();
 			for (const ps of pgbenchScripts) {
@@ -860,8 +872,11 @@ Call this before run_design or export_plan to catch problems early.`,
 				}
 			}
 
-			// Param placeholder checks
-			const definedParams = new Set(params.map(p => p.name).filter(Boolean));
+			// Param placeholder checks — include decision-level inherited params
+			const definedParams = new Set([
+				...decisionParams.map(p => p.name),
+				...params.map(p => p.name)
+			].filter(Boolean));
 			const placeholderPattern = /\{\{([\w]+)\}\}/g;
 
 			for (const step of enabledSteps) {

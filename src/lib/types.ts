@@ -153,6 +153,21 @@ export interface ParamProfile {
 	values: { param_name: string; value: string }[];
 }
 
+export interface DecisionParam {
+	id: number;
+	decision_id: number;
+	position: number;
+	name: string;
+	value: string;
+}
+
+export interface DecisionParamProfile {
+	id: number;
+	decision_id: number;
+	name: string;
+	values: { param_name: string; value: string }[];
+}
+
 export interface RunStepResult {
 	id: number;
 	run_id: number;
