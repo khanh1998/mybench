@@ -3767,6 +3767,141 @@ function buildHostDerivedRateGroup(
 	return { key, label, kind, title, series };
 }
 
+interface SchedIntervalAggregate {
+	t: number;
+	startMs: number;
+	endMs: number;
+	runNs: number;
+	waitNs: number;
+	timeslices: number;
+	wallNs: number;
+	cpuUtilizations: number[];
+}
+
+function getSchedIntervals(rows: Record<string, unknown>[], runStartMs: number): SchedIntervalAggregate[] {
+	const cpuIds = [...new Set(rows.map((row) => String(row.cpu_id ?? '')).filter(Boolean))];
+	const buckets = new Map<number, SchedIntervalAggregate>();
+
+	for (const cpuId of cpuIds) {
+		const cpuRows = rows
+			.filter((row) => String(row.cpu_id ?? '') === cpuId)
+			.sort((a, b) => (toMs(a._collected_at as string | null) ?? 0) - (toMs(b._collected_at as string | null) ?? 0));
+
+		for (let i = 1; i < cpuRows.length; i++) {
+			const t1 = toMs(cpuRows[i]._collected_at as string | null);
+			const t0 = toMs(cpuRows[i - 1]._collected_at as string | null);
+			if (t1 === null || t0 === null || t1 <= t0) continue;
+
+			const runNs = Number(cpuRows[i].run_time_ns) - Number(cpuRows[i - 1].run_time_ns);
+			const waitNs = Number(cpuRows[i].wait_time_ns) - Number(cpuRows[i - 1].wait_time_ns);
+			const timeslices = Number(cpuRows[i].timeslices) - Number(cpuRows[i - 1].timeslices);
+			if (!Number.isFinite(runNs) || !Number.isFinite(waitNs) || !Number.isFinite(timeslices)) continue;
+			if (runNs < 0 || waitNs < 0 || timeslices < 0) continue;
+
+			const t = t1 - runStartMs;
+			const current = buckets.get(t) ?? {
+				t,
+				startMs: t0,
+				endMs: t1,
+				runNs: 0,
+				waitNs: 0,
+				timeslices: 0,
+				wallNs: 0,
+				cpuUtilizations: []
+			};
+			current.runNs += runNs;
+			current.waitNs += waitNs;
+			current.timeslices += timeslices;
+			current.wallNs = Math.max(current.wallNs, (t1 - t0) * 1_000_000);
+			current.startMs = Math.min(current.startMs, t0);
+			current.endMs = Math.max(current.endMs, t1);
+			current.cpuUtilizations.push(runNs / ((t1 - t0) * 1_000_000));
+			buckets.set(t, current);
+		}
+	}
+
+	return [...buckets.values()].sort((a, b) => a.t - b.t);
+}
+
+function buildSchedDerivedGroup(
+	key: string,
+	label: string,
+	title: string,
+	rows: Record<string, unknown>[],
+	runStartMs: number,
+	seriesDefs: Array<{
+		label: string;
+		description?: string;
+		valueFn: (interval: SchedIntervalAggregate) => number | null;
+		rawValueFn?: (interval: SchedIntervalAggregate) => number | null;
+		rawLabel?: string;
+		rawDescription?: string;
+	}>,
+	kind: TelemetryValueKind
+): TelemetryChartMetric | null {
+	const intervals = getSchedIntervals(rows, runStartMs);
+	const rawSeries: TelemetrySeries[] = [];
+	const series = seriesDefs
+		.map((def, index): TelemetrySeries | null => {
+			const points = intervals
+				.map((interval) => {
+					const value = def.valueFn(interval);
+					if (value === null || !Number.isFinite(value)) return null;
+					return { t: interval.t, v: value };
+				})
+				.filter((point): point is TelemetrySeriesPoint => point !== null);
+			if (points.length === 0) return null;
+			const color = COLORS[index % COLORS.length];
+			if (def.rawValueFn) {
+				let cumulative = 0;
+				const rawPoints = intervals
+					.map((interval) => {
+						const value = def.rawValueFn?.(interval);
+						if (value === null || value === undefined || !Number.isFinite(value)) return null;
+						cumulative += value;
+						return { t: interval.t, v: cumulative };
+					})
+					.filter((point): point is TelemetrySeriesPoint => point !== null);
+				if (rawPoints.length > 0) {
+					rawSeries.push({
+						label: def.rawLabel ?? rawCounterLabel(def.label),
+						description: def.rawDescription ?? rawCounterDescription(def.description, def.label),
+						color,
+						points: rawPoints
+					});
+				}
+			}
+			return { label: def.label, description: def.description, color, points };
+		})
+		.filter((item): item is TelemetrySeries => item !== null);
+	if (series.length === 0) return null;
+	return { key, label, kind, title, series, rawSeries: rawSeries.length > 0 ? rawSeries : undefined, category: 'derived' };
+}
+
+function median(values: number[]): number | null {
+	const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
+	if (sorted.length === 0) return null;
+	const mid = Math.floor(sorted.length / 2);
+	return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
+
+function transactionsBetween(rows: SnapshotRow[], startMs: number, endMs: number): number | null {
+	const sorted = rows
+		.map((row) => ({ row, t: toMs(row._collected_at) }))
+		.filter((item): item is { row: SnapshotRow; t: number } => item.t !== null)
+		.sort((a, b) => a.t - b.t);
+	if (sorted.length < 2) return null;
+
+	const beforeStart = [...sorted].reverse().find((item) => item.t <= startMs) ?? sorted[0];
+	const beforeEnd = [...sorted].reverse().find((item) => item.t <= endMs) ?? sorted[sorted.length - 1];
+	if (beforeEnd.t <= beforeStart.t) return null;
+
+	const commit = (toNumber(beforeEnd.row.xact_commit) ?? 0) - (toNumber(beforeStart.row.xact_commit) ?? 0);
+	const rollback = (toNumber(beforeEnd.row.xact_rollback) ?? 0) - (toNumber(beforeStart.row.xact_rollback) ?? 0);
+	const total = commit + rollback;
+	return total > 0 ? total : null;
+}
+
 function withChartGroup(metric: TelemetryChartMetric | null, group: string, entity?: string): TelemetryChartMetric | null {
 	if (!metric) return null;
 	return { ...metric, group, entity };
@@ -4002,7 +4137,7 @@ const HOST_COL_DESCS: Record<string, string> = {
 	nvol_ctxt_sw: 'Involuntary context switches per second',
 };
 
-function buildHostSystemSection(db: Database.Database, runId: number, runStartMs: number, selectedPhases: TelemetryPhase[], benchStartedAt: string | null, postStartedAt: string | null): TelemetrySection {
+function buildHostSystemSection(db: Database.Database, runId: number, runStartMs: number, selectedPhases: TelemetryPhase[], benchStartedAt: string | null, postStartedAt: string | null, databaseRows: SnapshotRow[]): TelemetrySection {
 	const noData: TelemetrySection = {
 		key: 'host_system',
 		label: 'System',
@@ -4334,6 +4469,137 @@ function buildHostSystemSection(db: Database.Database, runId: number, runStartMs
 
 	// /proc/schedstat — per CPU
 	if (schedstatRows.length > 1) {
+		const schedDemand = buildSchedDerivedGroup('sched_demand', 'Demand', 'CPU Scheduler Demand',
+			schedstatRows, runStartMs, [
+				{
+					label: 'used cores',
+					description: 'Effective cores consumed by running tasks: run_time_ns / elapsed wall time.',
+					valueFn: (interval) => safeRatio(interval.runNs, interval.wallNs)
+				},
+				{
+					label: 'runnable demand cores',
+					description: 'CPU cores demanded by runnable work, including queued run-queue wait: (run_time_ns + wait_time_ns) / elapsed wall time.',
+					valueFn: (interval) => safeRatio(interval.runNs + interval.waitNs, interval.wallNs)
+				},
+				{
+					label: 'saturation gap cores',
+					description: 'Runnable CPU demand that could not run immediately: wait_time_ns / elapsed wall time.',
+					valueFn: (interval) => safeRatio(interval.waitNs, interval.wallNs)
+				},
+			], 'count');
+		pushChartMetric(chartMetrics, withChartGroup(schedDemand, 'CPU Sched', 'All CPUs'));
+
+		const schedDelay = buildSchedDerivedGroup('sched_delay', 'Delay', 'CPU Scheduler Delay',
+			schedstatRows, runStartMs, [
+				{
+					label: 'scheduler delay %',
+					description: 'Share of runnable scheduler demand spent waiting for CPU: wait_time_ns / (run_time_ns + wait_time_ns).',
+					valueFn: (interval) => {
+						const value = safeRatio(interval.waitNs, interval.runNs + interval.waitNs);
+						return value === null ? null : value * 100;
+					}
+				},
+			], 'percent');
+		pushChartMetric(chartMetrics, withChartGroup(schedDelay, 'CPU Sched', 'All CPUs'));
+
+		const schedSlices = buildSchedDerivedGroup('sched_slices', 'Slice Cost', 'CPU Scheduler Slice Cost',
+			schedstatRows, runStartMs, [
+				{
+					label: 'wait ms / slice',
+					description: 'Average runnable wait before a scheduler timeslice: wait_time_ns / timeslices.',
+					valueFn: (interval) => {
+						const value = safeRatio(interval.waitNs, interval.timeslices);
+						return value === null ? null : value / 1_000_000;
+					}
+				},
+				{
+					label: 'runtime ms / slice',
+					description: 'Average CPU runtime granted per scheduler timeslice: run_time_ns / timeslices.',
+					valueFn: (interval) => {
+						const value = safeRatio(interval.runNs, interval.timeslices);
+						return value === null ? null : value / 1_000_000;
+					}
+				},
+			], 'duration_ms');
+		pushChartMetric(chartMetrics, withChartGroup(schedSlices, 'CPU Sched', 'All CPUs'));
+
+		const schedTxCost = buildSchedDerivedGroup('sched_tx_cost', 'Tx Cost', 'CPU Scheduler Cost per Transaction',
+			schedstatRows, runStartMs, [
+				{
+					label: 'CPU runtime ms / tx',
+					description: 'Host scheduler runtime normalized by database transactions in the same sample interval.',
+					valueFn: (interval) => {
+						const tx = transactionsBetween(databaseRows, interval.startMs, interval.endMs);
+						const value = safeRatio(interval.runNs, tx);
+						return value === null ? null : value / 1_000_000;
+					}
+				},
+				{
+					label: 'scheduler wait ms / tx',
+					description: 'Runnable CPU scheduler wait normalized by database transactions in the same sample interval.',
+					valueFn: (interval) => {
+						const tx = transactionsBetween(databaseRows, interval.startMs, interval.endMs);
+						const value = safeRatio(interval.waitNs, tx);
+						return value === null ? null : value / 1_000_000;
+					}
+				},
+			], 'duration_ms');
+		pushChartMetric(chartMetrics, withChartGroup(schedTxCost, 'CPU Sched', 'All CPUs'));
+
+		const schedTxChurn = buildSchedDerivedGroup('sched_tx_churn', 'Timeslices / Tx', 'CPU Scheduler Timeslices per Transaction',
+			schedstatRows, runStartMs, [
+				{
+					label: 'timeslices / tx',
+					description: 'Scheduler timeslices normalized by database transactions in the same sample interval.',
+					valueFn: (interval) => safeRatio(interval.timeslices, transactionsBetween(databaseRows, interval.startMs, interval.endMs))
+				},
+			], 'count');
+		pushChartMetric(chartMetrics, withChartGroup(schedTxChurn, 'CPU Sched', 'All CPUs'));
+
+		const schedImbalance = buildSchedDerivedGroup('sched_imbalance', 'CPU Imbalance', 'CPU Scheduler Imbalance',
+			schedstatRows, runStartMs, [
+				{
+					label: 'max - median CPU util',
+					description: 'Difference between the busiest CPU and median CPU scheduler utilization in the sample interval.',
+					valueFn: (interval) => {
+						const med = median(interval.cpuUtilizations);
+						const max = interval.cpuUtilizations.length > 0 ? Math.max(...interval.cpuUtilizations) : null;
+						if (med === null || max === null) return null;
+						return Math.max(0, max - med) * 100;
+					}
+				},
+			], 'percent');
+		pushChartMetric(chartMetrics, withChartGroup(schedImbalance, 'CPU Sched', 'All CPUs'));
+
+		const schedAll = buildSchedDerivedGroup('sched_all', 'Sched', 'Scheduler All CPUs (ns/s)',
+			schedstatRows, runStartMs, [
+				{
+					label: 'Run time ns/s',
+					description: 'Nanoseconds all CPUs spent running tasks per second, summed across CPUs.',
+					valueFn: (interval) => safeRatio(interval.runNs, interval.wallNs / 1_000_000_000),
+					rawValueFn: (interval) => interval.runNs,
+					rawLabel: 'Run time ns',
+					rawDescription: 'Cumulative nanoseconds all CPUs spent running tasks, summed across CPUs and normalized to zero at the first selected sample.'
+				},
+				{
+					label: 'Wait time ns/s',
+					description: 'Nanoseconds runnable tasks spent waiting in CPU run queues per second, summed across CPUs.',
+					valueFn: (interval) => safeRatio(interval.waitNs, interval.wallNs / 1_000_000_000),
+					rawValueFn: (interval) => interval.waitNs,
+					rawLabel: 'Wait time ns',
+					rawDescription: 'Cumulative nanoseconds runnable tasks spent waiting in CPU run queues, summed across CPUs and normalized to zero at the first selected sample.'
+				},
+				{
+					label: 'Timeslices/s',
+					description: 'Scheduler timeslices per second, summed across CPUs.',
+					valueFn: (interval) => safeRatio(interval.timeslices, interval.wallNs / 1_000_000_000),
+					rawValueFn: (interval) => interval.timeslices,
+					rawLabel: 'Timeslices',
+					rawDescription: 'Cumulative scheduler timeslices, summed across CPUs and normalized to zero at the first selected sample.'
+				},
+			], 'count');
+		pushChartMetric(chartMetrics, withChartGroup(schedAll, 'CPU Sched', 'All CPUs'));
+
 		const cpuIds = [...new Set(schedstatRows.map(r => r.cpu_id as string).filter(Boolean))];
 		for (const cpuId of cpuIds) {
 			const cpuRows = schedstatRows.filter(r => r.cpu_id === cpuId);
@@ -4849,7 +5115,7 @@ export function buildRunTelemetry(db: Database.Database, runId: number, phases?:
 		buildStatioUserTablesSection(statioUserTableRows, runStartMs),
 		buildStatioUserIndexesSection(statioUserIndexRows, runStartMs),
 		buildStatioUserSequencesSection(statioUserSequenceRows, runStartMs),
-		buildHostSystemSection(db, runId, runStartMs, selectedPhases, run.bench_started_at, run.post_started_at),
+		buildHostSystemSection(db, runId, runStartMs, selectedPhases, run.bench_started_at, run.post_started_at, databaseRows),
 		buildHostProcessesSection(db, runId, runStartMs, selectedPhases, run.bench_started_at, run.post_started_at)
 	];
 

@@ -1,8 +1,7 @@
 <script lang="ts">
   import LineChart from '$lib/LineChart.svelte';
   import BarChart from '$lib/BarChart.svelte';
-  import { formatValue } from '$lib/telemetry/format';
-  import type { TelemetryChartMetric, TelemetrySection, TelemetrySeries, TelemetryValueKind } from '$lib/telemetry/types';
+  import type { TelemetryChartMetric, TelemetrySection, TelemetrySeries } from '$lib/telemetry/types';
 
   interface CompareRun {
     id: number;
@@ -19,13 +18,6 @@
     key: string;
     label: string;
     type: 'all' | 'client' | 'internal' | 'internal_process';
-  }
-
-  interface SummaryCompareRow {
-    key: string;
-    label: string;
-    kind: TelemetryValueKind;
-    values: Record<number, unknown>;
   }
 
   let {
@@ -286,6 +278,21 @@
       ?? null;
   }
 
+  function sourceSeriesForSelection(section: TelemetrySection | null | undefined): TelemetrySeries | null {
+    if (!section || section.status !== 'ok' || !selectedSeriesLabel) return null;
+
+    if (isHostProcessesSection) {
+      if (!activeProcessOption || !activeProcessMetricType) return null;
+      const pids = pidsForProcessSelection(section, activeProcessOption.key);
+      return metricSeriesForView(getAggregatedProcessMetric(section, pids, activeProcessMetricType.key))
+        .find((series) => series.label === selectedSeriesLabel) ?? null;
+    }
+
+    return activeMetric
+      ? metricSeriesForView(findComparableMetric(section, activeMetric)).find((series) => series.label === selectedSeriesLabel) ?? null
+      : section.chartSeries.find((series) => series.label === selectedSeriesLabel) ?? null;
+  }
+
   const seriesOptions = $derived.by(() => {
     const labels = new Set<string>();
 
@@ -309,52 +316,6 @@
     return [...labels];
   });
 
-  const summaryRows = $derived.by((): SummaryCompareRow[] => {
-    if (isHostProcessesSection) {
-      const processKey = activeProcessOption?.key ?? null;
-
-      function sumField(section: TelemetrySection | null | undefined, field: string): number {
-        if (!section || section.status !== 'ok') return 0;
-        const activePids = new Set(pidsForProcessSelection(section, processKey));
-        return section.tableRows
-          .filter((row) => activePids.has(Number(row.pid)))
-          .reduce((sum, row) => sum + (Number(row[field]) || 0), 0);
-      }
-
-      function pidCount(section: TelemetrySection | null | undefined): number {
-        return pidsForProcessSelection(section, processKey).length;
-      }
-
-      function valuesFor(getValue: (section: TelemetrySection | null | undefined) => unknown): Record<number, unknown> {
-        return Object.fromEntries(runs.map((run) => [run.id, getValue(sectionsByRun[run.id])]));
-      }
-
-      return [
-        { key: 'processes', label: 'Processes', kind: 'count', values: valuesFor((section) => pidCount(section)) },
-        { key: 'rss', label: 'RSS', kind: 'bytes', values: valuesFor((section) => sumField(section, 'vm_rss_kb') * 1024) },
-        { key: 'swap', label: 'Swap', kind: 'bytes', values: valuesFor((section) => sumField(section, 'vm_swap_kb') * 1024) },
-        { key: 'threads', label: 'Threads', kind: 'count', values: valuesFor((section) => sumField(section, 'threads')) },
-        { key: 'fds', label: 'FDs', kind: 'count', values: valuesFor((section) => sumField(section, 'fd_count')) },
-        { key: 'cpu_jiffies', label: 'CPU Jiffies', kind: 'count', values: valuesFor((section) => sumField(section, 'cpu_jiffies_delta')) },
-        { key: 'major_faults', label: 'Major Faults', kind: 'count', values: valuesFor((section) => sumField(section, 'major_faults_delta')) },
-        { key: 'sched_wait', label: 'Sched Wait', kind: 'duration_ms', values: valuesFor((section) => sumField(section, 'sched_wait_ms_delta')) },
-      ];
-    }
-
-    const cards = firstSection?.summary ?? [];
-    return cards.map((card) => ({
-      key: card.key,
-      label: card.label,
-      kind: card.kind,
-      values: Object.fromEntries(
-        runs.map((run) => [
-          run.id,
-          sectionsByRun[run.id]?.summary.find((entry) => entry.key === card.key)?.value ?? null
-        ])
-      )
-    }));
-  });
-
   const mergedSeries = $derived.by(() => {
     if (!selectedSeriesLabel) return [];
 
@@ -362,18 +323,7 @@
       .map((run) => {
         const section = sectionsByRun[run.id];
         if (!section || section.status !== 'ok') return null;
-
-        const sourceSeries = (() => {
-          if (isHostProcessesSection) {
-            if (!activeProcessOption || !activeProcessMetricType) return null;
-            const pids = pidsForProcessSelection(section, activeProcessOption.key);
-            return metricSeriesForView(getAggregatedProcessMetric(section, pids, activeProcessMetricType.key))
-              .find((series) => series.label === selectedSeriesLabel) ?? null;
-          }
-          return activeMetric
-            ? metricSeriesForView(findComparableMetric(section, activeMetric)).find((series) => series.label === selectedSeriesLabel) ?? null
-            : section.chartSeries.find((series) => series.label === selectedSeriesLabel) ?? null;
-        })();
+        const sourceSeries = sourceSeriesForSelection(section);
 
         if (!sourceSeries) return null;
         return {
@@ -383,6 +333,15 @@
         };
       })
       .filter((series): series is { label: string; color: string; points: { t: number; v: number }[] } => series !== null);
+  });
+
+  const selectedSeriesDescription = $derived.by(() => {
+    for (const run of runs) {
+      const description = sourceSeriesForSelection(sectionsByRun[run.id])?.description;
+      if (description) return description;
+    }
+    if (isHostProcessesSection) return activeProcessMetric?.description ?? null;
+    return activeMetric?.description ?? null;
   });
 
   const chartTitle = $derived.by(() => {
@@ -472,7 +431,6 @@
     <h4>{label}</h4>
     <span class="compare-section-note">{runs.length} runs</span>
   </div>
-
 
   {#if isHostProcessesSection ? (processOptions.length > 0 || seriesOptions.length > 1) : (metricOptions.length > 0 || seriesOptions.length > 1)}
     {#if !isHostProcessesSection && metricGroups.length > 1}
@@ -593,6 +551,13 @@
 
   {#if activeValueView !== 'avg'}
     <div class="alignment-note">Lines are aligned to each run&apos;s first selected telemetry sample.</div>
+  {/if}
+
+  {#if selectedSeriesDescription}
+    <div class="series-description">
+      <span>{selectedSeriesLabel ?? 'Series'}</span>
+      {selectedSeriesDescription}
+    </div>
   {/if}
 
   {#if mergedSeries.length > 0}
@@ -741,6 +706,21 @@
   .alignment-note {
     font-size: 12px;
     color: #6b7280;
+  }
+
+  .series-description {
+    border-left: 3px solid #0066cc;
+    background: #f8fafc;
+    color: #445065;
+    font-size: 12px;
+    line-height: 1.45;
+    padding: 8px 10px;
+  }
+
+  .series-description span {
+    color: #1f2937;
+    font-weight: 700;
+    margin-right: 6px;
   }
 
 </style>
