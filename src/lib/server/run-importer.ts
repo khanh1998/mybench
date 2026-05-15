@@ -74,6 +74,7 @@ export interface RunnerResultStep {
 		rows_per_sec?: number | null;
 	};
 	perf?: RunnerPerfResult;
+	perfs?: RunnerPerfResult[];
 	started_at: string;
 	finished_at: string;
 }
@@ -90,6 +91,7 @@ export interface RunnerPerfEvent {
 }
 
 export interface RunnerPerfResult {
+	mode?: 'stat' | 'record' | 'trace';
 	status: string;
 	scope: string;
 	cgroup?: string;
@@ -100,6 +102,9 @@ export interface RunnerPerfResult {
 	started_at?: string;
 	finished_at?: string;
 	events?: RunnerPerfEvent[];
+	top_functions?: Array<{ overhead?: number; symbol?: string; dso?: string }>;
+	script_output?: string;
+	syscall_summary?: Array<Record<string, unknown>>;
 }
 
 export interface RunnerResult {
@@ -192,9 +197,9 @@ export function importResultIntoRun(runId: number, result: RunnerResult): void {
 		const insPerf = db.prepare(`
 			INSERT INTO run_step_perf (
 				run_id, step_id, status, scope, cgroup, command, raw_output, raw_error,
-				warnings_json, started_at, finished_at
+				mode, result_json, perf_script_output, warnings_json, started_at, finished_at
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`);
 		const insPerfEvent = db.prepare(`
 			INSERT INTO run_step_perf_events (
@@ -221,21 +226,30 @@ export function importResultIntoRun(runId: number, result: RunnerResult): void {
 					s.started_at,
 					s.finished_at
 				);
-				if (s.perf) {
+				for (const perf of s.perfs ?? (s.perf ? [s.perf] : [])) {
+					const mode = perf.mode ?? 'stat';
+					const resultJson = mode === 'record'
+						? JSON.stringify({ top_functions: perf.top_functions ?? [] })
+						: mode === 'trace'
+							? JSON.stringify({ syscall_summary: perf.syscall_summary ?? [] })
+							: '';
 					insPerf.run(
 						runId,
 						s.step_id,
-						s.perf.status ?? '',
-						s.perf.scope ?? 'disabled',
-						s.perf.cgroup ?? '',
-						s.perf.command ?? '',
-						s.perf.raw_output ?? '',
-						s.perf.raw_error ?? '',
-						s.perf.warnings ? JSON.stringify(s.perf.warnings) : '',
-						s.perf.started_at ?? null,
-						s.perf.finished_at ?? null
+						perf.status ?? '',
+						perf.scope ?? 'disabled',
+						perf.cgroup ?? '',
+						perf.command ?? '',
+						perf.raw_output ?? '',
+						perf.raw_error ?? '',
+						mode,
+						resultJson,
+						perf.script_output ?? '',
+						perf.warnings ? JSON.stringify(perf.warnings) : '',
+						perf.started_at ?? null,
+						perf.finished_at ?? null
 					);
-					for (const ev of s.perf.events ?? []) {
+					for (const ev of perf.events ?? []) {
 						insPerfEvent.run(
 							runId,
 							s.step_id,

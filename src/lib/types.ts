@@ -4,7 +4,8 @@ export type DesignStepType =
 	| 'sysbench'
 	| 'collect'
 	| 'pg_stat_statements_reset'
-	| 'pg_stat_statements_collect';
+	| 'pg_stat_statements_collect'
+	| 'perf';
 
 export interface PgServer {
 	id: number;
@@ -107,6 +108,22 @@ export interface DesignStep {
 	no_transaction: number; // 0 or 1 — SQL steps only: omit --single-transaction
 	collect_perf: number; // 0 or 1 — pgbench/sysbench steps only
 	perf_duration: string; // seconds expression; supports {{PARAM}} placeholders
+	perf_stat_duration: string;
+	perf_record_duration: string;
+	perf_trace_duration: string;
+	perf_stat_enabled: number;
+	perf_record_enabled: number;
+	perf_trace_enabled: number;
+	perf_delay: string; // seconds before sampling starts; supports {{PARAM}} placeholders
+	perf_stat_delay: string;
+	perf_record_delay: string;
+	perf_trace_delay: string;
+	perf_mode: 'stat' | 'record' | 'trace';
+	perf_cgroup: string;
+	perf_events: string;
+	perf_repeat: string;
+	perf_freq: string;
+	perf_call_graph: 'dwarf' | 'fp' | 'lbr';
 	enabled: number; // 0 or 1
 	pgbench_scripts?: PgbenchScript[];
 }
@@ -206,12 +223,15 @@ export interface RunStepPerf {
 	id: number;
 	run_id: number;
 	step_id: number;
+	mode: 'stat' | 'record' | 'trace';
 	status: string;
 	scope: 'postgres_cgroup' | 'system' | 'disabled';
 	cgroup: string;
 	command: string;
 	raw_output: string;
 	raw_error: string;
+	result_json: string;
+	perf_script_output: string;
 	warnings_json: string;
 	started_at: string | null;
 	finished_at: string | null;

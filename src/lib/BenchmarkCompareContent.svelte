@@ -163,6 +163,7 @@
   );
 
   const hasPerfData = $derived(selectedRunsWithPerf.some((entry) => entry.perf.length > 0));
+  const hasNonStatPerfData = $derived(selectedRunsWithPerf.some((entry) => entry.perf.some((perf) => (perf.mode ?? 'stat') !== 'stat')));
 
   const perfMetricOptions = $derived((): PerfMetricOption[] => {
     const eventNames = new Set<string>();
@@ -760,6 +761,9 @@
           <p class="perf-raw-note">Raw: absolute counter values — duration-dependent. Use Per Tx for run comparisons.</p>
         {:else if perfViewMode === 'derived'}
           <p class="perf-raw-note">Derived: perf's own computed metrics (e.g. GHz for cpu-cycles). Not all events have a derived value.</p>
+        {/if}
+        {#if hasNonStatPerfData}
+          <p class="perf-raw-note">Record and trace perf steps are not compared here yet; this tab compares stat event counters only.</p>
         {/if}
 
         {#if perfCompareRows().length > 0}

@@ -25,11 +25,74 @@ type perfCollector struct {
 	startedAt time.Time
 }
 
+func newPerfResult(mode string, srv plan.ServerConfig) *result.PerfResult {
+	return &result.PerfResult{
+		Mode:      mode,
+		Status:    "unavailable",
+		Scope:     srv.PerfScope,
+		Cgroup:    srv.PerfCgroup,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+}
+
+func preparePerfStep(mode string, step plan.Step, opts RunOpts) (*result.PerfResult, int, bool) {
+	srv := opts.Plan.Server
+	res := newPerfResult(mode, srv)
+	durationSecs, warning := resolvePerfDurationForMode(step, mode, opts.Plan.Params)
+	if warning != "" {
+		res.Warnings = append(res.Warnings, warning)
+		res.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+		return res, 0, false
+	}
+	if !srv.PerfEnabled || srv.PerfScope == "" || srv.PerfScope == "disabled" {
+		res.Warnings = append(res.Warnings, "perf is disabled for this PostgreSQL server")
+		res.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+		return res, 0, false
+	}
+	if !srv.SSHEnabled || srv.SSHUser == "" || srv.SSHPrivateKey == "" {
+		res.Warnings = append(res.Warnings, "DB SSH credentials are not configured")
+		res.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+		return res, 0, false
+	}
+	return res, durationSecs, true
+}
+
+func resolvePerfDurationForMode(step plan.Step, mode string, params []plan.Param) (int, string) {
+	modeDuration := step.PerfDuration
+	switch mode {
+	case "stat":
+		if strings.TrimSpace(step.PerfStatDuration) != "" {
+			modeDuration = step.PerfStatDuration
+		}
+	case "record":
+		if strings.TrimSpace(step.PerfRecordDuration) != "" {
+			modeDuration = step.PerfRecordDuration
+		}
+	case "trace":
+		if strings.TrimSpace(step.PerfTraceDuration) != "" {
+			modeDuration = step.PerfTraceDuration
+		}
+	}
+	return resolvePerfDurationValue(modeDuration, params)
+}
+
+func runPerfStatStep(step plan.Step, opts RunOpts, res *result.StepResult) error {
+	pending, err := firePerfStep(step, opts, res)
+	if err != nil {
+		return err
+	}
+	for i := range pending {
+		collectPendingPerf(&pending[i])
+	}
+	return nil
+}
+
 func maybeStartPerf(srv plan.ServerConfig, step plan.Step, params []plan.Param, _ int) (*perfCollector, *result.PerfResult) {
 	if !step.CollectPerf {
 		return nil, nil
 	}
 	res := &result.PerfResult{
+		Mode:      "stat",
 		Status:    "unavailable",
 		Scope:     srv.PerfScope,
 		Cgroup:    srv.PerfCgroup,
@@ -176,17 +239,21 @@ func runPerfSSHCommand(client *ssh.Client, cmd string) (string, error) {
 }
 
 func resolvePerfDuration(step plan.Step, params []plan.Param) (int, string) {
-	if strings.TrimSpace(step.PerfDuration) == "" {
+	return resolvePerfDurationValue(step.PerfDuration, params)
+}
+
+func resolvePerfDurationValue(value string, params []plan.Param) (int, string) {
+	if strings.TrimSpace(value) == "" {
 		return 0, "perf duration is empty; skipping perf"
 	}
-	raw := strings.TrimSpace(plan.SubstituteParams(step.PerfDuration, params))
+	raw := strings.TrimSpace(plan.SubstituteParams(value, params))
 	if n, err := strconv.Atoi(raw); err == nil && n > 0 {
 		return n, ""
 	}
 	if strings.Contains(raw, "{{") || strings.Contains(raw, "}}") {
-		return 0, fmt.Sprintf("perf duration %q did not resolve to a number; skipping perf", step.PerfDuration)
+		return 0, fmt.Sprintf("perf duration %q did not resolve to a number; skipping perf", value)
 	}
-	return 0, fmt.Sprintf("perf duration %q is not a positive number; skipping perf", step.PerfDuration)
+	return 0, fmt.Sprintf("perf duration %q is not a positive number; skipping perf", value)
 }
 
 func parseDurationFromArgs(args []string, flag string) int {

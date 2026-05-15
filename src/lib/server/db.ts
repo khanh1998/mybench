@@ -14,6 +14,61 @@ const DEFAULT_PERF_EVENTS =
 
 let _db: Database.Database | null = null;
 
+function migrateRunStepPerfUniqueConstraint(db: Database.Database): void {
+	type IndexRow = { name: string; unique: number };
+	type IndexInfoRow = { seqno: number; name: string };
+	const indexes = db.prepare(`PRAGMA index_list(run_step_perf)`).all() as IndexRow[];
+	const hasModeUnique = indexes.some((idx) => {
+		if (!idx.unique) return false;
+		const cols = (db.prepare(`PRAGMA index_info(${idx.name})`).all() as IndexInfoRow[])
+			.sort((a, b) => a.seqno - b.seqno)
+			.map((col) => col.name);
+		return cols.join(',') === 'run_id,step_id,mode';
+	});
+	if (hasModeUnique) return;
+
+	const hasOldUnique = indexes.some((idx) => {
+		if (!idx.unique) return false;
+		const cols = (db.prepare(`PRAGMA index_info(${idx.name})`).all() as IndexInfoRow[])
+			.sort((a, b) => a.seqno - b.seqno)
+			.map((col) => col.name);
+		return cols.join(',') === 'run_id,step_id';
+	});
+	const tableSql = (db.prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'run_step_perf'`).get() as { sql: string } | undefined)?.sql ?? '';
+	if (!hasOldUnique && !tableSql.includes('UNIQUE(run_id, step_id)')) return;
+
+	db.exec(`
+    ALTER TABLE run_step_perf RENAME TO run_step_perf_old;
+    CREATE TABLE run_step_perf (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      step_id INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT '',
+      scope TEXT NOT NULL DEFAULT 'disabled',
+      cgroup TEXT NOT NULL DEFAULT '',
+      command TEXT NOT NULL DEFAULT '',
+      raw_output TEXT NOT NULL DEFAULT '',
+      raw_error TEXT NOT NULL DEFAULT '',
+      mode TEXT NOT NULL DEFAULT 'stat',
+      result_json TEXT NOT NULL DEFAULT '',
+      perf_script_output TEXT NOT NULL DEFAULT '',
+      warnings_json TEXT NOT NULL DEFAULT '',
+      started_at TEXT,
+      finished_at TEXT,
+      UNIQUE(run_id, step_id, mode)
+    );
+    INSERT INTO run_step_perf (
+      id, run_id, step_id, status, scope, cgroup, command, raw_output, raw_error,
+      mode, result_json, perf_script_output, warnings_json, started_at, finished_at
+    )
+    SELECT
+      id, run_id, step_id, status, scope, cgroup, command, raw_output, raw_error,
+      mode, result_json, perf_script_output, warnings_json, started_at, finished_at
+    FROM run_step_perf_old;
+    DROP TABLE run_step_perf_old;
+  `);
+}
+
 function createSnapPgStatStatementsTableSql(): string {
 	const dataColumns = PG_STAT_STATEMENTS_SQLITE_COLUMNS.map(
 		([name, type]) => `${name} ${type}`
@@ -533,7 +588,23 @@ function migrate(db: Database.Database) {
       duration_secs INTEGER NOT NULL DEFAULT 0,
       no_transaction INTEGER NOT NULL DEFAULT 0,
       collect_perf INTEGER NOT NULL DEFAULT 0,
-      perf_duration TEXT NOT NULL DEFAULT ''
+      perf_duration TEXT NOT NULL DEFAULT '',
+      perf_stat_duration TEXT NOT NULL DEFAULT '',
+      perf_record_duration TEXT NOT NULL DEFAULT '',
+      perf_trace_duration TEXT NOT NULL DEFAULT '',
+      perf_stat_enabled INTEGER NOT NULL DEFAULT 0,
+      perf_record_enabled INTEGER NOT NULL DEFAULT 0,
+      perf_trace_enabled INTEGER NOT NULL DEFAULT 0,
+      perf_delay TEXT NOT NULL DEFAULT '',
+      perf_stat_delay TEXT NOT NULL DEFAULT '',
+      perf_record_delay TEXT NOT NULL DEFAULT '',
+      perf_trace_delay TEXT NOT NULL DEFAULT '',
+      perf_mode TEXT NOT NULL DEFAULT 'stat',
+      perf_cgroup TEXT NOT NULL DEFAULT '',
+      perf_events TEXT NOT NULL DEFAULT '',
+      perf_repeat TEXT NOT NULL DEFAULT '',
+      perf_freq TEXT NOT NULL DEFAULT '',
+      perf_call_graph TEXT NOT NULL DEFAULT 'dwarf'
     );
 
     CREATE TABLE IF NOT EXISTS benchmark_runs (
@@ -583,9 +654,13 @@ function migrate(db: Database.Database) {
       command TEXT NOT NULL DEFAULT '',
       raw_output TEXT NOT NULL DEFAULT '',
       raw_error TEXT NOT NULL DEFAULT '',
+      mode TEXT NOT NULL DEFAULT 'stat',
+      result_json TEXT NOT NULL DEFAULT '',
+      perf_script_output TEXT NOT NULL DEFAULT '',
       warnings_json TEXT NOT NULL DEFAULT '',
       started_at TEXT,
-      finished_at TEXT
+      finished_at TEXT,
+      UNIQUE(run_id, step_id, mode)
     );
 
     CREATE TABLE IF NOT EXISTS run_step_perf_events (
@@ -675,9 +750,13 @@ function migrate(db: Database.Database) {
       command TEXT NOT NULL DEFAULT '',
       raw_output TEXT NOT NULL DEFAULT '',
       raw_error TEXT NOT NULL DEFAULT '',
+      mode TEXT NOT NULL DEFAULT 'stat',
+      result_json TEXT NOT NULL DEFAULT '',
+      perf_script_output TEXT NOT NULL DEFAULT '',
       warnings_json TEXT NOT NULL DEFAULT '',
       started_at TEXT,
-      finished_at TEXT
+      finished_at TEXT,
+      UNIQUE(run_id, step_id, mode)
     );
     CREATE TABLE IF NOT EXISTS run_step_perf_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -697,6 +776,11 @@ function migrate(db: Database.Database) {
   const perfEventCols = (db.prepare(`PRAGMA table_info(run_step_perf_events)`).all() as { name: string }[]).map(c => c.name);
   if (!perfEventCols.includes('derived_value')) db.exec(`ALTER TABLE run_step_perf_events ADD COLUMN derived_value REAL`);
   if (!perfEventCols.includes('derived_unit')) db.exec(`ALTER TABLE run_step_perf_events ADD COLUMN derived_unit TEXT NOT NULL DEFAULT ''`);
+  const perfCols = (db.prepare(`PRAGMA table_info(run_step_perf)`).all() as { name: string }[]).map(c => c.name);
+  if (!perfCols.includes('mode')) db.exec(`ALTER TABLE run_step_perf ADD COLUMN mode TEXT NOT NULL DEFAULT 'stat'`);
+  if (!perfCols.includes('result_json')) db.exec(`ALTER TABLE run_step_perf ADD COLUMN result_json TEXT NOT NULL DEFAULT ''`);
+  if (!perfCols.includes('perf_script_output')) db.exec(`ALTER TABLE run_step_perf ADD COLUMN perf_script_output TEXT NOT NULL DEFAULT ''`);
+  migrateRunStepPerfUniqueConstraint(db);
 
   // Add cmdline column to host_snap_proc_pid_stat (idempotent)
   const pidStatCols = (db.prepare(`PRAGMA table_info(host_snap_proc_pid_stat)`).all() as { name: string }[]).map(c => c.name);
@@ -718,6 +802,29 @@ function migrate(db: Database.Database) {
   const ec2ServerCols = (db.prepare(`PRAGMA table_info(ec2_servers)`).all() as { name: string }[]).map(c => c.name);
   if (!ec2ServerCols.includes('vpc')) db.exec(`ALTER TABLE ec2_servers ADD COLUMN vpc TEXT NOT NULL DEFAULT ''`);
   if (!ec2ServerCols.includes('cli_log_dir')) db.exec(`ALTER TABLE ec2_servers ADD COLUMN cli_log_dir TEXT NOT NULL DEFAULT '/tmp/gocli-logs'`);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS benchmark_series (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      design_id      INTEGER NOT NULL REFERENCES designs(id) ON DELETE CASCADE,
+      name           TEXT    NOT NULL DEFAULT '',
+      delay_seconds  INTEGER NOT NULL DEFAULT 0,
+      status         TEXT    NOT NULL DEFAULT 'running',
+      ec2_run_token  TEXT,
+      created_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+      finished_at    TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS decision_suites (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      decision_id    INTEGER NOT NULL REFERENCES decisions(id) ON DELETE CASCADE,
+      name           TEXT    NOT NULL DEFAULT '',
+      status         TEXT    NOT NULL DEFAULT 'running',
+      ec2_run_token  TEXT,
+      created_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+      finished_at    TEXT
+    );
+  `);
 
   // Add cli_log column for persisting Go CLI stderr (warnings, errors) downloaded after each run
   const runColsCliLog = (db.prepare(`PRAGMA table_info(benchmark_runs)`).all() as { name: string }[]).map(c => c.name);
@@ -821,6 +928,31 @@ function migrate(db: Database.Database) {
 	if (!stepCols.includes('no_transaction')) db.exec(`ALTER TABLE design_steps ADD COLUMN no_transaction INTEGER NOT NULL DEFAULT 0`);
 	if (!stepCols.includes('collect_perf')) db.exec(`ALTER TABLE design_steps ADD COLUMN collect_perf INTEGER NOT NULL DEFAULT 0`);
 	if (!stepCols.includes('perf_duration')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_duration TEXT NOT NULL DEFAULT ''`);
+	if (!stepCols.includes('perf_stat_duration')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_stat_duration TEXT NOT NULL DEFAULT ''`);
+	if (!stepCols.includes('perf_record_duration')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_record_duration TEXT NOT NULL DEFAULT ''`);
+	if (!stepCols.includes('perf_trace_duration')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_trace_duration TEXT NOT NULL DEFAULT ''`);
+	if (!stepCols.includes('perf_stat_enabled')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_stat_enabled INTEGER NOT NULL DEFAULT 0`);
+	if (!stepCols.includes('perf_record_enabled')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_record_enabled INTEGER NOT NULL DEFAULT 0`);
+	if (!stepCols.includes('perf_trace_enabled')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_trace_enabled INTEGER NOT NULL DEFAULT 0`);
+	if (!stepCols.includes('perf_delay')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_delay TEXT NOT NULL DEFAULT ''`);
+	if (!stepCols.includes('perf_stat_delay')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_stat_delay TEXT NOT NULL DEFAULT ''`);
+	if (!stepCols.includes('perf_record_delay')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_record_delay TEXT NOT NULL DEFAULT ''`);
+	if (!stepCols.includes('perf_trace_delay')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_trace_delay TEXT NOT NULL DEFAULT ''`);
+	if (!stepCols.includes('perf_mode')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_mode TEXT NOT NULL DEFAULT 'stat'`);
+	if (!stepCols.includes('perf_cgroup')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_cgroup TEXT NOT NULL DEFAULT ''`);
+	if (!stepCols.includes('perf_events')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_events TEXT NOT NULL DEFAULT ''`);
+	if (!stepCols.includes('perf_repeat')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_repeat TEXT NOT NULL DEFAULT ''`);
+	if (!stepCols.includes('perf_freq')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_freq TEXT NOT NULL DEFAULT ''`);
+	if (!stepCols.includes('perf_call_graph')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_call_graph TEXT NOT NULL DEFAULT 'dwarf'`);
+	const perfModeToggleMigrated = db.prepare(`SELECT id FROM schema_migrations WHERE id = 'perf_mode_toggles_v1'`).get();
+	if (!perfModeToggleMigrated) {
+		db.exec(`
+      UPDATE design_steps SET perf_stat_enabled = 1 WHERE type = 'perf' AND perf_mode = 'stat';
+      UPDATE design_steps SET perf_record_enabled = 1 WHERE type = 'perf' AND perf_mode = 'record';
+      UPDATE design_steps SET perf_trace_enabled = 1 WHERE type = 'perf' AND perf_mode = 'trace';
+    `);
+		db.prepare(`INSERT INTO schema_migrations (id) VALUES ('perf_mode_toggles_v1')`).run();
+	}
 
 	db.exec(createSnapPgStatStatementsTableSql().replace('CREATE TABLE ', 'CREATE TABLE IF NOT EXISTS '));
 	const pgStatStatementsMigrated = db.prepare(`SELECT id FROM schema_migrations WHERE id = 'snap_pg_stat_statements_v2'`).get();

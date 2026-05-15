@@ -55,26 +55,50 @@ export function generatePlan(designId: number, overrides: PlanRunSettingsOverrid
 		scriptsByStep.set(ps.step_id, arr);
 	}
 
-	const stepsWithScripts = steps.map(s => ({
-		id: s.id,
-		position: s.position,
-		name: s.name,
-		type: s.type,
-		enabled: !!s.enabled,
-		script: s.script,
-		no_transaction: !!s.no_transaction,
-		duration_secs: s.duration_secs,
-		collect_perf: !!s.collect_perf,
-		perf_duration: s.perf_duration ?? '',
-		pgbench_options: s.pgbench_options,
-		pgbench_scripts: s.type === 'pgbench' ? (scriptsByStep.get(s.id) ?? []).map(ps => ({
-			id: ps.id,
-			name: ps.name,
-			weight: ps.weight,
-			weight_expr: ps.weight_expr ?? null,
-			script: ps.script
-		})) : []
-	}));
+	const stepsWithScripts = steps.map(s => {
+		const base = {
+			id: s.id,
+			position: s.position,
+			name: s.name,
+			type: s.type,
+			enabled: !!s.enabled
+		};
+		if (s.type === 'perf') {
+			return {
+				...base,
+				perf_stat_enabled: !!s.perf_stat_enabled,
+				perf_record_enabled: !!s.perf_record_enabled,
+				perf_trace_enabled: !!s.perf_trace_enabled,
+				perf_events: s.perf_events ?? '',
+				perf_duration: s.perf_duration ?? '',
+				perf_stat_duration: s.perf_stat_duration ?? '',
+				perf_record_duration: s.perf_record_duration ?? '',
+				perf_trace_duration: s.perf_trace_duration ?? '',
+				perf_delay: s.perf_delay ?? '',
+				perf_stat_delay: s.perf_stat_delay ?? '',
+				perf_record_delay: s.perf_record_delay ?? '',
+				perf_trace_delay: s.perf_trace_delay ?? '',
+				perf_cgroup: s.perf_cgroup ?? '',
+				perf_repeat: s.perf_repeat ?? '',
+				perf_freq: s.perf_freq ?? '',
+				perf_call_graph: s.perf_call_graph ?? 'dwarf'
+			};
+		}
+		return {
+			...base,
+			script: s.script,
+			no_transaction: !!s.no_transaction,
+			duration_secs: s.duration_secs,
+			pgbench_options: s.pgbench_options,
+			pgbench_scripts: s.type === 'pgbench' ? (scriptsByStep.get(s.id) ?? []).map(ps => ({
+				id: ps.id,
+				name: ps.name,
+				weight: ps.weight,
+				weight_expr: ps.weight_expr ?? null,
+				script: ps.script
+			})) : []
+		};
+	});
 
 	const designParams = db.prepare(
 		'SELECT * FROM design_params WHERE design_id = ? ORDER BY position'

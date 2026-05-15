@@ -51,13 +51,41 @@ export const PUT: RequestHandler = async ({ params: routeParams, request }) => {
 
 	if (body.steps) {
 		const upsert = db.prepare(
-			`INSERT INTO design_steps (id, design_id, position, name, type, script, pgbench_options, enabled, duration_secs, no_transaction, collect_perf, perf_duration)
-       VALUES (@id, @design_id, @position, @name, @type, @script, @pgbench_options, @enabled, @duration_secs, @no_transaction, @collect_perf, @perf_duration)
+			`INSERT INTO design_steps (
+				 id, design_id, position, name, type, script, pgbench_options, enabled,
+				 duration_secs, no_transaction, collect_perf, perf_duration,
+				 perf_stat_duration, perf_record_duration, perf_trace_duration,
+				 perf_stat_enabled, perf_record_enabled, perf_trace_enabled, perf_delay,
+				 perf_stat_delay, perf_record_delay, perf_trace_delay,
+				 perf_cgroup, perf_events, perf_repeat, perf_freq, perf_call_graph
+			 )
+       VALUES (
+				 @id, @design_id, @position, @name, @type, @script, @pgbench_options, @enabled,
+				 @duration_secs, @no_transaction, @collect_perf, @perf_duration,
+				 @perf_stat_duration, @perf_record_duration, @perf_trace_duration,
+				 @perf_stat_enabled, @perf_record_enabled, @perf_trace_enabled, @perf_delay,
+				 @perf_stat_delay, @perf_record_delay, @perf_trace_delay,
+				 @perf_cgroup, @perf_events, @perf_repeat, @perf_freq, @perf_call_graph
+			 )
        ON CONFLICT(id) DO UPDATE SET
          position=excluded.position, name=excluded.name, type=excluded.type,
          script=excluded.script, pgbench_options=excluded.pgbench_options, enabled=excluded.enabled,
          duration_secs=excluded.duration_secs, no_transaction=excluded.no_transaction,
-         collect_perf=excluded.collect_perf, perf_duration=excluded.perf_duration`
+         collect_perf=excluded.collect_perf, perf_duration=excluded.perf_duration,
+         perf_stat_duration=excluded.perf_stat_duration,
+         perf_record_duration=excluded.perf_record_duration,
+         perf_trace_duration=excluded.perf_trace_duration,
+         perf_stat_enabled=excluded.perf_stat_enabled,
+         perf_record_enabled=excluded.perf_record_enabled,
+         perf_trace_enabled=excluded.perf_trace_enabled,
+         perf_delay=excluded.perf_delay,
+         perf_stat_delay=excluded.perf_stat_delay,
+         perf_record_delay=excluded.perf_record_delay,
+         perf_trace_delay=excluded.perf_trace_delay,
+         perf_cgroup=excluded.perf_cgroup,
+         perf_events=excluded.perf_events,
+         perf_repeat=excluded.perf_repeat, perf_freq=excluded.perf_freq,
+         perf_call_graph=excluded.perf_call_graph`
 		);
 		const submittedStepIds = body.steps.map((s: { id: number }) => s.id);
 		const deleteRemovedSteps =
@@ -70,7 +98,29 @@ export const PUT: RequestHandler = async ({ params: routeParams, request }) => {
 		const doUpsert = db.transaction(() => {
 			deleteRemovedSteps.run(designId, ...submittedStepIds);
 			for (const s of body.steps) {
-				upsert.run({ ...s, design_id: designId, duration_secs: s.duration_secs ?? 0, no_transaction: s.no_transaction ?? 0, collect_perf: s.collect_perf ?? 0, perf_duration: s.perf_duration ?? '' });
+				upsert.run({
+					...s,
+					design_id: designId,
+					duration_secs: s.duration_secs ?? 0,
+					no_transaction: s.no_transaction ?? 0,
+					collect_perf: s.collect_perf ?? 0,
+					perf_duration: s.perf_duration ?? '',
+					perf_stat_duration: s.perf_stat_duration ?? '',
+					perf_record_duration: s.perf_record_duration ?? '',
+					perf_trace_duration: s.perf_trace_duration ?? '',
+					perf_stat_enabled: s.perf_stat_enabled ?? 0,
+					perf_record_enabled: s.perf_record_enabled ?? 0,
+					perf_trace_enabled: s.perf_trace_enabled ?? 0,
+					perf_delay: s.perf_delay ?? '',
+					perf_stat_delay: s.perf_stat_delay ?? '',
+					perf_record_delay: s.perf_record_delay ?? '',
+					perf_trace_delay: s.perf_trace_delay ?? '',
+					perf_cgroup: s.perf_cgroup ?? '',
+					perf_events: s.perf_events ?? '',
+					perf_repeat: s.perf_repeat ?? '',
+					perf_freq: s.perf_freq ?? '',
+					perf_call_graph: s.perf_call_graph ?? 'dwarf'
+				});
 				deleteScripts.run(s.id);
 				if (s.type === 'pgbench') {
 					for (const ps of s.pgbench_scripts ?? []) {

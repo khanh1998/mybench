@@ -52,12 +52,15 @@ export interface CompareStepPerf {
   step_id: number;
   step_name: string | null;
   step_type: string | null;
+  mode: 'stat' | 'record' | 'trace';
   status: string;
   scope: 'postgres_cgroup' | 'system' | 'disabled';
   cgroup: string;
   command: string;
   raw_output: string;
   raw_error: string;
+  result_json: string;
+  perf_script_output: string;
   warnings_json: string;
   started_at: string | null;
   finished_at: string | null;

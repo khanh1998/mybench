@@ -66,6 +66,9 @@ function createTestDb() {
 			command TEXT NOT NULL DEFAULT '',
 			raw_output TEXT NOT NULL DEFAULT '',
 			raw_error TEXT NOT NULL DEFAULT '',
+			mode TEXT NOT NULL DEFAULT 'stat',
+			result_json TEXT NOT NULL DEFAULT '',
+			perf_script_output TEXT NOT NULL DEFAULT '',
 			warnings_json TEXT NOT NULL DEFAULT '',
 			started_at TEXT,
 			finished_at TEXT

@@ -1,0 +1,13 @@
+{
+	"servers": {
+		"mybench-mcp-local": {
+			"url": "http://localhost:5173/mcp",
+			"type": "http"
+		},
+		"mybench-mcp-ec2": {
+			"url": "http://ec2-52-62-6-243.ap-southeast-2.compute.amazonaws.com:3000/mcp",
+			"type": "http"
+		}
+	},
+	"inputs": []
+}

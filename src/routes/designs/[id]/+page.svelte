@@ -39,6 +39,21 @@
     no_transaction: number;
     collect_perf: number;
     perf_duration: string;
+    perf_stat_duration: string;
+    perf_record_duration: string;
+    perf_trace_duration: string;
+    perf_stat_enabled: number;
+    perf_record_enabled: number;
+    perf_trace_enabled: number;
+    perf_delay: string;
+    perf_stat_delay: string;
+    perf_record_delay: string;
+    perf_trace_delay: string;
+    perf_cgroup: string;
+    perf_events: string;
+    perf_repeat: string;
+    perf_freq: string;
+    perf_call_graph: 'dwarf' | 'fp' | 'lbr';
     enabled: number;
     pgbench_scripts?: PgbenchScript[];
   }
@@ -53,6 +68,8 @@
   interface Profile { id: number; design_id: number; name: string; values: { param_name: string; value: string }[]; }
   interface DecisionParam { id: number; decision_id: number; position: number; name: string; value: string; }
   interface DecisionProfile { id: number; decision_id: number; name: string; values: { param_name: string; value: string }[]; }
+  type PerfMode = 'stat' | 'record' | 'trace';
+  const PERF_MODES: PerfMode[] = ['stat', 'record', 'trace'];
 
   let design = $state<Design | null>(null);
   let servers = $state<Server[]>([]);
@@ -79,6 +96,7 @@
     { value: 'sql', label: 'SQL' },
     { value: 'pgbench', label: 'pgbench' },
     { value: 'sysbench', label: 'sysbench' },
+    { value: 'perf', label: 'perf' },
     { value: 'collect', label: 'wait' },
     { value: 'pg_stat_statements_reset', label: 'reset pg_stat_statements' },
     { value: 'pg_stat_statements_collect', label: 'collect pg_stat_statements' }
@@ -174,6 +192,59 @@
     if (/^\d+$/.test(trimmed)) return {};
     if (/^\{\{[\w]+\}\}$/.test(trimmed)) return {};
     return { error: 'Must be a number or {{PARAM_NAME}}' };
+  }
+
+  function parseRequiredPerfDurationField(raw: string): { error?: string } {
+    if (raw.trim() === '') return { error: 'Required for perf steps' };
+    return parsePerfDurationField(raw);
+  }
+
+  function getModeDuration(step: Step, mode: PerfMode): string {
+    if (mode === 'stat') return step.perf_stat_duration || step.perf_duration || '';
+    if (mode === 'record') return step.perf_record_duration || step.perf_duration || '';
+    return step.perf_trace_duration || step.perf_duration || '';
+  }
+
+  function setModeDuration(step: Step, mode: PerfMode, value: string) {
+    if (mode === 'stat') step.perf_stat_duration = value;
+    else if (mode === 'record') step.perf_record_duration = value;
+    else step.perf_trace_duration = value;
+  }
+
+  function getModeDelay(step: Step, mode: PerfMode): string {
+    if (mode === 'stat') return step.perf_stat_delay || step.perf_delay || '';
+    if (mode === 'record') return step.perf_record_delay || step.perf_delay || '';
+    return step.perf_trace_delay || step.perf_delay || '';
+  }
+
+  function setModeDelay(step: Step, mode: PerfMode, value: string) {
+    if (mode === 'stat') step.perf_stat_delay = value;
+    else if (mode === 'record') step.perf_record_delay = value;
+    else step.perf_trace_delay = value;
+  }
+
+  function getModeEnabled(step: Step, mode: PerfMode): number {
+    if (mode === 'stat') return step.perf_stat_enabled ?? 0;
+    if (mode === 'record') return step.perf_record_enabled ?? 0;
+    return step.perf_trace_enabled ?? 0;
+  }
+
+  function setModeEnabled(step: Step, mode: PerfMode, enabled: boolean) {
+    if (mode === 'stat') step.perf_stat_enabled = enabled ? 1 : 0;
+    else if (mode === 'record') step.perf_record_enabled = enabled ? 1 : 0;
+    else step.perf_trace_enabled = enabled ? 1 : 0;
+  }
+
+  function resolveParamPreview(value: string): { text: string; unresolved: string[] } | null {
+    if (!value.includes('{{')) return null;
+    const valuesByName = new Map(effectiveDefaultParams.map((p) => [p.name, p.value]));
+    const unresolved: string[] = [];
+    const text = value.replace(/\{\{([\w]+)\}\}/g, (match, name: string) => {
+      if (valuesByName.has(name)) return valuesByName.get(name) ?? '';
+      unresolved.push(name);
+      return match;
+    });
+    return { text, unresolved };
   }
 
   let scriptWeightErrors = $state<Record<number, string>>({});
@@ -373,7 +444,27 @@
     design ? validateScriptWeights(design, previewParams()) : []
   );
   const hasScriptWeightErrors = $derived(Object.keys(scriptWeightErrors).length > 0);
-  const hasPerfDurationErrors = $derived(Object.keys(perfDurationErrors).length > 0);
+  const perfStepValidationErrors = $derived((design?.steps ?? []).flatMap((step: Step) => {
+    if (step.type !== 'perf') return [];
+    const errors: string[] = [];
+    for (const mode of ['stat', 'record', 'trace'] as const) {
+      const rawDuration = getModeDuration(step, mode);
+      const duration = getModeEnabled(step, mode)
+        ? parseRequiredPerfDurationField(rawDuration)
+        : parsePerfDurationField(rawDuration);
+      if (duration.error) errors.push(`${step.name}: ${mode} duration ${duration.error.toLowerCase()}`);
+    }
+    const repeat = parsePerfDurationField(step.perf_repeat ?? '');
+    if (repeat.error) errors.push(`${step.name}: repeat must be a number or {{PARAM_NAME}}`);
+    const freq = parsePerfDurationField(step.perf_freq ?? '');
+    if (freq.error) errors.push(`${step.name}: frequency must be a number or {{PARAM_NAME}}`);
+    for (const mode of ['stat', 'record', 'trace'] as const) {
+      const delay = parsePerfDurationField(getModeDelay(step, mode));
+      if (delay.error) errors.push(`${step.name}: ${mode} delay must be a number or {{PARAM_NAME}}`);
+    }
+    return errors;
+  }));
+  const hasPerfDurationErrors = $derived(Object.keys(perfDurationErrors).length > 0 || perfStepValidationErrors.length > 0);
   const isValid = $derived(validationErrors.length === 0 && weightErrors.length === 0 && !hasScriptWeightErrors && !hasPerfDurationErrors);
 
   function stepTypeLabel(type: DesignStepType): string {
@@ -493,6 +584,21 @@
       no_transaction: 0,
       collect_perf: 0,
       perf_duration: '',
+      perf_stat_duration: '',
+      perf_record_duration: '',
+      perf_trace_duration: '',
+      perf_stat_enabled: 1,
+      perf_record_enabled: 0,
+      perf_trace_enabled: 0,
+      perf_delay: '',
+      perf_stat_delay: '',
+      perf_record_delay: '',
+      perf_trace_delay: '',
+      perf_cgroup: '',
+      perf_events: '',
+      perf_repeat: '',
+      perf_freq: '',
+      perf_call_graph: 'dwarf',
       enabled: 1,
       pgbench_scripts: []
     };
@@ -621,7 +727,7 @@
       class:warn={!isValid}
       class:active={showValidation}
       title="Validation status"
-    >{isValid ? '✓ Valid' : `⚠ ${validationErrors.length + weightErrors.length + Object.keys(scriptWeightErrors).length + Object.keys(perfDurationErrors).length} issue(s)`}</button>
+    >{isValid ? '✓ Valid' : `⚠ ${validationErrors.length + weightErrors.length + Object.keys(scriptWeightErrors).length + Object.keys(perfDurationErrors).length + perfStepValidationErrors.length} issue(s)`}</button>
     <button onclick={save} disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
     <button class="primary" onclick={openRunModal} disabled={startingRun}>
       {startingRun ? 'Starting…' : '▶ Run'}
@@ -658,6 +764,9 @@
       <div class="validation-title" style={(validationErrors.length > 0 || weightErrors.length > 0 || hasScriptWeightErrors) ? 'margin-top:8px' : ''}>⚠ Invalid perf duration:</div>
       {#each Object.entries(perfDurationErrors) as [sid, err]}
         <div class="validation-item">· step #{sid}: {err}</div>
+      {/each}
+      {#each perfStepValidationErrors as err}
+        <div class="validation-item">· {err}</div>
       {/each}
     {/if}
   </div>
@@ -1148,6 +1257,8 @@
             <input type="number" bind:value={selectedStep.duration_secs} min="0" max="3600" class="collect-duration-input" />
             s
           </label>
+        {:else if selectedStep.type === 'perf'}
+          <span class="no-txn-label">DB host perf</span>
         {:else}
           <label class="no-txn-label" title="Run statements outside a transaction block — required for VACUUM, CREATE INDEX CONCURRENTLY, etc.">
             <input
@@ -1159,45 +1270,153 @@
           </label>
         {/if}
       </div>
-      {#if selectedStep.type === 'pgbench' || selectedStep.type === 'sysbench'}
-        <div class="bench-options-row">
-          <label class="perf-toggle" title="Run perf stat on the DB host for exactly this benchmark interval">
-            <input
-              type="checkbox"
-              checked={!!selectedStep.collect_perf}
-              onchange={(e) => { selectedStep.collect_perf = (e.currentTarget as HTMLInputElement).checked ? 1 : 0; }}
-            />
-            Collect DB perf during this benchmark step
-          </label>
-          {#if selectedStep.collect_perf}
-            <label class="perf-duration-label" title={'Seconds perf should run on the DB host; enter a number or a param like {{DURATION_SECS}}'}>
-              Perf duration
+      {#if selectedStep.type === 'perf'}
+        <div class="perf-step-panel">
+          <div class="perf-grid">
+            <label title={'Filter to a specific cgroup only. Leave empty for system-wide. Supports {{PARAM}} substitution.'}>
+              Cgroup (optional)
               <input
-                value={selectedStep.perf_duration}
-                oninput={(e) => {
-                  const val = (e.currentTarget as HTMLInputElement).value;
-                  selectedStep!.perf_duration = val;
-                  const result = parsePerfDurationField(val);
-                  if (result.error) perfDurationErrors[selectedStep!.id] = result.error;
-                  else delete perfDurationErrors[selectedStep!.id];
-                }}
-                placeholder={'180 or {{DURATION_SECS}}'}
+                bind:value={selectedStep.perf_cgroup}
+                placeholder={'e.g. system.slice/postgresql.service or {{CGROUP}}'}
                 spellcheck="false"
-                class:weight-input-error={!!perfDurationErrors[selectedStep.id]}
               />
-              {#if perfDurationErrors[selectedStep.id]}
-                <span class="weight-error-badge" title={perfDurationErrors[selectedStep.id]}>!</span>
-              {:else if selectedStep.perf_duration && /^\{\{[\w]+\}\}$/.test(selectedStep.perf_duration.trim())}
-                {@const paramName = selectedStep.perf_duration.trim().slice(2, -2)}
-                {@const resolved = effectiveDefaultParams.find(p => p.name === paramName)?.value ?? '?'}
-                <span class="weight-preview" title="Resolved value using default params">→{resolved}s</span>
+              {#if resolveParamPreview(selectedStep.perf_cgroup)}
+                {@const preview = resolveParamPreview(selectedStep.perf_cgroup)!}
+                <span class="param-preview" class:param-preview-error={preview.unresolved.length > 0}>
+                  {preview.unresolved.length > 0 ? `unresolved: ${preview.unresolved.join(', ')}` : `→ ${preview.text}`}
+                </span>
               {/if}
-              <span>s</span>
             </label>
-          {/if}
+          </div>
+
+          {#each PERF_MODES as mode}
+            <section class="perf-mode-section" class:perf-mode-disabled={!getModeEnabled(selectedStep, mode)}>
+              <label class="perf-enable-toggle">
+                <input
+                  type="checkbox"
+                  checked={!!getModeEnabled(selectedStep, mode)}
+                  onchange={(e) => setModeEnabled(selectedStep!, mode, (e.currentTarget as HTMLInputElement).checked)}
+                />
+                Enable {mode}
+              </label>
+              <div class="perf-grid">
+                <label title="Seconds to wait before sampling starts — useful for skipping benchmark warmup">
+                  Delay (s)
+                  <input
+                    value={getModeDelay(selectedStep, mode)}
+                    oninput={(e) => {
+                      const val = (e.currentTarget as HTMLInputElement).value;
+                      setModeDelay(selectedStep!, mode, val);
+                      const result = parsePerfDurationField(val);
+                      if (result.error) perfDurationErrors[selectedStep!.id] = result.error;
+                      else delete perfDurationErrors[selectedStep!.id];
+                    }}
+                    placeholder={'0 or {{WARMUP_SECS}}'}
+                    spellcheck="false"
+                  />
+                  {#if resolveParamPreview(getModeDelay(selectedStep, mode))}
+                    {@const preview = resolveParamPreview(getModeDelay(selectedStep, mode))!}
+                    <span class="param-preview" class:param-preview-error={preview.unresolved.length > 0}>
+                      {preview.unresolved.length > 0 ? `unresolved: ${preview.unresolved.join(', ')}` : `→ ${preview.text}`}
+                    </span>
+                  {/if}
+                </label>
+                <label>
+                  Duration
+                  <input
+                    value={getModeDuration(selectedStep, mode)}
+                    oninput={(e) => {
+                      const val = (e.currentTarget as HTMLInputElement).value;
+                      setModeDuration(selectedStep!, mode, val);
+                      const result = getModeEnabled(selectedStep!, mode)
+                        ? parseRequiredPerfDurationField(val)
+                        : parsePerfDurationField(val);
+                      if (result.error) perfDurationErrors[selectedStep!.id] = result.error;
+                      else delete perfDurationErrors[selectedStep!.id];
+                    }}
+                    placeholder={mode === 'trace' ? '{{DURATION}} or 15' : '{{DURATION}} or 30'}
+                    class:weight-input-error={!!perfDurationErrors[selectedStep.id]}
+                    spellcheck="false"
+                  />
+                  {#if resolveParamPreview(getModeDuration(selectedStep, mode))}
+                    {@const preview = resolveParamPreview(getModeDuration(selectedStep, mode))!}
+                    <span class="param-preview" class:param-preview-error={preview.unresolved.length > 0}>
+                      {preview.unresolved.length > 0 ? `unresolved: ${preview.unresolved.join(', ')}` : `→ ${preview.text}`}
+                    </span>
+                  {/if}
+                </label>
+              </div>
+
+              {#if mode === 'stat'}
+                <label>
+                  Events
+                  <textarea
+                    bind:value={selectedStep.perf_events}
+                    rows="3"
+                    placeholder="task-clock,context-switches,page-faults,minor-faults,major-faults"
+                    spellcheck="false"
+                  ></textarea>
+                </label>
+                <div class="perf-grid">
+                  <label>
+                    Repeat (-r)
+                    <input
+                      value={selectedStep.perf_repeat}
+                      oninput={(e) => {
+                        const val = (e.currentTarget as HTMLInputElement).value;
+                        selectedStep!.perf_repeat = val;
+                        const result = parsePerfDurationField(val);
+                        if (result.error) perfDurationErrors[selectedStep!.id] = result.error;
+                        else delete perfDurationErrors[selectedStep!.id];
+                      }}
+                      placeholder={'optional or {{REPEAT}}'}
+                      spellcheck="false"
+                    />
+                    {#if resolveParamPreview(selectedStep.perf_repeat)}
+                      {@const preview = resolveParamPreview(selectedStep.perf_repeat)!}
+                      <span class="param-preview" class:param-preview-error={preview.unresolved.length > 0}>
+                        {preview.unresolved.length > 0 ? `unresolved: ${preview.unresolved.join(', ')}` : `→ ${preview.text}`}
+                      </span>
+                    {/if}
+                  </label>
+                </div>
+              {:else if mode === 'record'}
+                <div class="perf-grid">
+                  <label>
+                    Frequency (-F)
+                    <input
+                      value={selectedStep.perf_freq}
+                      oninput={(e) => {
+                        const val = (e.currentTarget as HTMLInputElement).value;
+                        selectedStep!.perf_freq = val;
+                        const result = parsePerfDurationField(val);
+                        if (result.error) perfDurationErrors[selectedStep!.id] = result.error;
+                        else delete perfDurationErrors[selectedStep!.id];
+                      }}
+                      placeholder={'99 or {{FREQ}}'}
+                      spellcheck="false"
+                    />
+                    {#if resolveParamPreview(selectedStep.perf_freq)}
+                      {@const preview = resolveParamPreview(selectedStep.perf_freq)!}
+                      <span class="param-preview" class:param-preview-error={preview.unresolved.length > 0}>
+                        {preview.unresolved.length > 0 ? `unresolved: ${preview.unresolved.join(', ')}` : `→ ${preview.text}`}
+                      </span>
+                    {/if}
+                  </label>
+                  <label>
+                    Call graph
+                    <select bind:value={selectedStep.perf_call_graph}>
+                      <option value="dwarf">dwarf</option>
+                      <option value="fp">fp</option>
+                      <option value="lbr">lbr</option>
+                    </select>
+                  </label>
+                </div>
+              {/if}
+            </section>
+          {/each}
         </div>
-      {/if}
-      {#if selectedStep.type === 'collect'}
+      {:else if selectedStep.type === 'collect'}
         <div class="collect-info">
           <div class="collect-icon">📊</div>
           <div class="collect-desc">
@@ -1542,38 +1761,77 @@
     white-space: nowrap;
   }
 
-  .bench-options-row {
+  .perf-step-panel {
+    flex: 1;
+    min-height: 0;
     display: flex;
-    align-items: center;
+    flex-direction: column;
     gap: 14px;
-    flex-wrap: wrap;
-    flex-shrink: 0;
-    padding: 8px 12px;
-    background: #252526;
+    padding: 16px;
+    background: #1e1e1e;
+    color: #ddd;
     border-bottom: 1px solid #333;
+    overflow-y: auto;
   }
-  .perf-toggle {
+  .perf-mode-section {
     display: flex;
-    align-items: center;
-    gap: 8px;
-    color: #ddd;
-    font-size: 12px;
-    font-weight: 600;
-    cursor: pointer;
+    flex-direction: column;
+    gap: 12px;
+    padding: 14px;
+    border: 1px solid #333;
+    border-radius: 6px;
+    background: #252526;
   }
-  .perf-toggle input { width: auto; }
-  .perf-duration-label {
-    display: flex;
+  .perf-mode-disabled {
+    opacity: 0.55;
+  }
+  .perf-enable-toggle {
+    flex-direction: row !important;
     align-items: center;
+    gap: 8px !important;
+  }
+  .perf-enable-toggle input {
+    width: auto;
+  }
+  .perf-step-panel label {
+    display: flex;
+    flex-direction: column;
     gap: 6px;
-    color: #ddd;
     font-size: 12px;
-    font-weight: 600;
+    font-weight: 700;
+    color: #cfcfcf;
   }
-  .perf-duration-label input {
-    width: 140px;
+  .perf-step-panel input,
+  .perf-step-panel textarea,
+  .perf-step-panel select {
+    background: #111;
+    color: #f2f2f2;
+    border: 1px solid #444;
+    border-radius: 4px;
+    padding: 8px;
     font-family: monospace;
     font-size: 12px;
+  }
+  .perf-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+  }
+  .perf-note {
+    margin: 0;
+    color: #f0c36d;
+    font-size: 12px;
+  }
+  .param-preview {
+    color: #a6e3a1;
+    font-family: monospace;
+    font-size: 11px;
+    font-weight: 500;
+    line-height: 1.2;
+    overflow-wrap: anywhere;
+  }
+  .param-preview-error {
+    color: #f38ba8;
   }
 
   button.active { background: #e8f0fe; border-color: #0066cc; color: #0066cc; }

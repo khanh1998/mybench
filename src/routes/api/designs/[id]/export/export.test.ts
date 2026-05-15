@@ -57,7 +57,20 @@ function createTestDb() {
       duration_secs INTEGER NOT NULL DEFAULT 0,
       no_transaction INTEGER NOT NULL DEFAULT 0,
       collect_perf INTEGER NOT NULL DEFAULT 0,
-      perf_duration TEXT NOT NULL DEFAULT ''
+      perf_duration TEXT NOT NULL DEFAULT '',
+      perf_stat_duration TEXT NOT NULL DEFAULT '',
+      perf_record_duration TEXT NOT NULL DEFAULT '',
+      perf_trace_duration TEXT NOT NULL DEFAULT '',
+      perf_delay TEXT NOT NULL DEFAULT '',
+      perf_stat_delay TEXT NOT NULL DEFAULT '',
+      perf_record_delay TEXT NOT NULL DEFAULT '',
+      perf_trace_delay TEXT NOT NULL DEFAULT '',
+      perf_mode TEXT NOT NULL DEFAULT 'stat',
+      perf_cgroup TEXT NOT NULL DEFAULT '',
+      perf_events TEXT NOT NULL DEFAULT '',
+      perf_repeat TEXT NOT NULL DEFAULT '',
+      perf_freq TEXT NOT NULL DEFAULT '',
+      perf_call_graph TEXT NOT NULL DEFAULT 'dwarf'
     );
     CREATE TABLE pgbench_scripts (
       id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -160,7 +173,7 @@ function exportPlan(db: Database.Database, designId: number) {
 
 	const steps = db.prepare(
 		'SELECT * FROM design_steps WHERE design_id = ? AND enabled = 1 ORDER BY position'
-	).all(designId) as { id: number; type: string; position: number; name: string; script: string; no_transaction: number; duration_secs: number; collect_perf: number; perf_duration: string; pgbench_options: string; enabled: number }[];
+	).all(designId) as { id: number; type: string; position: number; name: string; script: string; no_transaction: number; duration_secs: number; collect_perf: number; perf_duration: string; perf_stat_duration: string; perf_record_duration: string; perf_trace_duration: string; perf_stat_enabled: number; perf_record_enabled: number; perf_trace_enabled: number; perf_delay: string; perf_stat_delay: string; perf_record_delay: string; perf_trace_delay: string; perf_mode: string; perf_cgroup: string; perf_events: string; perf_repeat: string; perf_freq: string; perf_call_graph: string; pgbench_options: string; enabled: number }[];
 
 	const pgbenchScripts = db.prepare(
 		'SELECT * FROM pgbench_scripts WHERE step_id IN (SELECT id FROM design_steps WHERE design_id = ? AND enabled = 1) ORDER BY step_id, position'
@@ -173,7 +186,29 @@ function exportPlan(db: Database.Database, designId: number) {
 		scriptsByStep.set(ps.step_id, arr);
 	}
 
-	const stepsWithScripts = steps.map(s => ({
+	const stepsWithScripts = steps.map(s => s.type === 'perf' ? ({
+		id: s.id,
+		position: s.position,
+		name: s.name,
+		type: s.type,
+		enabled: !!s.enabled,
+		perf_stat_enabled: !!s.perf_stat_enabled,
+		perf_record_enabled: !!s.perf_record_enabled,
+		perf_trace_enabled: !!s.perf_trace_enabled,
+		perf_events: s.perf_events ?? '',
+		perf_duration: s.perf_duration ?? '',
+		perf_stat_duration: s.perf_stat_duration ?? '',
+		perf_record_duration: s.perf_record_duration ?? '',
+		perf_trace_duration: s.perf_trace_duration ?? '',
+		perf_delay: s.perf_delay ?? '',
+		perf_stat_delay: s.perf_stat_delay ?? '',
+		perf_record_delay: s.perf_record_delay ?? '',
+		perf_trace_delay: s.perf_trace_delay ?? '',
+		perf_cgroup: s.perf_cgroup ?? '',
+		perf_repeat: s.perf_repeat ?? '',
+		perf_freq: s.perf_freq ?? '',
+		perf_call_graph: s.perf_call_graph ?? 'dwarf'
+	}) : ({
 		id: s.id,
 		position: s.position,
 		name: s.name,
@@ -182,8 +217,6 @@ function exportPlan(db: Database.Database, designId: number) {
 		script: s.script,
 		no_transaction: !!s.no_transaction,
 		duration_secs: s.duration_secs,
-		collect_perf: !!s.collect_perf,
-		perf_duration: s.perf_duration ?? '',
 		pgbench_options: s.pgbench_options,
 		pgbench_scripts: s.type === 'pgbench' ? (scriptsByStep.get(s.id) ?? []).map(ps => ({
 			id: ps.id, name: ps.name, weight: ps.weight, script: ps.script
@@ -321,8 +354,8 @@ describe('Export endpoint logic', () => {
 		const plan = exportPlan(db, 1);
 		const benchStep = plan!.steps.find(s => s.type === 'pgbench');
 		expect(benchStep).toBeDefined();
-		expect(benchStep!.collect_perf).toBe(true);
-		expect(benchStep!.perf_duration).toBe('{{DURATION_SECS}}');
+		expect('collect_perf' in benchStep!).toBe(false);
+		expect('perf_duration' in benchStep!).toBe(false);
 		expect(benchStep!.pgbench_scripts).toHaveLength(1);
 		expect(benchStep!.pgbench_scripts![0].name).toBe('main');
 		expect(benchStep!.pgbench_scripts![0].weight).toBe(100);

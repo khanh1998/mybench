@@ -99,6 +99,13 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 		opts.emitEvent(map[string]any{"event": "run_done", "run_index": opts.RunIndex, "status": res.Run.Status})
 	}()
 
+	var pendingPerfs []pendingPerfCollect
+	defer func() {
+		if res.Run.Status == "failed" {
+			cleanupPendingPerfs(pendingPerfs)
+		}
+	}()
+
 	seenPgbench := false
 	var benchStartTime, benchEndTime time.Time
 	var lastPhase string // tracks the last emitted phase for transition events
@@ -199,6 +206,41 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 				stepRes.Log = msg
 			}
 
+		case "perf":
+			modes := enabledPerfModes(step)
+			opts.logInfo("[perf %s] %s (non-blocking)", strings.Join(modes, ","), step.Name)
+			pending, err := firePerfStep(step, opts, &stepRes)
+			if err != nil {
+				stepErr = err
+				stepRes.Status = "failed"
+				stepRes.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+				opts.emitEvent(map[string]any{"event": "step_done", "run_index": opts.RunIndex, "step_id": step.ID, "status": "failed", "exit_code": 1})
+				res.Steps = append(res.Steps, stepRes)
+				res.Run.Status = "failed"
+				res.Run.FinishedAt = stepRes.FinishedAt
+				return res, fmt.Errorf("perf step %q: %w", step.Name, err)
+			}
+			for _, perfRes := range stepRes.Perfs {
+				if perfRes == nil {
+					continue
+				}
+				if stepRes.Command == "" {
+					stepRes.Command = perfRes.Command
+				} else if perfRes.Command != "" {
+					stepRes.Command += "\n" + perfRes.Command
+				}
+				stepRes.Log = strings.TrimSpace(stepRes.Log + "\n" + perfRes.RawOutput)
+				if perfRes.RawError != "" {
+					stepRes.Log = strings.TrimSpace(stepRes.Log + "\n" + perfRes.RawError)
+				}
+			}
+			for i := range pending {
+				if pending[i].perfRes != nil && pending[i].perfRes.Status == "running" {
+					pending[i].stepIdx = len(res.Steps)
+					pendingPerfs = append(pendingPerfs, pending[i])
+				}
+			}
+
 		case "pgbench":
 			opts.logInfo("[pgbench] %s", step.Name)
 			benchStartTime = time.Now().UTC()
@@ -216,7 +258,7 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 				stepRes.PgbenchScripts = pbRes.PgbenchScripts
 			}
 			if pbRes.Perf != nil {
-				stepRes.Perf = pbRes.Perf
+				stepRes.Perfs = append(stepRes.Perfs, pbRes.Perf)
 			}
 
 			// Capture metrics even on error (partial results).
@@ -250,7 +292,7 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 				stepRes.SysbenchSummary = sbRes.SysbenchSummary
 			}
 			if sbRes.Perf != nil {
-				stepRes.Perf = sbRes.Perf
+				stepRes.Perfs = append(stepRes.Perfs, sbRes.Perf)
 			}
 
 			// Capture top-level metrics even on error (partial results).
@@ -296,6 +338,28 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 		opts.emitEvent(map[string]any{"event": "phase", "run_index": opts.RunIndex, "name": "pre", "status": "completed"})
 	case "post":
 		opts.emitEvent(map[string]any{"event": "phase", "run_index": opts.RunIndex, "name": "post", "status": "completed"})
+	}
+
+	// Collect any non-blocking perf steps after normal workload steps complete.
+	for i := range pendingPerfs {
+		collectPendingPerf(&pendingPerfs[i])
+		idx := pendingPerfs[i].stepIdx
+		if idx >= 0 && idx < len(res.Steps) {
+			if pendingPerfs[i].perfRes != nil {
+				if len(res.Steps[idx].Perfs) == 0 {
+					res.Steps[idx].Perfs = append(res.Steps[idx].Perfs, pendingPerfs[i].perfRes)
+				}
+				if res.Steps[idx].Command == "" {
+					res.Steps[idx].Command = pendingPerfs[i].perfRes.Command
+				} else if pendingPerfs[i].perfRes.Command != "" && !strings.Contains(res.Steps[idx].Command, pendingPerfs[i].perfRes.Command) {
+					res.Steps[idx].Command += "\n" + pendingPerfs[i].perfRes.Command
+				}
+				res.Steps[idx].Log = strings.TrimSpace(res.Steps[idx].Log + "\n" + pendingPerfs[i].perfRes.RawOutput)
+				if pendingPerfs[i].perfRes.RawError != "" {
+					res.Steps[idx].Log = strings.TrimSpace(res.Steps[idx].Log + "\n" + pendingPerfs[i].perfRes.RawError)
+				}
+			}
+		}
 	}
 
 	// Stop host metrics collection and store results.

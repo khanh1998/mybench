@@ -24,6 +24,16 @@ export interface DesignLike {
 		script: string;
 		pgbench_options?: string;
 		perf_duration?: string;
+		perf_stat_duration?: string;
+		perf_record_duration?: string;
+		perf_trace_duration?: string;
+		perf_delay?: string;
+		perf_stat_delay?: string;
+		perf_record_delay?: string;
+		perf_trace_delay?: string;
+		perf_cgroup?: string;
+		perf_repeat?: string;
+		perf_freq?: string;
 		pgbench_scripts?: { name: string; weight?: number; weight_expr?: string | null; script: string }[];
 	}[];
 }
@@ -96,6 +106,48 @@ export function validateDesignParams(design: DesignLike): ValidationError[] {
 		if (step.perf_duration) {
 			for (const ph of findPlaceholders(step.perf_duration)) {
 				if (!defined.has(ph)) errors.push({ step: step.name, script: 'perf duration', placeholder: ph });
+			}
+		}
+		for (const [label, value] of [
+			['perf stat duration', step.perf_stat_duration],
+			['perf record duration', step.perf_record_duration],
+			['perf trace duration', step.perf_trace_duration]
+		] as const) {
+			if (value) {
+				for (const ph of findPlaceholders(value)) {
+					if (!defined.has(ph)) errors.push({ step: step.name, script: label, placeholder: ph });
+				}
+			}
+		}
+		if (step.perf_delay) {
+			for (const ph of findPlaceholders(step.perf_delay)) {
+				if (!defined.has(ph)) errors.push({ step: step.name, script: 'perf delay', placeholder: ph });
+			}
+		}
+		for (const [label, value] of [
+			['perf stat delay', step.perf_stat_delay],
+			['perf record delay', step.perf_record_delay],
+			['perf trace delay', step.perf_trace_delay]
+		] as const) {
+			if (value) {
+				for (const ph of findPlaceholders(value)) {
+					if (!defined.has(ph)) errors.push({ step: step.name, script: label, placeholder: ph });
+				}
+			}
+		}
+		if (step.perf_cgroup) {
+			for (const ph of findPlaceholders(step.perf_cgroup)) {
+				if (!defined.has(ph)) errors.push({ step: step.name, script: 'perf cgroup', placeholder: ph });
+			}
+		}
+		if (step.perf_repeat) {
+			for (const ph of findPlaceholders(step.perf_repeat)) {
+				if (!defined.has(ph)) errors.push({ step: step.name, script: 'perf repeat', placeholder: ph });
+			}
+		}
+		if (step.perf_freq) {
+			for (const ph of findPlaceholders(step.perf_freq)) {
+				if (!defined.has(ph)) errors.push({ step: step.name, script: 'perf frequency', placeholder: ph });
 			}
 		}
 		// Also validate placeholders in weight expressions

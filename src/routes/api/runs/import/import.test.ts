@@ -80,6 +80,9 @@ function createTestDb() {
       command TEXT NOT NULL DEFAULT '',
       raw_output TEXT NOT NULL DEFAULT '',
       raw_error TEXT NOT NULL DEFAULT '',
+      mode TEXT NOT NULL DEFAULT 'stat',
+      result_json TEXT NOT NULL DEFAULT '',
+      perf_script_output TEXT NOT NULL DEFAULT '',
       warnings_json TEXT NOT NULL DEFAULT '',
       started_at TEXT,
       finished_at TEXT
@@ -149,6 +152,7 @@ interface ImportResult {
 			failed_transactions?: number;
 		}>;
 		perf?: {
+			mode?: 'stat' | 'record' | 'trace';
 			status: string;
 			scope: string;
 			cgroup?: string;
@@ -156,6 +160,7 @@ interface ImportResult {
 			raw_output?: string;
 			raw_error?: string;
 			warnings?: string[];
+			script_output?: string;
 			started_at?: string;
 			finished_at?: string;
 			events?: Array<{
@@ -241,8 +246,8 @@ function importRun(
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`);
 		const insPerf = db.prepare(`
-			INSERT INTO run_step_perf (run_id, step_id, status, scope, cgroup, command, raw_output, raw_error, warnings_json, started_at, finished_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			INSERT INTO run_step_perf (run_id, step_id, status, scope, cgroup, command, raw_output, raw_error, mode, result_json, perf_script_output, warnings_json, started_at, finished_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`);
 		const insPerfEvent = db.prepare(`
 			INSERT INTO run_step_perf_events (run_id, step_id, event_name, counter_value, unit, runtime_secs, percent_running, per_transaction, derived_value, derived_unit)
@@ -267,7 +272,7 @@ function importRun(
 					step.finished_at
 				);
 				if (step.perf) {
-					insPerf.run(runId, step.step_id, step.perf.status, step.perf.scope, step.perf.cgroup ?? '', step.perf.command ?? '', step.perf.raw_output ?? '', step.perf.raw_error ?? '', step.perf.warnings ? JSON.stringify(step.perf.warnings) : '', step.perf.started_at ?? null, step.perf.finished_at ?? null);
+					insPerf.run(runId, step.step_id, step.perf.status, step.perf.scope, step.perf.cgroup ?? '', step.perf.command ?? '', step.perf.raw_output ?? '', step.perf.raw_error ?? '', step.perf.mode ?? 'stat', '', step.perf.script_output ?? '', step.perf.warnings ? JSON.stringify(step.perf.warnings) : '', step.perf.started_at ?? null, step.perf.finished_at ?? null);
 					for (const event of step.perf.events ?? []) {
 						insPerfEvent.run(runId, step.step_id, event.event_name, event.counter_value ?? null, event.unit ?? '', event.runtime_secs ?? null, event.percent_running ?? null, event.per_transaction ?? null, event.derived_value ?? null, event.derived_unit ?? '');
 					}

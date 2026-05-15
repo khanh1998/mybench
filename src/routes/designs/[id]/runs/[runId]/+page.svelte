@@ -22,7 +22,7 @@
     command: string; processed_script: string;
     pgbench_summary_json: string; pgbench_scripts_json: string;
     sysbench_summary_json: string;
-    perf: StepPerf | null;
+    perfs: StepPerf[];
   }
   interface StepPerfEvent {
     event_name: string;
@@ -35,14 +35,42 @@
     derived_unit: string;
   }
   interface StepPerf {
+    mode: 'stat' | 'record' | 'trace';
     status: string;
     scope: 'postgres_cgroup' | 'system' | 'disabled';
     cgroup: string;
     command: string;
     raw_output: string;
     raw_error: string;
+    result_json: string;
+    perf_script_output: string;
     warnings_json: string;
     events: StepPerfEvent[];
+  }
+  interface PerfTopFunction {
+    overhead: number;
+    symbol: string;
+    dso: string;
+  }
+  interface SyscallEntry {
+    process: string;
+    pid: number;
+    syscall: string;
+    calls: number;
+    errors: number;
+    total_ms: number;
+    min_ms: number;
+    avg_ms: number;
+    max_ms: number;
+  }
+  type SyscallSortKey = 'syscall' | 'calls' | 'errors' | 'avg_ms' | 'max_ms';
+  interface SyscallGrouped {
+    syscall: string;
+    calls: number;
+    errors: number;
+    avg_ms: number;
+    max_ms: number;
+    processes: SyscallEntry[];
   }
   interface Run {
     id: number; status: string; tps: number|null; latency_avg_ms: number|null;
@@ -95,6 +123,8 @@
   let ec2LogFile = $state<string | null>(null);
   let ec2LogContent = $state<string | null>(null);
   let ec2LogLoading = $state(false);
+  let syscallSort = $state<{ col: SyscallSortKey; asc: boolean }>({ col: 'calls', asc: false });
+  let expandedSyscalls = $state<Set<string>>(new Set());
   const phaseTimers = new Map<string, ReturnType<typeof setInterval>>();
 
   const pendingLines: string[] = [];
@@ -110,7 +140,7 @@
 
   const pgbenchSteps = $derived(run?.steps.filter(s => s.type === 'pgbench') ?? []);
   const sysbenchSteps = $derived(run?.steps.filter(s => s.type === 'sysbench') ?? []);
-  const perfSteps = $derived(run?.steps.filter(s => s.perf) ?? []);
+  const perfSteps = $derived(run?.steps.filter(s => s.perfs?.length > 0) ?? []);
 
   $effect(() => {
     const nextRun = (data.run as Run | null) ?? null;
@@ -309,8 +339,73 @@
     expandedStep = expandedStep === stepId ? null : stepId;
   }
 
-  function perfWarnings(step: StepResult): string[] {
-    return parseJson<string[]>(step.perf?.warnings_json) ?? [];
+  function perfWarnings(perf: StepPerf): string[] {
+    return parseJson<string[]>(perf.warnings_json) ?? [];
+  }
+
+  function perfTopFunctions(perf: StepPerf): PerfTopFunction[] {
+    return parseJson<{ top_functions?: PerfTopFunction[] }>(perf.result_json)?.top_functions ?? [];
+  }
+
+  function perfSyscalls(perf: StepPerf): SyscallEntry[] {
+    return parseJson<{ syscall_summary?: SyscallEntry[] }>(perf.result_json)?.syscall_summary ?? [];
+  }
+
+  function setSyscallSort(col: SyscallSortKey) {
+    if (syscallSort.col === col) {
+      syscallSort = { col, asc: !syscallSort.asc };
+      return;
+    }
+    syscallSort = { col, asc: col === 'syscall' };
+  }
+
+  function syscallSortLabel(col: SyscallSortKey): string {
+    if (syscallSort.col !== col) return '';
+    return syscallSort.asc ? ' ▲' : ' ▼';
+  }
+
+  function groupSyscalls(rows: SyscallEntry[]): SyscallGrouped[] {
+    const map = new Map<string, SyscallGrouped>();
+    for (const row of rows) {
+      const key = row.syscall ?? '';
+      let g = map.get(key);
+      if (!g) {
+        g = { syscall: key, calls: 0, errors: 0, avg_ms: 0, max_ms: 0, processes: [] };
+        map.set(key, g);
+      }
+      g.calls += Number(row.calls ?? 0);
+      g.errors += Number(row.errors ?? 0);
+      g.max_ms = Math.max(g.max_ms, Number(row.max_ms ?? 0));
+      g.processes.push(row);
+    }
+    // weighted average: sum(calls * avg_ms) / total_calls
+    for (const g of map.values()) {
+      const totalCalls = g.processes.reduce((s, r) => s + Number(r.calls ?? 0), 0);
+      g.avg_ms = totalCalls > 0
+        ? g.processes.reduce((s, r) => s + Number(r.calls ?? 0) * Number(r.avg_ms ?? 0), 0) / totalCalls
+        : 0;
+    }
+    return [...map.values()];
+  }
+
+  function sortedGroupedSyscalls(groups: SyscallGrouped[]): SyscallGrouped[] {
+    const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+    return [...groups].sort((a, b) => {
+      let result: number;
+      if (syscallSort.col === 'syscall') {
+        result = collator.compare(a.syscall, b.syscall);
+      } else {
+        result = Number(a[syscallSort.col] ?? 0) - Number(b[syscallSort.col] ?? 0);
+      }
+      return syscallSort.asc ? result : -result;
+    });
+  }
+
+  function toggleSyscall(syscall: string) {
+    const next = new Set(expandedSyscalls);
+    if (next.has(syscall)) next.delete(syscall);
+    else next.add(syscall);
+    expandedSyscalls = next;
   }
 
   function fmtMetric(value: number | null | undefined, digits = 2): string {
@@ -330,8 +425,8 @@
     return value > 1_000_000 ? value / 1_000_000_000 : value;
   }
 
-  function rawPerfEvent(step: StepResult, name: string): Partial<StepPerfEvent> | null {
-    const raw = step.perf?.raw_error;
+  function rawPerfEvent(perf: StepPerf, name: string): Partial<StepPerfEvent> | null {
+    const raw = perf.raw_error;
     if (!raw) return null;
     for (const line of raw.split('\n')) {
       const parts = line.trim().split('\t');
@@ -351,8 +446,8 @@
     return null;
   }
 
-  function displayPerfEvent(step: StepResult, event: StepPerfEvent): StepPerfEvent {
-    const raw = rawPerfEvent(step, event.event_name);
+  function displayPerfEvent(perf: StepPerf, event: StepPerfEvent): StepPerfEvent {
+    const raw = rawPerfEvent(perf, event.event_name);
     return {
       ...event,
       runtime_secs: raw?.runtime_secs ?? normalizePerfRuntime(event.runtime_secs),
@@ -398,8 +493,8 @@
     return 'Other';
   }
 
-  function buildPerfRows(step: StepResult): Map<PerfGroup, PerfDisplayRow[]> {
-    const events = (step.perf?.events ?? []).map((e) => displayPerfEvent(step, e));
+  function buildPerfRows(perf: StepPerf): Map<PerfGroup, PerfDisplayRow[]> {
+    const events = (perf.events ?? []).map((e) => displayPerfEvent(perf, e));
     const findVal = (name: string) => events.find((e) => e.event_name === name)?.counter_value ?? null;
 
     const baseRows: PerfDisplayRow[] = events.map((event) => ({
@@ -827,80 +922,164 @@
   {#if perfSteps.length > 0}
     <div class="perf-steps">
       {#each perfSteps as s}
-        {@const warnings = perfWarnings(s)}
         <div class="perf-card">
           <div class="perf-card-header">
             <div class="perf-card-title">
               <span class="perf-step-dot"></span>
               <span class="perf-step-name">{s.name}</span>
-              <span class="badge badge-{s.perf?.status ?? 'pending'}">{s.perf?.status}</span>
-            </div>
-            <div class="perf-card-meta">
-              <span class="perf-scope-pill perf-scope-{s.perf?.scope ?? 'disabled'}">{scopeLabel(s.perf?.scope ?? 'disabled')}</span>
-              {#if s.perf?.cgroup}<span class="perf-cgroup">{s.perf.cgroup}</span>{/if}
             </div>
           </div>
 
-          {#if warnings.length > 0}
-            <div class="perf-warnings">
-              {#each warnings as warning}
-                <div class="perf-warning-row">⚠ {warning}</div>
-              {/each}
-            </div>
-          {/if}
+          {#each s.perfs as perf}
+            {@const warnings = perfWarnings(perf)}
+            <section class="perf-mode-section">
+              <div class="perf-mode-heading">
+                <div class="perf-card-title">
+                  <span class="badge">{perf.mode ?? 'stat'}</span>
+                  <span class="badge badge-{perf.status ?? 'pending'}">{perf.status}</span>
+                </div>
+                <div class="perf-card-meta">
+                  <span class="perf-scope-pill perf-scope-{perf.scope ?? 'disabled'}">{scopeLabel(perf.scope ?? 'disabled')}</span>
+                  {#if perf.cgroup}<span class="perf-cgroup">{perf.cgroup}</span>{/if}
+                </div>
+              </div>
 
-          {#if s.perf?.events.length}
-            {@const groupedRows = buildPerfRows(s)}
-            <div class="perf-events-wrap">
-              <table class="perf-events-table">
-                <thead>
-                  <tr>
-                    <th class="col-event">Event</th>
-                    <th class="col-num">Total</th>
-                    <th class="col-num">Per Tx</th>
-                    <th class="col-num">Derived</th>
-                    <th class="col-num">Sampled For</th>
-                    <th class="col-num">Coverage</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {#each PERF_GROUP_ORDER as group}
-                    {#if groupedRows.has(group)}
-                      <tr class="perf-group-header"><td colspan="6">{group}</td></tr>
-                      {#each groupedRows.get(group) ?? [] as row}
-                        <tr class:perf-hot={row.isHot} class:perf-computed={row.isComputed}>
-                          <td class="col-event">
-                            <code class="event-name" class:event-computed={row.isComputed}>{row.event_name}</code>
-                            {#if row.isHot}<span class="hot-badge">↑ hot</span>{/if}
-                          </td>
-                          <td class="col-num">{fmtMetric(row.counter_value, 3)}{#if row.unit} <span class="unit">{row.unit}</span>{/if}</td>
-                          <td class="col-num">{row.isComputed ? '—' : fmtMetric(row.per_transaction, 3)}</td>
-                          <td class="col-num">{row.isComputed ? '—' : fmtDerivedMetric(row)}</td>
-                          <td class="col-num">{row.isComputed ? '—' : fmtDurationSecs(row.runtime_secs)}</td>
-                          <td class="col-num">
-                            {#if !row.isComputed && row.percent_running !== null}{fmtMetric(row.percent_running, 2)}<span class="unit">%</span>{:else}—{/if}
-                          </td>
-                        </tr>
-                      {/each}
-                    {/if}
+              {#if warnings.length > 0}
+                <div class="perf-warnings">
+                  {#each warnings as warning}
+                    <div class="perf-warning-row">⚠ {warning}</div>
                   {/each}
-                </tbody>
-              </table>
-            </div>
-          {/if}
+                </div>
+              {/if}
 
-          {#if s.perf?.command}
-            <details class="perf-detail-toggle">
-              <summary class="perf-detail-summary">Perf command</summary>
-              <pre class="detail-pre perf-detail-pre">{s.perf.command}</pre>
-            </details>
-          {/if}
-          {#if s.perf?.raw_error}
-            <details class="perf-detail-toggle">
-              <summary class="perf-detail-summary">Raw output</summary>
-              <pre class="detail-pre perf-detail-pre">{s.perf.raw_error}</pre>
-            </details>
-          {/if}
+              {#if (perf.mode ?? 'stat') === 'stat' && perf.events.length}
+                {@const groupedRows = buildPerfRows(perf)}
+                <div class="perf-events-wrap">
+                  <table class="perf-events-table">
+                    <thead>
+                      <tr>
+                        <th class="col-event">Event</th>
+                        <th class="col-num">Total</th>
+                        <th class="col-num">Per Tx</th>
+                        <th class="col-num">Derived</th>
+                        <th class="col-num">Sampled For</th>
+                        <th class="col-num">Coverage</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {#each PERF_GROUP_ORDER as group}
+                        {#if groupedRows.has(group)}
+                          <tr class="perf-group-header"><td colspan="6">{group}</td></tr>
+                          {#each groupedRows.get(group) ?? [] as row}
+                            <tr class:perf-hot={row.isHot} class:perf-computed={row.isComputed}>
+                              <td class="col-event">
+                                <code class="event-name" class:event-computed={row.isComputed}>{row.event_name}</code>
+                                {#if row.isHot}<span class="hot-badge">↑ hot</span>{/if}
+                              </td>
+                              <td class="col-num">{fmtMetric(row.counter_value, 3)}{#if row.unit} <span class="unit">{row.unit}</span>{/if}</td>
+                              <td class="col-num">{row.isComputed ? '—' : fmtMetric(row.per_transaction, 3)}</td>
+                              <td class="col-num">{row.isComputed ? '—' : fmtDerivedMetric(row)}</td>
+                              <td class="col-num">{row.isComputed ? '—' : fmtDurationSecs(row.runtime_secs)}</td>
+                              <td class="col-num">
+                                {#if !row.isComputed && row.percent_running !== null}{fmtMetric(row.percent_running, 2)}<span class="unit">%</span>{:else}—{/if}
+                              </td>
+                            </tr>
+                          {/each}
+                        {/if}
+                      {/each}
+                    </tbody>
+                  </table>
+                </div>
+              {:else if perf.mode === 'record'}
+                {@const topFunctions = perfTopFunctions(perf)}
+                <div class="perf-events-wrap">
+                  <div class="perf-record-actions">
+                    <a class="button-link" href={`/api/runs/${runId}/perf-script/${s.step_id}?mode=record`}>Download perf script</a>
+                  </div>
+                  <table class="perf-events-table">
+                    <thead>
+                      <tr>
+                        <th class="col-num">Overhead</th>
+                        <th>Symbol</th>
+                        <th>DSO</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {#each topFunctions as row}
+                        <tr>
+                          <td class="col-num">{fmtMetric(row.overhead, 2)}<span class="unit">%</span></td>
+                          <td><code class="event-name">{row.symbol}</code></td>
+                          <td>{row.dso}</td>
+                        </tr>
+                      {:else}
+                        <tr><td colspan="3">No top functions parsed.</td></tr>
+                      {/each}
+                    </tbody>
+                  </table>
+                </div>
+              {:else if perf.mode === 'trace'}
+                {@const syscallGroups = sortedGroupedSyscalls(groupSyscalls(perfSyscalls(perf)))}
+                <div class="perf-events-wrap">
+                  <table class="perf-events-table">
+                    <thead>
+                      <tr>
+                        <th class="col-expand"></th>
+                        <th class="sortable" onclick={() => setSyscallSort('syscall')}>Syscall{syscallSortLabel('syscall')}</th>
+                        <th class="col-num sortable" onclick={() => setSyscallSort('calls')}>Calls{syscallSortLabel('calls')}</th>
+                        <th class="col-num sortable" onclick={() => setSyscallSort('errors')}>Errors{syscallSortLabel('errors')}</th>
+                        <th class="col-num sortable" onclick={() => setSyscallSort('avg_ms')}>Avg ms{syscallSortLabel('avg_ms')}</th>
+                        <th class="col-num sortable" onclick={() => setSyscallSort('max_ms')}>Max ms{syscallSortLabel('max_ms')}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {#each syscallGroups as g}
+                        {@const expanded = expandedSyscalls.has(g.syscall)}
+                        <tr class="syscall-group-row" class:syscall-expanded={expanded}>
+                          <td class="col-expand">
+                            {#if g.processes.length > 1}
+                              <button class="expand-btn" onclick={() => toggleSyscall(g.syscall)}>{expanded ? '▾' : '▸'}</button>
+                            {/if}
+                          </td>
+                          <td><code class="event-name">{g.syscall}</code></td>
+                          <td class="col-num">{fmtMetric(g.calls, 0)}</td>
+                          <td class="col-num">{fmtMetric(g.errors, 0)}</td>
+                          <td class="col-num">{fmtMetric(g.avg_ms, 3)}</td>
+                          <td class="col-num">{fmtMetric(g.max_ms, 3)}</td>
+                        </tr>
+                        {#if expanded}
+                          {#each g.processes as row}
+                            <tr class="syscall-process-row">
+                              <td></td>
+                              <td class="syscall-process-name">{row.process}{#if row.pid} <span class="unit">({row.pid})</span>{/if}</td>
+                              <td class="col-num">{fmtMetric(row.calls, 0)}</td>
+                              <td class="col-num">{fmtMetric(row.errors, 0)}</td>
+                              <td class="col-num">{fmtMetric(row.avg_ms, 3)}</td>
+                              <td class="col-num">{fmtMetric(row.max_ms, 3)}</td>
+                            </tr>
+                          {/each}
+                        {/if}
+                      {:else}
+                        <tr><td colspan="6">No syscall summary parsed.</td></tr>
+                      {/each}
+                    </tbody>
+                  </table>
+                </div>
+              {/if}
+
+              {#if perf.command}
+                <details class="perf-detail-toggle">
+                  <summary class="perf-detail-summary">Perf command</summary>
+                  <pre class="detail-pre perf-detail-pre">{perf.command}</pre>
+                </details>
+              {/if}
+              {#if perf.raw_error}
+                <details class="perf-detail-toggle">
+                  <summary class="perf-detail-summary">Raw output</summary>
+                  <pre class="detail-pre perf-detail-pre">{perf.raw_error}</pre>
+                </details>
+              {/if}
+            </section>
+          {/each}
         </div>
       {/each}
     </div>
@@ -954,6 +1133,9 @@
   .perf-card { background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; padding: 16px 18px; }
   .perf-card-header { margin-bottom: 12px; }
   .perf-card-title { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .perf-mode-section { padding-top: 12px; margin-top: 12px; border-top: 1px solid #eee; }
+  .perf-mode-section:first-of-type { padding-top: 0; margin-top: 0; border-top: 0; }
+  .perf-mode-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
   .perf-step-dot { width: 8px; height: 8px; border-radius: 50%; background: #0066cc; flex-shrink: 0; }
   .perf-step-name { font-size: 14px; font-weight: 700; color: #222; }
   .perf-card-meta { display: flex; align-items: center; gap: 8px; padding-left: 16px; }
@@ -965,11 +1147,16 @@
   .perf-warnings { margin-bottom: 12px; padding: 8px 12px; background: #fff8e8; border: 1px solid #f3dfaa; border-radius: 6px; color: #7a4f00; font-size: 12px; display: flex; flex-direction: column; gap: 4px; }
   .perf-warning-row { display: flex; align-items: flex-start; gap: 6px; }
   .perf-events-wrap { margin-bottom: 10px; border: 1px solid #e8e8e8; border-radius: 6px; overflow: hidden; }
+  .perf-record-actions { padding: 8px 10px; background: #fafafa; border-bottom: 1px solid #e8e8e8; }
+  .button-link { display: inline-flex; align-items: center; padding: 5px 10px; border: 1px solid #cbd5e1; border-radius: 4px; background: #fff; color: #0044bb; font-size: 12px; font-weight: 700; text-decoration: none; }
+  .button-link:hover { background: #f5f7fa; }
   .perf-events-table { width: 100%; font-size: 12px; border-collapse: collapse; background: #fff; }
   .perf-events-table thead tr { background: #f5f7fa; }
   .perf-events-table th { padding: 7px 10px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: #888; white-space: nowrap; }
   .perf-events-table td { padding: 7px 10px; border-top: 1px solid #f0f0f0; color: #333; }
   .perf-events-table tbody tr:hover { background: #f8f9fc; }
+  .perf-events-table th.sortable { cursor: pointer; user-select: none; }
+  .perf-events-table th.sortable:hover { background: #eef2ff; color: #555; }
   .col-event { text-align: left; }
   .col-num { text-align: right; }
   .event-name { font-family: monospace; font-size: 12px; background: #f0f4ff; color: #0044bb; padding: 1px 6px; border-radius: 3px; }
@@ -982,6 +1169,11 @@
   details[open] > .perf-detail-summary::before { transform: rotate(90deg); }
   .perf-detail-pre { margin-top: 6px; }
   .perf-group-header td { background: #f5f7fa; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #888; padding: 4px 10px; }
+  .col-expand { width: 28px; padding: 4px 4px 4px 8px !important; }
+  .syscall-group-row td { font-weight: 500; }
+  .syscall-process-row td { background: #fafbff; color: #555; font-size: 11px; }
+  .syscall-process-row .col-num { color: #666; }
+  .syscall-process-name { padding-left: 24px !important; color: #777; font-family: monospace; font-size: 11px; }
   .perf-hot { background: #fffbf0 !important; }
   .perf-hot .col-event { border-left: 3px solid #f59e0b; padding-left: 7px; }
   .hot-badge { font-size: 10px; font-weight: 700; color: #b45309; background: #fef3c7; border: 1px solid #fcd34d; border-radius: 3px; padding: 0 4px; margin-left: 5px; vertical-align: middle; }

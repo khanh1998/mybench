@@ -230,14 +230,9 @@ func runSysbenchStep(
 	// Start snapshot ticker.
 	ticker := NewSnapshotTicker(pool, opts.Plan.EnabledSnapTables, snapshots, intervalSecs, "bench")
 	ticker.Start(ctx)
-	perf, perfRes := maybeStartPerf(server, step, opts.Plan.Params, parseSysbenchDuration(userOptions))
-	res.Perf = perfRes
 
 	if err := cmd.Start(); err != nil {
 		ticker.Stop()
-		if perf != nil {
-			res.Perf = perf.Stop(0)
-		}
 		return res, fmt.Errorf("starting sysbench: %w", err)
 	}
 
@@ -284,10 +279,6 @@ func runSysbenchStep(
 		res.LatencyAvgMs = summary.LatencyAvgMs
 		res.Transactions = summary.Transactions
 	}
-	if perf != nil {
-		res.Perf = perf.Stop(res.Transactions)
-	}
-
 	// Stop ticker and take final snapshot.
 	ticker.Stop()
 	_ = collectOnce(ctx, pool, opts.Plan.EnabledSnapTables, "bench", snapshots)

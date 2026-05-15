@@ -89,6 +89,112 @@ func TestResolvePerfDurationSubstitutesParams(t *testing.T) {
 	}
 }
 
+func TestResolvePerfDelaySubstitutesParams(t *testing.T) {
+	step := plan.Step{PerfDelay: "{{WARMUP_SECS}}"}
+	got, warning := resolvePerfDelay(step, []plan.Param{{Name: "WARMUP_SECS", Value: "10"}})
+	if warning != "" {
+		t.Fatalf("unexpected warning: %s", warning)
+	}
+	if got != 10 {
+		t.Fatalf("expected 10, got %d", got)
+	}
+}
+
+func TestResolvePerfDelayDefaultsEmptyToZero(t *testing.T) {
+	got, warning := resolvePerfDelay(plan.Step{}, nil)
+	if warning != "" {
+		t.Fatalf("unexpected warning: %s", warning)
+	}
+	if got != 0 {
+		t.Fatalf("expected 0, got %d", got)
+	}
+}
+
+func TestResolvePerfDelayForModeUsesModeSpecificValue(t *testing.T) {
+	step := plan.Step{
+		PerfDelay:       "1",
+		PerfStatDelay:   "2",
+		PerfRecordDelay: "{{RECORD_DELAY}}",
+		PerfTraceDelay:  "4",
+	}
+	got, warning := resolvePerfDelayForMode(step, "record", []plan.Param{{Name: "RECORD_DELAY", Value: "3"}})
+	if warning != "" {
+		t.Fatalf("unexpected warning: %s", warning)
+	}
+	if got != 3 {
+		t.Fatalf("expected 3, got %d", got)
+	}
+}
+
+func TestResolvePerfDelayForModeFallsBackToLegacyValue(t *testing.T) {
+	step := plan.Step{PerfDelay: "7"}
+	got, warning := resolvePerfDelayForMode(step, "trace", nil)
+	if warning != "" {
+		t.Fatalf("unexpected warning: %s", warning)
+	}
+	if got != 7 {
+		t.Fatalf("expected 7, got %d", got)
+	}
+}
+
+func TestResolvePerfCgroupPrefersStepValue(t *testing.T) {
+	opts := RunOpts{Plan: &plan.Plan{
+		Params: []plan.Param{{Name: "CGROUP", Value: "system.slice/custom.slice"}},
+		Server: plan.ServerConfig{PerfScope: "postgres_cgroup", PerfCgroup: "system.slice/postgresql.service"},
+	}}
+	got := resolvePerfCgroup(plan.Step{PerfCgroup: "{{CGROUP}}"}, opts)
+	if got != "system.slice/custom.slice" {
+		t.Fatalf("expected step cgroup, got %q", got)
+	}
+}
+
+func TestResolvePerfCgroupFallsBackToServerPostgresCgroup(t *testing.T) {
+	opts := RunOpts{Plan: &plan.Plan{
+		Server: plan.ServerConfig{PerfScope: "postgres_cgroup", PerfCgroup: "system.slice/postgresql.service"},
+	}}
+	got := resolvePerfCgroup(plan.Step{}, opts)
+	if got != "system.slice/postgresql.service" {
+		t.Fatalf("expected server cgroup, got %q", got)
+	}
+}
+
+func TestResolvePerfCgroupEmptyForSystemScope(t *testing.T) {
+	opts := RunOpts{Plan: &plan.Plan{
+		Server: plan.ServerConfig{PerfScope: "system", PerfCgroup: "system.slice/postgresql.service"},
+	}}
+	got := resolvePerfCgroup(plan.Step{}, opts)
+	if got != "" {
+		t.Fatalf("expected empty cgroup, got %q", got)
+	}
+}
+
+func TestParsePerfTraceSummaryVPSFormat(t *testing.T) {
+	out := `
+ sleep (33806), 236 events, 81.4%
+
+   syscall            calls  errors  total       min       avg       max       stddev
+   --------------- --------  ------ -------- --------- --------- ---------     ------
+   clock_nanosleep        1      0 2999.814  2999.814  2999.814  2999.814      0.00%
+   mmap                  22      0    0.232     0.002     0.011     0.049     20.48%
+`
+	rows := parsePerfTraceSummary(out)
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 syscall rows, got %d: %+v", len(rows), rows)
+	}
+	if rows[0].Process != "sleep" || rows[0].PID != 33806 {
+		t.Fatalf("unexpected process metadata: %+v", rows[0])
+	}
+	if rows[0].Syscall != "clock_nanosleep" || rows[0].Calls != 1 || rows[0].Errors != 0 {
+		t.Fatalf("unexpected first syscall row: %+v", rows[0])
+	}
+	if rows[0].TotalMs != 2999.814 || rows[0].MinMs != 2999.814 || rows[0].AvgMs != 2999.814 || rows[0].MaxMs != 2999.814 {
+		t.Fatalf("unexpected first syscall timings: %+v", rows[0])
+	}
+	if rows[1].Syscall != "mmap" || rows[1].Calls != 22 || rows[1].TotalMs != 0.232 {
+		t.Fatalf("unexpected second syscall row: %+v", rows[1])
+	}
+}
+
 func TestResolvePerfDurationAcceptsNumber(t *testing.T) {
 	step := plan.Step{PerfDuration: "240"}
 	got, warning := resolvePerfDuration(step, nil)

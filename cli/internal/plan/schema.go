@@ -62,18 +62,34 @@ type Param struct {
 
 // Step represents one step in the benchmark plan.
 type Step struct {
-	ID             int             `json:"id"`
-	Position       int             `json:"position"`
-	Name           string          `json:"name"`
-	Type           string          `json:"type"` // "sql", "pgbench", "collect", "pg_stat_statements_reset", "pg_stat_statements_collect"
-	Enabled        bool            `json:"enabled"`
-	Script         string          `json:"script,omitempty"`
-	NoTransaction  bool            `json:"no_transaction,omitempty"`
-	DurationSecs   int             `json:"duration_secs,omitempty"`
-	CollectPerf    bool            `json:"collect_perf,omitempty"`
-	PerfDuration   string          `json:"perf_duration,omitempty"`
-	PgbenchOptions string          `json:"pgbench_options,omitempty"`
-	PgbenchScripts []PgbenchScript `json:"pgbench_scripts,omitempty"`
+	ID                 int             `json:"id"`
+	Position           int             `json:"position"`
+	Name               string          `json:"name"`
+	Type               string          `json:"type"` // "sql", "pgbench", "collect", "pg_stat_statements_reset", "pg_stat_statements_collect"
+	Enabled            bool            `json:"enabled"`
+	Script             string          `json:"script,omitempty"`
+	NoTransaction      bool            `json:"no_transaction,omitempty"`
+	DurationSecs       int             `json:"duration_secs,omitempty"`
+	CollectPerf        bool            `json:"collect_perf,omitempty"`
+	PerfDuration       string          `json:"perf_duration,omitempty"`
+	PerfStatDuration   string          `json:"perf_stat_duration,omitempty"`
+	PerfRecordDuration string          `json:"perf_record_duration,omitempty"`
+	PerfTraceDuration  string          `json:"perf_trace_duration,omitempty"`
+	PerfStatEnabled    bool            `json:"perf_stat_enabled,omitempty"`
+	PerfRecordEnabled  bool            `json:"perf_record_enabled,omitempty"`
+	PerfTraceEnabled   bool            `json:"perf_trace_enabled,omitempty"`
+	PerfMode           string          `json:"perf_mode,omitempty"`
+	PerfEvents         string          `json:"perf_events,omitempty"`
+	PerfRepeat         string          `json:"perf_repeat,omitempty"`
+	PerfFreq           string          `json:"perf_freq,omitempty"`
+	PerfCallGraph      string          `json:"perf_call_graph,omitempty"`
+	PerfDelay          string          `json:"perf_delay,omitempty"`
+	PerfStatDelay      string          `json:"perf_stat_delay,omitempty"`
+	PerfRecordDelay    string          `json:"perf_record_delay,omitempty"`
+	PerfTraceDelay     string          `json:"perf_trace_delay,omitempty"`
+	PerfCgroup         string          `json:"perf_cgroup,omitempty"`
+	PgbenchOptions     string          `json:"pgbench_options,omitempty"`
+	PgbenchScripts     []PgbenchScript `json:"pgbench_scripts,omitempty"`
 }
 
 // PgbenchScript is a named pgbench custom script with a weight.

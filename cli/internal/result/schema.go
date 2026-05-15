@@ -2,14 +2,14 @@ package result
 
 // Result is the top-level structure written to result.json.
 type Result struct {
-	Version           int                      `json:"version"`
-	DesignID          int                      `json:"design_id"`
-	RunnerVersion     string                   `json:"runner_version"`
-	Run               RunSummary               `json:"run"`
-	Steps             []StepResult             `json:"steps"`
-	Snapshots         map[string][]SnapshotRow `json:"snapshots"`
+	Version       int                      `json:"version"`
+	DesignID      int                      `json:"design_id"`
+	RunnerVersion string                   `json:"runner_version"`
+	Run           RunSummary               `json:"run"`
+	Steps         []StepResult             `json:"steps"`
+	Snapshots     map[string][]SnapshotRow `json:"snapshots"`
 	HostSnapshots map[string][]SnapshotRow `json:"host_snapshots,omitempty"`
-	HostConfig        map[string]any           `json:"host_config,omitempty"`
+	HostConfig    map[string]any           `json:"host_config,omitempty"`
 }
 
 // StepResult records execution metadata for a single step.
@@ -25,22 +25,26 @@ type StepResult struct {
 	PgbenchSummary  *PgbenchSummary       `json:"pgbench_summary,omitempty"`
 	PgbenchScripts  []PgbenchScriptResult `json:"pgbench_scripts,omitempty"`
 	SysbenchSummary *SysbenchSummary      `json:"sysbench_summary,omitempty"`
-	Perf            *PerfResult           `json:"perf,omitempty"`
+	Perfs           []*PerfResult         `json:"perfs,omitempty"`
 	StartedAt       string                `json:"started_at"`
 	FinishedAt      string                `json:"finished_at"`
 }
 
 type PerfResult struct {
-	Status     string      `json:"status"`
-	Scope      string      `json:"scope"`
-	Cgroup     string      `json:"cgroup,omitempty"`
-	Command    string      `json:"command,omitempty"`
-	RawOutput  string      `json:"raw_output,omitempty"`
-	RawError   string      `json:"raw_error,omitempty"`
-	Warnings   []string    `json:"warnings,omitempty"`
-	StartedAt  string      `json:"started_at,omitempty"`
-	FinishedAt string      `json:"finished_at,omitempty"`
-	Events     []PerfEvent `json:"events,omitempty"`
+	Mode           string            `json:"mode"`
+	Status         string            `json:"status"`
+	Scope          string            `json:"scope"`
+	Cgroup         string            `json:"cgroup,omitempty"`
+	Command        string            `json:"command,omitempty"`
+	RawOutput      string            `json:"raw_output,omitempty"`
+	RawError       string            `json:"raw_error,omitempty"`
+	Warnings       []string          `json:"warnings,omitempty"`
+	StartedAt      string            `json:"started_at,omitempty"`
+	FinishedAt     string            `json:"finished_at,omitempty"`
+	Events         []PerfEvent       `json:"events,omitempty"`
+	TopFunctions   []PerfTopFunction `json:"top_functions,omitempty"`
+	ScriptOutput   string            `json:"script_output,omitempty"`
+	SyscallSummary []SyscallEntry    `json:"syscall_summary,omitempty"`
 }
 
 type PerfEvent struct {
@@ -52,6 +56,24 @@ type PerfEvent struct {
 	PerTransaction *float64 `json:"per_transaction,omitempty"`
 	DerivedValue   *float64 `json:"derived_value,omitempty"`
 	DerivedUnit    string   `json:"derived_unit,omitempty"`
+}
+
+type PerfTopFunction struct {
+	Overhead float64 `json:"overhead"`
+	Symbol   string  `json:"symbol"`
+	DSO      string  `json:"dso"`
+}
+
+type SyscallEntry struct {
+	Process string  `json:"process"`
+	PID     int     `json:"pid"`
+	Syscall string  `json:"syscall"`
+	Calls   int     `json:"calls"`
+	Errors  int     `json:"errors"`
+	TotalMs float64 `json:"total_ms"`
+	MinMs   float64 `json:"min_ms"`
+	AvgMs   float64 `json:"avg_ms"`
+	MaxMs   float64 `json:"max_ms"`
 }
 
 // SysbenchSummary holds parsed metrics from sysbench stdout.

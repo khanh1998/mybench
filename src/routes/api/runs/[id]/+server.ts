@@ -19,8 +19,13 @@ export const GET: RequestHandler = ({ params }) => {
 		arr.push(event);
 		eventsByStep.set(event.step_id, arr);
 	}
-	const perfByStep = new Map(perfRows.map((perf) => [perf.step_id, { ...perf, events: eventsByStep.get(perf.step_id) ?? [] }]));
-	return json({ ...run as object, steps: steps.map((step) => ({ ...step, perf: perfByStep.get(step.step_id) ?? null })) });
+	const perfByStep = new Map<number, Array<Record<string, unknown>>>();
+	for (const perf of perfRows) {
+		const arr = perfByStep.get(perf.step_id) ?? [];
+		arr.push({ ...perf, events: perf.mode === 'stat' ? (eventsByStep.get(perf.step_id) ?? []) : [] });
+		perfByStep.set(perf.step_id, arr);
+	}
+	return json({ ...run as object, steps: steps.map((step) => ({ ...step, perfs: perfByStep.get(step.step_id) ?? [] })) });
 };
 
 export const PATCH: RequestHandler = async ({ params, request }) => {
