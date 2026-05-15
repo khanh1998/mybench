@@ -83,6 +83,7 @@ type Step struct {
 	PerfRepeat         string          `json:"perf_repeat,omitempty"`
 	PerfFreq           string          `json:"perf_freq,omitempty"`
 	PerfCallGraph      string          `json:"perf_call_graph,omitempty"`
+	PerfMmapPages      string          `json:"perf_mmap_pages,omitempty"`
 	PerfDelay          string          `json:"perf_delay,omitempty"`
 	PerfStatDelay      string          `json:"perf_stat_delay,omitempty"`
 	PerfRecordDelay    string          `json:"perf_record_delay,omitempty"`

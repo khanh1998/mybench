@@ -10,6 +10,7 @@
   import SysbenchOverview from '$lib/SysbenchOverview.svelte';
   import type { PageData } from './$types';
   import { fmtTs, fmtTime } from '$lib/utils';
+  import { correctPerfEvent } from '$lib/perf-utils';
 
   let { data }: { data: PageData } = $props();
 
@@ -413,48 +414,8 @@
     return value.toLocaleString(undefined, { maximumFractionDigits: digits });
   }
 
-  function parsePerfNumber(value: string | undefined): number | null {
-    const clean = value?.trim().replaceAll(',', '') ?? '';
-    if (!clean || clean.startsWith('<')) return null;
-    const parsed = Number.parseFloat(clean);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-
-  function normalizePerfRuntime(value: number | null | undefined): number | null {
-    if (value === null || value === undefined || Number.isNaN(value)) return null;
-    return value > 1_000_000 ? value / 1_000_000_000 : value;
-  }
-
-  function rawPerfEvent(perf: StepPerf, name: string): Partial<StepPerfEvent> | null {
-    const raw = perf.raw_error;
-    if (!raw) return null;
-    for (const line of raw.split('\n')) {
-      const parts = line.trim().split('\t');
-      if (parts.length < 3 || parts[2]?.trim() !== name) continue;
-      let runtimeIdx = 3;
-      if (parts[3]?.trim().startsWith('/')) runtimeIdx = 4;
-      const runtimeRaw = parsePerfNumber(parts[runtimeIdx] ?? '');
-      const percentRaw = parsePerfNumber((parts[runtimeIdx + 1] ?? '').replace('%', ''));
-      const derivedValue = parsePerfNumber(parts[runtimeIdx + 2] ?? '');
-      return {
-        runtime_secs: runtimeRaw === null ? null : runtimeRaw / 1_000_000_000,
-        percent_running: percentRaw,
-        derived_value: derivedValue,
-        derived_unit: derivedValue === null ? '' : parts.slice(runtimeIdx + 3).join(' ').trim()
-      };
-    }
-    return null;
-  }
-
   function displayPerfEvent(perf: StepPerf, event: StepPerfEvent): StepPerfEvent {
-    const raw = rawPerfEvent(perf, event.event_name);
-    return {
-      ...event,
-      runtime_secs: raw?.runtime_secs ?? normalizePerfRuntime(event.runtime_secs),
-      percent_running: event.percent_running ?? raw?.percent_running ?? null,
-      derived_value: event.derived_value ?? raw?.derived_value ?? null,
-      derived_unit: event.derived_unit || raw?.derived_unit || ''
-    };
+    return correctPerfEvent(event, perf.raw_error ?? '');
   }
 
   function fmtDurationSecs(value: number | null | undefined): string {
@@ -493,12 +454,13 @@
     return 'Other';
   }
 
-  function buildPerfRows(perf: StepPerf): Map<PerfGroup, PerfDisplayRow[]> {
+  function buildPerfRows(perf: StepPerf, totalTransactions?: number | null): Map<PerfGroup, PerfDisplayRow[]> {
     const events = (perf.events ?? []).map((e) => displayPerfEvent(perf, e));
     const findVal = (name: string) => events.find((e) => e.event_name === name)?.counter_value ?? null;
 
     const baseRows: PerfDisplayRow[] = events.map((event) => ({
       ...event,
+      per_transaction: event.per_transaction ?? (totalTransactions && event.counter_value !== null ? event.counter_value / totalTransactions : null),
       group: perfEventGroup(event.event_name),
       isComputed: false,
       isHot: false
@@ -953,7 +915,7 @@
               {/if}
 
               {#if (perf.mode ?? 'stat') === 'stat' && perf.events.length}
-                {@const groupedRows = buildPerfRows(perf)}
+                {@const groupedRows = buildPerfRows(perf, run?.transactions)}
                 <div class="perf-events-wrap">
                   <table class="perf-events-table">
                     <thead>
@@ -962,14 +924,13 @@
                         <th class="col-num">Total</th>
                         <th class="col-num">Per Tx</th>
                         <th class="col-num">Derived</th>
-                        <th class="col-num">Sampled For</th>
                         <th class="col-num">Coverage</th>
                       </tr>
                     </thead>
                     <tbody>
                       {#each PERF_GROUP_ORDER as group}
                         {#if groupedRows.has(group)}
-                          <tr class="perf-group-header"><td colspan="6">{group}</td></tr>
+                          <tr class="perf-group-header"><td colspan="5">{group}</td></tr>
                           {#each groupedRows.get(group) ?? [] as row}
                             <tr class:perf-hot={row.isHot} class:perf-computed={row.isComputed}>
                               <td class="col-event">
@@ -979,7 +940,6 @@
                               <td class="col-num">{fmtMetric(row.counter_value, 3)}{#if row.unit} <span class="unit">{row.unit}</span>{/if}</td>
                               <td class="col-num">{row.isComputed ? '—' : fmtMetric(row.per_transaction, 3)}</td>
                               <td class="col-num">{row.isComputed ? '—' : fmtDerivedMetric(row)}</td>
-                              <td class="col-num">{row.isComputed ? '—' : fmtDurationSecs(row.runtime_secs)}</td>
                               <td class="col-num">
                                 {#if !row.isComputed && row.percent_running !== null}{fmtMetric(row.percent_running, 2)}<span class="unit">%</span>{:else}—{/if}
                               </td>

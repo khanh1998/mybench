@@ -604,7 +604,8 @@ function migrate(db: Database.Database) {
       perf_events TEXT NOT NULL DEFAULT '',
       perf_repeat TEXT NOT NULL DEFAULT '',
       perf_freq TEXT NOT NULL DEFAULT '',
-      perf_call_graph TEXT NOT NULL DEFAULT 'dwarf'
+      perf_call_graph TEXT NOT NULL DEFAULT 'dwarf',
+      perf_mmap_pages TEXT NOT NULL DEFAULT ''
     );
 
     CREATE TABLE IF NOT EXISTS benchmark_runs (
@@ -944,6 +945,7 @@ function migrate(db: Database.Database) {
 	if (!stepCols.includes('perf_repeat')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_repeat TEXT NOT NULL DEFAULT ''`);
 	if (!stepCols.includes('perf_freq')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_freq TEXT NOT NULL DEFAULT ''`);
 	if (!stepCols.includes('perf_call_graph')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_call_graph TEXT NOT NULL DEFAULT 'dwarf'`);
+	if (!stepCols.includes('perf_mmap_pages')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_mmap_pages TEXT NOT NULL DEFAULT ''`);
 	const perfModeToggleMigrated = db.prepare(`SELECT id FROM schema_migrations WHERE id = 'perf_mode_toggles_v1'`).get();
 	if (!perfModeToggleMigrated) {
 		db.exec(`

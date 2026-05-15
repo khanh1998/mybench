@@ -58,6 +58,33 @@ func TestParsePerfStatOutputWithCgroupColumn(t *testing.T) {
 	}
 }
 
+func TestParsePerfStatOutputWithRelativeCgroupColumn(t *testing.T) {
+	// cgroup path like "system.slice/postgresql.service" does not start with "/"
+	out := "141149.50\tmsec\ttask-clock\tsystem.slice/system-postgresql.slice/postgresql@18-main.service\t141161533873\t100.00\t0.784\tCPUs utilized\n"
+	events, warnings := parsePerfStatOutput(out, 1000)
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %v", warnings)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if events[0].RuntimeSecs == nil {
+		t.Fatalf("expected runtime_secs to be set, got nil")
+	}
+	if *events[0].RuntimeSecs < 141 || *events[0].RuntimeSecs > 142 {
+		t.Fatalf("expected ~141 runtime_secs, got %v", *events[0].RuntimeSecs)
+	}
+	if events[0].PercentRunning == nil || *events[0].PercentRunning != 100 {
+		t.Fatalf("expected percent_running=100, got %+v", events[0].PercentRunning)
+	}
+	if events[0].DerivedValue == nil || *events[0].DerivedValue != 0.784 {
+		t.Fatalf("expected derived_value=0.784, got %+v", events[0].DerivedValue)
+	}
+	if events[0].DerivedUnit != "CPUs utilized" {
+		t.Fatalf("expected derived_unit='CPUs utilized', got %q", events[0].DerivedUnit)
+	}
+}
+
 func TestParsePerfStatOutputCpuUtilization(t *testing.T) {
 	out := "302860.42\tmsec\ttask-clock\t/system.slice/postgresql.service\t302864094660\t100.00\t1.683\tCPUs utilized\n"
 	events, warnings := parsePerfStatOutput(out, 4387)

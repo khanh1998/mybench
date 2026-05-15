@@ -319,8 +319,10 @@ func parsePerfStatOutput(output string, transactions int64) ([]result.PerfEvent,
 			warnings = append(warnings, fmt.Sprintf("%s: %s", eventName, rawValue))
 		}
 		runtimeIdx := 3
-		if len(parts) > 3 && strings.HasPrefix(strings.TrimSpace(parts[3]), "/") {
-			runtimeIdx = 4
+		if len(parts) > 3 {
+			if _, ok := parsePerfFloat(parts[3]); !ok {
+				runtimeIdx = 4
+			}
 		}
 		if len(parts) > runtimeIdx {
 			if v, ok := parsePerfFloat(parts[runtimeIdx]); ok {

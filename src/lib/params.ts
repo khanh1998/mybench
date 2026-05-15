@@ -34,6 +34,7 @@ export interface DesignLike {
 		perf_cgroup?: string;
 		perf_repeat?: string;
 		perf_freq?: string;
+		perf_mmap_pages?: string;
 		pgbench_scripts?: { name: string; weight?: number; weight_expr?: string | null; script: string }[];
 	}[];
 }
@@ -148,6 +149,11 @@ export function validateDesignParams(design: DesignLike): ValidationError[] {
 		if (step.perf_freq) {
 			for (const ph of findPlaceholders(step.perf_freq)) {
 				if (!defined.has(ph)) errors.push({ step: step.name, script: 'perf frequency', placeholder: ph });
+			}
+		}
+		if (step.perf_mmap_pages) {
+			for (const ph of findPlaceholders(step.perf_mmap_pages)) {
+				if (!defined.has(ph)) errors.push({ step: step.name, script: 'perf mmap pages', placeholder: ph });
 			}
 		}
 		// Also validate placeholders in weight expressions

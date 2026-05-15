@@ -197,8 +197,12 @@ func buildPerfRecordCmd(step plan.Step, opts RunOpts, durationSecs int, basePath
 }
 
 func buildPerfTraceCmd(step plan.Step, opts RunOpts, durationSecs int) (string, error) {
+	mmapPages := strings.TrimSpace(plan.SubstituteParams(step.PerfMmapPages, opts.Plan.Params))
+	if mmapPages == "" {
+		mmapPages = "4096"
+	}
 	timeoutSecs := durationSecs + 2
-	args := []string{fmt.Sprintf("sudo timeout %d", timeoutSecs), "perf", "trace", "--summary", "-a"}
+	args := []string{fmt.Sprintf("sudo timeout %d", timeoutSecs), "perf", "trace", "--summary", "-m", mmapPages, "-a"}
 	if cg := resolvePerfCgroup(step, opts); cg != "" {
 		args = append(args, "-G", shellQuote(cg))
 	}

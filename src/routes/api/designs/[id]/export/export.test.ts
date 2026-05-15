@@ -70,7 +70,8 @@ function createTestDb() {
       perf_events TEXT NOT NULL DEFAULT '',
       perf_repeat TEXT NOT NULL DEFAULT '',
       perf_freq TEXT NOT NULL DEFAULT '',
-      perf_call_graph TEXT NOT NULL DEFAULT 'dwarf'
+      perf_call_graph TEXT NOT NULL DEFAULT 'dwarf',
+      perf_mmap_pages TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE pgbench_scripts (
       id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -173,7 +174,7 @@ function exportPlan(db: Database.Database, designId: number) {
 
 	const steps = db.prepare(
 		'SELECT * FROM design_steps WHERE design_id = ? AND enabled = 1 ORDER BY position'
-	).all(designId) as { id: number; type: string; position: number; name: string; script: string; no_transaction: number; duration_secs: number; collect_perf: number; perf_duration: string; perf_stat_duration: string; perf_record_duration: string; perf_trace_duration: string; perf_stat_enabled: number; perf_record_enabled: number; perf_trace_enabled: number; perf_delay: string; perf_stat_delay: string; perf_record_delay: string; perf_trace_delay: string; perf_mode: string; perf_cgroup: string; perf_events: string; perf_repeat: string; perf_freq: string; perf_call_graph: string; pgbench_options: string; enabled: number }[];
+	).all(designId) as { id: number; type: string; position: number; name: string; script: string; no_transaction: number; duration_secs: number; collect_perf: number; perf_duration: string; perf_stat_duration: string; perf_record_duration: string; perf_trace_duration: string; perf_stat_enabled: number; perf_record_enabled: number; perf_trace_enabled: number; perf_delay: string; perf_stat_delay: string; perf_record_delay: string; perf_trace_delay: string; perf_mode: string; perf_cgroup: string; perf_events: string; perf_repeat: string; perf_freq: string; perf_call_graph: string; perf_mmap_pages: string; pgbench_options: string; enabled: number }[];
 
 	const pgbenchScripts = db.prepare(
 		'SELECT * FROM pgbench_scripts WHERE step_id IN (SELECT id FROM design_steps WHERE design_id = ? AND enabled = 1) ORDER BY step_id, position'
@@ -207,7 +208,8 @@ function exportPlan(db: Database.Database, designId: number) {
 		perf_cgroup: s.perf_cgroup ?? '',
 		perf_repeat: s.perf_repeat ?? '',
 		perf_freq: s.perf_freq ?? '',
-		perf_call_graph: s.perf_call_graph ?? 'dwarf'
+		perf_call_graph: s.perf_call_graph ?? 'dwarf',
+		perf_mmap_pages: s.perf_mmap_pages ?? ''
 	}) : ({
 		id: s.id,
 		position: s.position,

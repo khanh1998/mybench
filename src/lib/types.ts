@@ -124,6 +124,7 @@ export interface DesignStep {
 	perf_repeat: string;
 	perf_freq: string;
 	perf_call_graph: 'dwarf' | 'fp' | 'lbr';
+	perf_mmap_pages: string;
 	enabled: number; // 0 or 1
 	pgbench_scripts?: PgbenchScript[];
 }

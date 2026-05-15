@@ -81,7 +81,8 @@ export function generatePlan(designId: number, overrides: PlanRunSettingsOverrid
 				perf_cgroup: s.perf_cgroup ?? '',
 				perf_repeat: s.perf_repeat ?? '',
 				perf_freq: s.perf_freq ?? '',
-				perf_call_graph: s.perf_call_graph ?? 'dwarf'
+				perf_call_graph: s.perf_call_graph ?? 'dwarf',
+				perf_mmap_pages: s.perf_mmap_pages ?? ''
 			};
 		}
 		return {

@@ -57,7 +57,7 @@ export const PUT: RequestHandler = async ({ params: routeParams, request }) => {
 				 perf_stat_duration, perf_record_duration, perf_trace_duration,
 				 perf_stat_enabled, perf_record_enabled, perf_trace_enabled, perf_delay,
 				 perf_stat_delay, perf_record_delay, perf_trace_delay,
-				 perf_cgroup, perf_events, perf_repeat, perf_freq, perf_call_graph
+				 perf_cgroup, perf_events, perf_repeat, perf_freq, perf_call_graph, perf_mmap_pages
 			 )
        VALUES (
 				 @id, @design_id, @position, @name, @type, @script, @pgbench_options, @enabled,
@@ -65,7 +65,7 @@ export const PUT: RequestHandler = async ({ params: routeParams, request }) => {
 				 @perf_stat_duration, @perf_record_duration, @perf_trace_duration,
 				 @perf_stat_enabled, @perf_record_enabled, @perf_trace_enabled, @perf_delay,
 				 @perf_stat_delay, @perf_record_delay, @perf_trace_delay,
-				 @perf_cgroup, @perf_events, @perf_repeat, @perf_freq, @perf_call_graph
+				 @perf_cgroup, @perf_events, @perf_repeat, @perf_freq, @perf_call_graph, @perf_mmap_pages
 			 )
        ON CONFLICT(id) DO UPDATE SET
          position=excluded.position, name=excluded.name, type=excluded.type,
@@ -85,7 +85,7 @@ export const PUT: RequestHandler = async ({ params: routeParams, request }) => {
          perf_cgroup=excluded.perf_cgroup,
          perf_events=excluded.perf_events,
          perf_repeat=excluded.perf_repeat, perf_freq=excluded.perf_freq,
-         perf_call_graph=excluded.perf_call_graph`
+         perf_call_graph=excluded.perf_call_graph, perf_mmap_pages=excluded.perf_mmap_pages`
 		);
 		const submittedStepIds = body.steps.map((s: { id: number }) => s.id);
 		const deleteRemovedSteps =
@@ -119,7 +119,8 @@ export const PUT: RequestHandler = async ({ params: routeParams, request }) => {
 					perf_events: s.perf_events ?? '',
 					perf_repeat: s.perf_repeat ?? '',
 					perf_freq: s.perf_freq ?? '',
-					perf_call_graph: s.perf_call_graph ?? 'dwarf'
+					perf_call_graph: s.perf_call_graph ?? 'dwarf',
+					perf_mmap_pages: s.perf_mmap_pages ?? ''
 				});
 				deleteScripts.run(s.id);
 				if (s.type === 'pgbench') {

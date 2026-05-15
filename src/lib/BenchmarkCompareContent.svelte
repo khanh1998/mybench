@@ -3,6 +3,7 @@
   import DatabaseTelemetryCompare from '$lib/DatabaseTelemetryCompare.svelte';
   import { RUN_COMPARE_COLORS } from '$lib/compare/colors';
   import type { CompareRunInfo, CompareStepPerf } from '$lib/compare/types';
+  import { correctPerfEvent } from '$lib/perf-utils';
 
   interface RunParam {
     name: string;
@@ -162,14 +163,143 @@
       .filter((entry): entry is { run: CompareRunInfo; label: string; color: string; perf: CompareStepPerf[] } => entry !== null)
   );
 
+  const correctedRunsWithPerf = $derived(
+    selectedRunsWithPerf.map((entry) => ({
+      ...entry,
+      perf: entry.perf.map((perf) => ({
+        ...perf,
+        events: perf.events.map((event) => correctPerfEvent(event, perf.raw_error, entry.run.transactions))
+      }))
+    }))
+  );
+
   const hasPerfData = $derived(selectedRunsWithPerf.some((entry) => entry.perf.length > 0));
   const hasNonStatPerfData = $derived(selectedRunsWithPerf.some((entry) => entry.perf.some((perf) => (perf.mode ?? 'stat') !== 'stat')));
+  const hasRecordPerfData = $derived(correctedRunsWithPerf.some((entry) => entry.perf.some((p) => p.mode === 'record')));
+  const hasTracePerfData = $derived(correctedRunsWithPerf.some((entry) => entry.perf.some((p) => p.mode === 'trace')));
+
+  function parseTopFunctionsForCompare(resultJson: string): { overhead: number; symbol: string; dso: string }[] {
+    if (!resultJson) return [];
+    try {
+      return (JSON.parse(resultJson) as { top_functions?: { overhead: number; symbol: string; dso: string }[] })?.top_functions ?? [];
+    } catch {
+      return [];
+    }
+  }
+
+  function parseSyscallRawForCompare(resultJson: string): { syscall: string; calls: number; errors: number; avg_ms: number; max_ms: number }[] {
+    if (!resultJson) return [];
+    try {
+      return (JSON.parse(resultJson) as { syscall_summary?: { syscall: string; calls: number; errors: number; avg_ms: number; max_ms: number }[] })?.syscall_summary ?? [];
+    } catch {
+      return [];
+    }
+  }
+
+  function aggregateSyscallsForCompare(rawRows: { syscall: string; calls: number; errors: number; avg_ms: number; max_ms: number }[]): { syscall: string; calls: number; errors: number; avg_ms: number; max_ms: number }[] {
+    const map = new Map<string, { calls: number; errors: number; max_ms: number; weightedAvgMs: number; totalCalls: number }>();
+    for (const row of rawRows) {
+      const key = row.syscall ?? '';
+      let g = map.get(key);
+      if (!g) { g = { calls: 0, errors: 0, max_ms: 0, weightedAvgMs: 0, totalCalls: 0 }; map.set(key, g); }
+      const calls = Number(row.calls ?? 0);
+      g.calls += calls;
+      g.errors += Number(row.errors ?? 0);
+      g.max_ms = Math.max(g.max_ms, Number(row.max_ms ?? 0));
+      g.weightedAvgMs += calls * Number(row.avg_ms ?? 0);
+      g.totalCalls += calls;
+    }
+    return [...map.entries()].map(([syscall, g]) => ({
+      syscall,
+      calls: g.calls,
+      errors: g.errors,
+      avg_ms: g.totalCalls > 0 ? g.weightedAvgMs / g.totalCalls : 0,
+      max_ms: g.max_ms
+    }));
+  }
+
+  const perfRecordDisplaySteps = $derived((): PerfRecordStepData[] => {
+    const stepKeys = new Map<string, string>();
+    for (const entry of correctedRunsWithPerf) {
+      for (const perf of entry.perf) {
+        if (perf.mode !== 'record') continue;
+        const key = `${perf.step_type ?? 'step'}:${perf.step_name ?? perf.step_id}`;
+        stepKeys.set(key, perf.step_name ?? `Step ${perf.step_id}`);
+      }
+    }
+    const runCount = correctedRunsWithPerf.length;
+    return [...stepKeys.entries()].map(([stepKey, stepLabel]) => {
+      const symbolMap = new Map<string, { dso: string; values: (number | null)[]; presentCount: number }>();
+      correctedRunsWithPerf.forEach((entry, runIdx) => {
+        const perf = entry.perf.find((p) => p.mode === 'record' && `${p.step_type ?? 'step'}:${p.step_name ?? p.step_id}` === stepKey);
+        if (!perf) return;
+        for (const fn of parseTopFunctionsForCompare(perf.result_json)) {
+          const mapKey = `${fn.symbol ?? ''}§${fn.dso ?? ''}`;
+          if (!symbolMap.has(mapKey)) {
+            symbolMap.set(mapKey, { dso: fn.dso ?? '', values: new Array(runCount).fill(null) as (number | null)[], presentCount: 0 });
+          }
+          const data = symbolMap.get(mapKey)!;
+          data.values[runIdx] = fn.overhead ?? null;
+          data.presentCount++;
+        }
+      });
+      const allRows: PerfRecordSymbolRow[] = [...symbolMap.entries()].map(([mapKey, data]) => {
+        const sepIdx = mapKey.indexOf('§');
+        const symbol = sepIdx >= 0 ? mapKey.slice(0, sepIdx) : mapKey;
+        const nonNull = data.values.filter((v): v is number => v !== null);
+        return { symbol, dso: data.dso, values: data.values, maxOverhead: nonNull.length ? Math.max(...nonNull) : 0, inAllRuns: data.presentCount === runCount };
+      });
+      allRows.sort((a, b) => b.maxOverhead - a.maxOverhead);
+      return { stepKey, stepLabel, rows: (perfRecordShowAll ? allRows : allRows.filter((r) => r.inAllRuns)).slice(0, 10) };
+    });
+  });
+
+  const perfTraceDisplaySteps = $derived((): PerfTraceStepData[] => {
+    const stepKeys = new Map<string, string>();
+    for (const entry of correctedRunsWithPerf) {
+      for (const perf of entry.perf) {
+        if (perf.mode !== 'trace') continue;
+        const key = `${perf.step_type ?? 'step'}:${perf.step_name ?? perf.step_id}`;
+        stepKeys.set(key, perf.step_name ?? `Step ${perf.step_id}`);
+      }
+    }
+    const runCount = correctedRunsWithPerf.length;
+    return [...stepKeys.entries()].map(([stepKey, stepLabel]) => {
+      const syscallMap = new Map<string, { callsPerRun: (number | null)[]; errorsPerRun: (number | null)[]; avgMsPerRun: (number | null)[]; maxMsPerRun: (number | null)[]; presentCount: number }>();
+      correctedRunsWithPerf.forEach((entry, runIdx) => {
+        const perf = entry.perf.find((p) => p.mode === 'trace' && `${p.step_type ?? 'step'}:${p.step_name ?? p.step_id}` === stepKey);
+        if (!perf) return;
+        for (const agg of aggregateSyscallsForCompare(parseSyscallRawForCompare(perf.result_json))) {
+          const key = agg.syscall;
+          if (!syscallMap.has(key)) {
+            syscallMap.set(key, { callsPerRun: new Array(runCount).fill(null) as (number | null)[], errorsPerRun: new Array(runCount).fill(null) as (number | null)[], avgMsPerRun: new Array(runCount).fill(null) as (number | null)[], maxMsPerRun: new Array(runCount).fill(null) as (number | null)[], presentCount: 0 });
+          }
+          const data = syscallMap.get(key)!;
+          data.callsPerRun[runIdx] = agg.calls;
+          data.errorsPerRun[runIdx] = agg.errors;
+          data.avgMsPerRun[runIdx] = agg.avg_ms;
+          data.maxMsPerRun[runIdx] = agg.max_ms;
+          data.presentCount++;
+        }
+      });
+      const allRows: PerfTraceSymbolRow[] = [...syscallMap.entries()].map(([syscall, data]) => ({
+        syscall, callsPerRun: data.callsPerRun, errorsPerRun: data.errorsPerRun, avgMsPerRun: data.avgMsPerRun, maxMsPerRun: data.maxMsPerRun, inAllRuns: data.presentCount === runCount
+      }));
+      const filtered = (perfTraceShowAll ? allRows : allRows.filter((r) => r.inAllRuns));
+      const getMax = (row: PerfTraceSymbolRow): number => {
+        const vals = perfTraceMetric === 'calls' ? row.callsPerRun : perfTraceMetric === 'errors' ? row.errorsPerRun : perfTraceMetric === 'avg_ms' ? row.avgMsPerRun : row.maxMsPerRun;
+        const nonNull = vals.filter((v): v is number => v !== null);
+        return nonNull.length ? Math.max(...nonNull) : 0;
+      };
+      return { stepKey, stepLabel, rows: [...filtered].sort((a, b) => getMax(b) - getMax(a)).slice(0, 10) };
+    });
+  });
 
   const perfMetricOptions = $derived((): PerfMetricOption[] => {
     const eventNames = new Set<string>();
     const perTxnNames = new Set<string>();
     const derivedNames = new Map<string, string>(); // name -> unit
-    for (const entry of selectedRunsWithPerf) {
+    for (const entry of correctedRunsWithPerf) {
       for (const perf of entry.perf) {
         for (const event of perf.events) {
           eventNames.add(event.event_name);
@@ -203,7 +333,7 @@
     if (!option) return [];
     const stepKeys = new Set<string>();
     const labels = new Map<string, string>();
-    for (const entry of selectedRunsWithPerf) {
+    for (const entry of correctedRunsWithPerf) {
       for (const perf of entry.perf) {
         const key = `${perf.step_type ?? 'step'}:${perf.step_name ?? perf.step_id}`;
         stepKeys.add(key);
@@ -213,7 +343,7 @@
     return [...stepKeys].map((stepKey) => ({
       stepKey,
       stepLabel: labels.get(stepKey) ?? stepKey,
-      values: selectedRunsWithPerf.map((entry) => {
+      values: correctedRunsWithPerf.map((entry) => {
         const perf = entry.perf.find((item) => `${item.step_type ?? 'step'}:${item.step_name ?? item.step_id}` === stepKey);
         const event = perf?.events.find((item) => item.event_name === option.eventName);
         return option.kind === 'raw' ? (event?.counter_value ?? null) :
@@ -241,6 +371,9 @@
   });
 
   let perfViewMode = $state<'per_tx' | 'raw' | 'derived'>('per_tx');
+  let perfRecordShowAll = $state(false);
+  let perfTraceShowAll = $state(false);
+  let perfTraceMetric = $state<'calls' | 'errors' | 'avg_ms' | 'max_ms'>('calls');
 
   const PERF_NEUTRAL_EVENTS = new Set(['instructions']);
   const PERF_GROUP_ORDER_CMP = ['CPU', 'Memory', 'Branch', 'Scheduler', 'Other'];
@@ -270,9 +403,38 @@
     groups: { name: string; rows: PerfAllEventRow[] }[];
   }
 
+  interface PerfRecordSymbolRow {
+    symbol: string;
+    dso: string;
+    values: (number | null)[];
+    maxOverhead: number;
+    inAllRuns: boolean;
+  }
+
+  interface PerfTraceSymbolRow {
+    syscall: string;
+    callsPerRun: (number | null)[];
+    errorsPerRun: (number | null)[];
+    avgMsPerRun: (number | null)[];
+    maxMsPerRun: (number | null)[];
+    inAllRuns: boolean;
+  }
+
+  interface PerfRecordStepData {
+    stepKey: string;
+    stepLabel: string;
+    rows: PerfRecordSymbolRow[];
+  }
+
+  interface PerfTraceStepData {
+    stepKey: string;
+    stepLabel: string;
+    rows: PerfTraceSymbolRow[];
+  }
+
   const perfAllEventsSteps = $derived((): PerfAllEventsStep[] => {
     const stepKeys = new Map<string, string>();
-    for (const entry of selectedRunsWithPerf) {
+    for (const entry of correctedRunsWithPerf) {
       for (const perf of entry.perf) {
         const key = `${perf.step_type ?? 'step'}:${perf.step_name ?? perf.step_id}`;
         stepKeys.set(key, perf.step_name ?? `Step ${perf.step_id}`);
@@ -282,7 +444,7 @@
     return [...stepKeys.entries()].map(([stepKey, stepLabel]) => {
       const scopes = new Set<string>();
       const eventNames = new Set<string>();
-      for (const entry of selectedRunsWithPerf) {
+      for (const entry of correctedRunsWithPerf) {
         const perf = entry.perf.find((p) => `${p.step_type ?? 'step'}:${p.step_name ?? p.step_id}` === stepKey);
         if (perf) {
           scopes.add(perf.scope);
@@ -290,11 +452,11 @@
         }
       }
 
-      const getRaw = (entryPerf: CompareStepPerf | undefined, eventName: string): number | null =>
+      const getRaw = (entryPerf: (typeof correctedRunsWithPerf)[number]['perf'][number] | undefined, eventName: string): number | null =>
         entryPerf?.events.find((e) => e.event_name === eventName)?.counter_value ?? null;
 
       const baseRows: PerfAllEventRow[] = [...eventNames].map((eventName) => {
-        const perfs = selectedRunsWithPerf.map((entry) =>
+        const perfs = correctedRunsWithPerf.map((entry) =>
           entry.perf.find((p) => `${p.step_type ?? 'step'}:${p.step_name ?? p.step_id}` === stepKey)
         );
         const events = perfs.map((p) => p?.events.find((e) => e.event_name === eventName));
@@ -317,7 +479,7 @@
       if (perfViewMode !== 'derived') {
         const cyclesName = eventNames.has('cpu-cycles') ? 'cpu-cycles' : eventNames.has('cycles') ? 'cycles' : null;
         if (cyclesName && eventNames.has('instructions')) {
-          const values = selectedRunsWithPerf.map((entry) => {
+          const values = correctedRunsWithPerf.map((entry) => {
             const perf = entry.perf.find((p) => `${p.step_type ?? 'step'}:${p.step_name ?? p.step_id}` === stepKey);
             const c = getRaw(perf, cyclesName);
             const i = getRaw(perf, 'instructions');
@@ -327,7 +489,7 @@
             computed.push({ eventName: 'ipc', group: 'CPU', isComputed: true, lowerIsBetter: false, values, derivedUnit: '' });
         }
         if (eventNames.has('cache-references') && eventNames.has('cache-misses')) {
-          const values = selectedRunsWithPerf.map((entry) => {
+          const values = correctedRunsWithPerf.map((entry) => {
             const perf = entry.perf.find((p) => `${p.step_type ?? 'step'}:${p.step_name ?? p.step_id}` === stepKey);
             const refs = getRaw(perf, 'cache-references');
             const misses = getRaw(perf, 'cache-misses');
@@ -338,7 +500,7 @@
         }
         const branchName = eventNames.has('branch-instructions') ? 'branch-instructions' : eventNames.has('branches') ? 'branches' : null;
         if (branchName && eventNames.has('branch-misses')) {
-          const values = selectedRunsWithPerf.map((entry) => {
+          const values = correctedRunsWithPerf.map((entry) => {
             const perf = entry.perf.find((p) => `${p.step_type ?? 'step'}:${p.step_name ?? p.step_id}` === stepKey);
             const b = getRaw(perf, branchName);
             const m = getRaw(perf, 'branch-misses');
@@ -762,10 +924,6 @@
         {:else if perfViewMode === 'derived'}
           <p class="perf-raw-note">Derived: perf's own computed metrics (e.g. GHz for cpu-cycles). Not all events have a derived value.</p>
         {/if}
-        {#if hasNonStatPerfData}
-          <p class="perf-raw-note">Record and trace perf steps are not compared here yet; this tab compares stat event counters only.</p>
-        {/if}
-
         {#if perfCompareRows().length > 0}
           <div class="perf-chart-section">
             <label class="perf-metric-picker">
@@ -875,6 +1033,109 @@
           </div>
         {/each}
       </section>
+
+    {#if hasRecordPerfData}
+      <section class="card perf-record-panel">
+        <div class="perf-compare-header">
+          <h3 style="margin:0">Perf Record — Top Symbols</h3>
+          <div class="perf-view-toggle">
+            <button class="perf-mode-btn" class:active={!perfRecordShowAll} onclick={() => perfRecordShowAll = false}>In all runs</button>
+            <button class="perf-mode-btn" class:active={perfRecordShowAll} onclick={() => perfRecordShowAll = true}>All symbols</button>
+          </div>
+        </div>
+        {#each perfRecordDisplaySteps() as step}
+          {#if perfRecordDisplaySteps().length > 1}
+            <div class="perf-step-label">{step.stepLabel}</div>
+          {/if}
+          {#if step.rows.length > 0}
+            <div class="table-wrap">
+              <table class="perf-record-table">
+                <thead>
+                  <tr>
+                    <th>Symbol</th>
+                    <th>DSO</th>
+                    {#each correctedRunsWithPerf as entry}
+                      <th class="col-num" style="color:{entry.color}">{entry.label}</th>
+                    {/each}
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each step.rows as row}
+                    <tr class:perf-row-partial={!row.inAllRuns}>
+                      <td><code class="cmp-event-name">{row.symbol}</code></td>
+                      <td class="col-dso">{row.dso}</td>
+                      {#each row.values as value}
+                        <td class="col-num">{value !== null ? `${value.toFixed(2)}%` : '—'}</td>
+                      {/each}
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+          {:else}
+            <p class="perf-empty-note">No symbols found in {perfRecordShowAll ? 'any' : 'all'} selected runs for this step.</p>
+          {/if}
+        {/each}
+      </section>
+    {/if}
+
+    {#if hasTracePerfData}
+      <section class="card perf-trace-panel">
+        <div class="perf-compare-header">
+          <h3 style="margin:0">Perf Trace — Top Syscalls</h3>
+          <div class="perf-trace-controls">
+            <div class="perf-view-toggle">
+              <button class="perf-mode-btn" class:active={perfTraceMetric === 'calls'} onclick={() => perfTraceMetric = 'calls'}>Calls</button>
+              <button class="perf-mode-btn" class:active={perfTraceMetric === 'errors'} onclick={() => perfTraceMetric = 'errors'}>Errors</button>
+              <button class="perf-mode-btn" class:active={perfTraceMetric === 'avg_ms'} onclick={() => perfTraceMetric = 'avg_ms'}>Avg ms</button>
+              <button class="perf-mode-btn" class:active={perfTraceMetric === 'max_ms'} onclick={() => perfTraceMetric = 'max_ms'}>Max ms</button>
+            </div>
+            <div class="perf-view-toggle">
+              <button class="perf-mode-btn" class:active={!perfTraceShowAll} onclick={() => perfTraceShowAll = false}>In all runs</button>
+              <button class="perf-mode-btn" class:active={perfTraceShowAll} onclick={() => perfTraceShowAll = true}>All syscalls</button>
+            </div>
+          </div>
+        </div>
+        {#each perfTraceDisplaySteps() as step}
+          {#if perfTraceDisplaySteps().length > 1}
+            <div class="perf-step-label">{step.stepLabel}</div>
+          {/if}
+          {#if step.rows.length > 0}
+            <div class="table-wrap">
+              <table class="perf-trace-table">
+                <thead>
+                  <tr>
+                    <th>Syscall</th>
+                    {#each correctedRunsWithPerf as entry}
+                      <th class="col-num" style="color:{entry.color}">{entry.label}</th>
+                    {/each}
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each step.rows as row}
+                    {@const vals = perfTraceMetric === 'calls' ? row.callsPerRun : perfTraceMetric === 'errors' ? row.errorsPerRun : perfTraceMetric === 'avg_ms' ? row.avgMsPerRun : row.maxMsPerRun}
+                    <tr class:perf-row-partial={!row.inAllRuns}>
+                      <td><code class="cmp-event-name">{row.syscall}</code></td>
+                      {#each vals as value}
+                        <td class="col-num">
+                          {#if value !== null}
+                            {perfTraceMetric === 'calls' || perfTraceMetric === 'errors' ? value.toLocaleString() : `${value.toFixed(3)} ms`}
+                          {:else}
+                            <span class="missing-value">—</span>
+                          {/if}
+                        </td>
+                      {/each}
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+          {:else}
+            <p class="perf-empty-note">No syscalls found in {perfTraceShowAll ? 'any' : 'all'} selected runs for this step.</p>
+          {/if}
+        {/each}
+      </section>
+    {/if}
 
     {:else}
       <div class="card empty-state">No perf data was collected for the selected runs.</div>
@@ -1222,6 +1483,78 @@
     font-size: 13px;
     text-align: center;
     padding: 32px;
+  }
+
+  .perf-record-panel,
+  .perf-trace-panel {
+    margin-bottom: 12px;
+  }
+
+  .perf-trace-controls {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .perf-record-table,
+  .perf-trace-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+
+  .perf-record-table thead tr,
+  .perf-trace-table thead tr {
+    background: #f5f7fa;
+  }
+
+  .perf-record-table th,
+  .perf-trace-table th {
+    padding: 7px 10px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: #888;
+  }
+
+  .perf-record-table td,
+  .perf-trace-table td {
+    padding: 6px 10px;
+    border-top: 1px solid #f0f0f0;
+    color: #333;
+  }
+
+  .perf-record-table tbody tr:hover,
+  .perf-trace-table tbody tr:hover {
+    background: #f8f9fc;
+  }
+
+  .perf-record-table .col-num,
+  .perf-trace-table .col-num {
+    text-align: right;
+  }
+
+  .col-dso {
+    color: #888;
+    font-family: monospace;
+    font-size: 11px;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .perf-row-partial {
+    opacity: 0.65;
+  }
+
+  .perf-empty-note {
+    font-size: 12px;
+    color: #999;
+    padding: 12px 0;
+    margin: 0;
   }
 
   @media (max-width: 720px) {

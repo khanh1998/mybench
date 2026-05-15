@@ -1092,7 +1092,8 @@ Use this after validating the plan with run_design.`,
 					perf_cgroup: s.perf_cgroup ?? '',
 					perf_repeat: s.perf_repeat ?? '',
 					perf_freq: s.perf_freq ?? '',
-					perf_call_graph: s.perf_call_graph ?? 'dwarf'
+					perf_call_graph: s.perf_call_graph ?? 'dwarf',
+					perf_mmap_pages: s.perf_mmap_pages ?? ''
 				}) : ({
 					id: s.id, position: s.position, name: s.name, type: s.type, enabled: !!s.enabled,
 					script: s.script, no_transaction: !!s.no_transaction, duration_secs: s.duration_secs,
