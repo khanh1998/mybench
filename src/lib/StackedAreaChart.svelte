@@ -208,8 +208,28 @@
 
   const hoveredTotal = $derived(tooltipRows.reduce((s, r) => s + r.v, 0));
 
-  let headerCopied = $state(false);
+  let headerCopied = $state<'json' | 'markdown' | null>(null);
   let headerCopyTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function markHeaderCopied(kind: 'json' | 'markdown') {
+    headerCopied = kind;
+    if (headerCopyTimer) clearTimeout(headerCopyTimer);
+    headerCopyTimer = setTimeout(() => { headerCopied = null; }, 1600);
+  }
+
+  function markdownCell(value: string | number | null): string {
+    if (value === null) return '';
+    if (typeof value === 'number') return Number.isFinite(value) ? String(+value.toFixed(4)) : '';
+    return value.replace(/\|/g, '\\|').replace(/\n/g, '<br>');
+  }
+
+  function markdownTable(headers: string[], rows: (string | number | null)[][]): string {
+    return [
+      `| ${headers.map(markdownCell).join(' | ')} |`,
+      `| ${headers.map(() => '---').join(' | ')} |`,
+      ...rows.map((row) => `| ${row.map(markdownCell).join(' | ')} |`)
+    ].join('\n');
+  }
 
   function colorToRgba(color: string, alpha: number): string {
     if (color.startsWith('#')) {
@@ -259,9 +279,16 @@
       }
     };
     navigator.clipboard.writeText(JSON.stringify(config, null, 2));
-    headerCopied = true;
-    if (headerCopyTimer) clearTimeout(headerCopyTimer);
-    headerCopyTimer = setTimeout(() => { headerCopied = false; }, 1600);
+    markHeaderCopied('json');
+  }
+
+  function copyMarkdownTable() {
+    const rows = allTimes.map((time, j) => [
+      +(time / 1000).toFixed(1),
+      ...visibleSeries.map((_, i) => (stacked.tops[i]?.[j] ?? 0) - (stacked.bottoms[i]?.[j] ?? 0))
+    ]);
+    navigator.clipboard.writeText(markdownTable(['time_s', ...visibleSeries.map((s) => s.label)], rows));
+    markHeaderCopied('markdown');
   }
 </script>
 
@@ -292,15 +319,17 @@
           <button class:active={tooltipGranularity === 'broad'} onclick={() => tooltipGranularity = 'broad'}>Broad</button>
         </div>
       {/if}
-      <button type="button" class="copy-btn" class:copied={headerCopied} title="Copy as Chart.js JSON" onclick={copyChartJson}>
-        {#if headerCopied}
-          <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0z"/></svg>
-          Copied
-        {:else}
-          <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"/><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"/></svg>
-          Copy
-        {/if}
-      </button>
+      <div class="copy-group" aria-label="Copy chart data">
+        <button type="button" class="copy-btn" class:copied={headerCopied === 'json'} title="Copy as Chart.js JSON" onclick={copyChartJson}>
+          {#if headerCopied === 'json'}
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0z"/></svg>
+          {:else}
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"/><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"/></svg>
+          {/if}
+          JSON
+        </button>
+        <button type="button" class="copy-btn" class:copied={headerCopied === 'markdown'} title="Copy as Markdown table" onclick={copyMarkdownTable}>MD</button>
+      </div>
     </div>
   </div>
 
@@ -402,12 +431,15 @@
 
   .header-right { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-shrink: 0; }
   .gran-toggle { display: flex; border: 1px solid #e0e0e0; border-radius: 4px; overflow: hidden; }
+  .copy-group { display: inline-flex; flex-shrink: 0; }
   .copy-btn {
     display: inline-flex; align-items: center; gap: 4px;
     font-size: 11px; color: #888;
-    background: none; border: 1px solid #e3e3e3; border-radius: 4px;
-    padding: 2px 7px; cursor: pointer; line-height: 1.4; flex-shrink: 0;
+    background: none; border: 1px solid #e3e3e3;
+    padding: 2px 7px; cursor: pointer; line-height: 1.4; min-height: 22px; flex-shrink: 0;
   }
+  .copy-btn:first-child { border-radius: 4px 0 0 4px; }
+  .copy-btn:last-child { border-left: 0; border-radius: 0 4px 4px 0; }
   .copy-btn:hover { color: #333; border-color: #bbb; background: #f7f7f7; }
   .copy-btn.copied { color: #16a34a; border-color: #86efac; background: #f0fdf4; }
   .gran-toggle button { background: none; border: none; padding: 2px 9px; font-size: 11px; cursor: pointer; color: #666; }
