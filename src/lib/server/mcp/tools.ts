@@ -615,11 +615,12 @@ Step types:
   "collect"  — provide duration_secs (seconds to wait while collecting pg_stat_* snapshots)
   "pg_stat_statements_reset"   — no extra fields; resets pg_stat_statements and logs a warning if unavailable
   "pg_stat_statements_collect" — no extra fields; captures one pg_stat_statements snapshot for the current database
+  "perf"     — Linux perf profiling step. Key fields: perf_stat_enabled, perf_record_enabled, perf_trace_enabled (booleans); perf_events (comma-separated event list); perf_duration / perf_stat_duration / perf_record_duration / perf_trace_duration (seconds, supports {{PARAM}}); perf_delay / perf_stat_delay / perf_record_delay / perf_trace_delay (seconds); perf_cgroup (cgroup path override); perf_repeat (integer); perf_freq (sampling frequency); perf_call_graph (default "dwarf"); perf_mmap_pages (ring buffer pages, default 16384 for record mode).
 Use {{PARAM_NAME}} in scripts and pgbench_options — values come from set_params.`,
 			inputSchema: {
 				design_id: z.number().int(),
 				step_id: z.number().int().optional().describe('Omit to insert a new step'),
-				type: z.enum(['sql', 'pgbench', 'sysbench', 'collect', 'pg_stat_statements_reset', 'pg_stat_statements_collect']),
+				type: z.enum(['sql', 'pgbench', 'sysbench', 'collect', 'pg_stat_statements_reset', 'pg_stat_statements_collect', 'perf']),
 				name: z.string(),
 				position: z.number().int().describe('Execution order, 0-based. Lower = runs earlier.'),
 				enabled: z.boolean().default(true),
@@ -631,19 +632,58 @@ Use {{PARAM_NAME}} in scripts and pgbench_options — values come from set_param
 					weight: z.number().int().default(1),
 					script: z.string().describe('pgbench custom script: use \\set, BEGIN, SQL, END. Supports {{PARAM}}.')
 				})).optional().describe('Custom scripts for type=pgbench only'),
-				duration_secs: z.number().int().optional().describe('Snapshot collection duration for type=collect')
+				duration_secs: z.number().int().optional().describe('Snapshot collection duration for type=collect'),
+				perf_stat_enabled: z.boolean().optional().describe('Enable perf stat collection (type=perf)'),
+				perf_record_enabled: z.boolean().optional().describe('Enable perf record/flamegraph collection (type=perf)'),
+				perf_trace_enabled: z.boolean().optional().describe('Enable perf trace collection (type=perf)'),
+				perf_events: z.string().optional().describe('Comma-separated perf event list (type=perf), e.g. "task-clock,page-faults"'),
+				perf_duration: z.string().optional().describe('Total perf duration in seconds, supports {{PARAM}} (type=perf)'),
+				perf_stat_duration: z.string().optional().describe('perf stat duration override (type=perf)'),
+				perf_record_duration: z.string().optional().describe('perf record duration override (type=perf)'),
+				perf_trace_duration: z.string().optional().describe('perf trace duration override (type=perf)'),
+				perf_delay: z.string().optional().describe('Delay before perf starts in seconds (type=perf)'),
+				perf_stat_delay: z.string().optional().describe('perf stat delay override (type=perf)'),
+				perf_record_delay: z.string().optional().describe('perf record delay override (type=perf)'),
+				perf_trace_delay: z.string().optional().describe('perf trace delay override (type=perf)'),
+				perf_cgroup: z.string().optional().describe('cgroup path override for perf (type=perf)'),
+				perf_repeat: z.string().optional().describe('Number of times to repeat perf collection (type=perf)'),
+				perf_freq: z.string().optional().describe('Sampling frequency for perf record (type=perf)'),
+				perf_call_graph: z.string().optional().describe('Call graph method: "dwarf" (default), "fp", or "lbr" (type=perf)'),
+				perf_mmap_pages: z.string().optional().describe('Ring buffer size in pages for perf record, default 16384 (type=perf)')
 			}
 		},
-		async ({ design_id, step_id, type, name, position, enabled, script, no_transaction, pgbench_options, pgbench_scripts, duration_secs }) => {
+		async ({ design_id, step_id, type, name, position, enabled, script, no_transaction, pgbench_options, pgbench_scripts, duration_secs,
+			perf_stat_enabled, perf_record_enabled, perf_trace_enabled, perf_events, perf_duration,
+			perf_stat_duration, perf_record_duration, perf_trace_duration,
+			perf_delay, perf_stat_delay, perf_record_delay, perf_trace_delay,
+			perf_cgroup, perf_repeat, perf_freq, perf_call_graph, perf_mmap_pages }) => {
 			const db = getDb();
 			let resolvedStepId: number;
 			if (step_id) {
-				db.prepare('UPDATE design_steps SET type=?, name=?, position=?, enabled=?, script=?, no_transaction=?, pgbench_options=?, duration_secs=? WHERE id=?')
-					.run(type, name, position, enabled ? 1 : 0, script ?? '', no_transaction ? 1 : 0, pgbench_options ?? '', duration_secs ?? 0, step_id);
+				db.prepare(`UPDATE design_steps SET type=?, name=?, position=?, enabled=?, script=?, no_transaction=?, pgbench_options=?, duration_secs=?,
+					perf_stat_enabled=?, perf_record_enabled=?, perf_trace_enabled=?, perf_events=?,
+					perf_duration=?, perf_stat_duration=?, perf_record_duration=?, perf_trace_duration=?,
+					perf_delay=?, perf_stat_delay=?, perf_record_delay=?, perf_trace_delay=?,
+					perf_cgroup=?, perf_repeat=?, perf_freq=?, perf_call_graph=?, perf_mmap_pages=? WHERE id=?`)
+					.run(type, name, position, enabled ? 1 : 0, script ?? '', no_transaction ? 1 : 0, pgbench_options ?? '', duration_secs ?? 0,
+						perf_stat_enabled ? 1 : 0, perf_record_enabled ? 1 : 0, perf_trace_enabled ? 1 : 0, perf_events ?? '',
+						perf_duration ?? '', perf_stat_duration ?? '', perf_record_duration ?? '', perf_trace_duration ?? '',
+						perf_delay ?? '', perf_stat_delay ?? '', perf_record_delay ?? '', perf_trace_delay ?? '',
+						perf_cgroup ?? '', perf_repeat ?? '', perf_freq ?? '', perf_call_graph ?? 'dwarf', perf_mmap_pages ?? '',
+						step_id);
 				resolvedStepId = step_id;
 			} else {
-				const r = db.prepare('INSERT INTO design_steps (design_id, type, name, position, enabled, script, no_transaction, pgbench_options, duration_secs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-					.run(design_id, type, name, position, enabled ? 1 : 0, script ?? '', no_transaction ? 1 : 0, pgbench_options ?? '', duration_secs ?? 0);
+				const r = db.prepare(`INSERT INTO design_steps (design_id, type, name, position, enabled, script, no_transaction, pgbench_options, duration_secs,
+					perf_stat_enabled, perf_record_enabled, perf_trace_enabled, perf_events,
+					perf_duration, perf_stat_duration, perf_record_duration, perf_trace_duration,
+					perf_delay, perf_stat_delay, perf_record_delay, perf_trace_delay,
+					perf_cgroup, perf_repeat, perf_freq, perf_call_graph, perf_mmap_pages)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+					.run(design_id, type, name, position, enabled ? 1 : 0, script ?? '', no_transaction ? 1 : 0, pgbench_options ?? '', duration_secs ?? 0,
+						perf_stat_enabled ? 1 : 0, perf_record_enabled ? 1 : 0, perf_trace_enabled ? 1 : 0, perf_events ?? '',
+						perf_duration ?? '', perf_stat_duration ?? '', perf_record_duration ?? '', perf_trace_duration ?? '',
+						perf_delay ?? '', perf_stat_delay ?? '', perf_record_delay ?? '', perf_trace_delay ?? '',
+						perf_cgroup ?? '', perf_repeat ?? '', perf_freq ?? '', perf_call_graph ?? 'dwarf', perf_mmap_pages ?? '');
 				resolvedStepId = r.lastInsertRowid as number;
 			}
 			if (type === 'pgbench' && pgbench_scripts) {

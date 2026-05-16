@@ -91,7 +91,7 @@ npm run test       # Run vitest unit tests
 - **Fresh DB per design**: each design uses its own isolated database, so `delta = bench_snapshot - pre_snapshot` gives clean benchmark numbers
 - **`_phase` not `_is_baseline`**: snapshots carry `_phase ∈ {pre, bench, post}` to support pre/post collection windows, not just a boolean baseline flag
 - **Enabled/disabled pg_stat tables**: stored in `pg_stat_table_selections` per server; version-incompatible tables auto-disabled on connect (`pg_stat_io` requires PG16+, etc.)
-- **Step types**: `sql`, `pgbench`, `sysbench`, `collect`, `pg_stat_statements_reset`, `pg_stat_statements_collect`
+- **Step types**: `sql`, `pgbench`, `sysbench`, `collect`, `pg_stat_statements_reset`, `pg_stat_statements_collect`, `perf`
 - **Param substitution**: `{{PARAM_NAME}}` in scripts/options is replaced at run time from the design's params or profile overrides
 - **Custom metrics**: user writes SQL against `snap_*` tables using `?` as `_run_id` placeholder; executed via `POST /api/query` against SQLite
 - **SSE replay**: if a run is already done when the client connects, stored stdout/stderr from `run_step_results` is replayed line-by-line
