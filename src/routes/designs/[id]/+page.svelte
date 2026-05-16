@@ -1413,6 +1413,23 @@
                       <option value="lbr">lbr</option>
                     </select>
                   </label>
+                  <label title="Ring buffer size in 4KB pages (must be power of 2). Default 4096 = 16MB. Increase if you see lost samples.">
+                    Mmap pages (-m)
+                    <input
+                      value={selectedStep.perf_mmap_pages}
+                      oninput={(e) => {
+                        selectedStep!.perf_mmap_pages = (e.currentTarget as HTMLInputElement).value;
+                      }}
+                      placeholder={'4096 or {{MMAP_PAGES}}'}
+                      spellcheck="false"
+                    />
+                    {#if resolveParamPreview(selectedStep.perf_mmap_pages)}
+                      {@const preview = resolveParamPreview(selectedStep.perf_mmap_pages)!}
+                      <span class="param-preview" class:param-preview-error={preview.unresolved.length > 0}>
+                        {preview.unresolved.length > 0 ? `unresolved: ${preview.unresolved.join(', ')}` : `→ ${preview.text}`}
+                      </span>
+                    {/if}
+                  </label>
                 </div>
               {:else if mode === 'trace'}
                 <div class="perf-grid">

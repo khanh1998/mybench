@@ -186,8 +186,12 @@ func buildPerfRecordCmd(step plan.Step, opts RunOpts, durationSecs int, basePath
 		callGraph = "dwarf"
 	}
 
+	mmapPages := strings.TrimSpace(plan.SubstituteParams(step.PerfMmapPages, opts.Plan.Params))
+	if mmapPages == "" {
+		mmapPages = "4096"
+	}
 	dataPath := basePath + ".data"
-	args := []string{"sudo", "perf", "record", "-F", freq, "--call-graph", shellQuote(callGraph), "-a"}
+	args := []string{"sudo", "perf", "record", "-F", freq, "--call-graph", shellQuote(callGraph), "-m", mmapPages, "-a"}
 	if cg := resolvePerfCgroup(step, opts); cg != "" {
 		// -e must come before -G (perf requires events defined before cgroups)
 		args = append(args, "-e", "cpu-clock", "-G", shellQuote(cg))
