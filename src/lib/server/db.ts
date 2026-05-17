@@ -678,6 +678,17 @@ function migrate(db: Database.Database) {
       derived_unit TEXT NOT NULL DEFAULT ''
     );
 
+    CREATE TABLE IF NOT EXISTS sysbench_system_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      pg_server_id INTEGER NOT NULL REFERENCES pg_servers(id) ON DELETE CASCADE,
+      pg_server_name TEXT NOT NULL DEFAULT '',
+      test_type TEXT NOT NULL,
+      flags TEXT NOT NULL DEFAULT '',
+      output TEXT NOT NULL DEFAULT '',
+      exit_code INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE TABLE IF NOT EXISTS saved_queries (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       decision_id INTEGER REFERENCES decisions(id) ON DELETE CASCADE,

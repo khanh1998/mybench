@@ -62,6 +62,11 @@ export const POST: RequestHandler = async ({ request }) => {
 			tools['perf'] = perf.perf_installed
 				? { ok: true, version: perf.perf_version }
 				: { ok: false, error: perf.error || 'not installed' };
+
+			const sysbenchRes = await exec(conn, 'sysbench --version 2>&1 || exit 1');
+			tools['sysbench'] = sysbenchRes.code !== 0
+				? { ok: false, error: 'not found on PATH' }
+				: { ok: true, version: sysbenchRes.stdout.trim() };
 			return json({ ok: true, tools, perf });
 		}
 

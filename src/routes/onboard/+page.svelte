@@ -112,7 +112,7 @@
 		const dt = dbInspect?.tools;
 		if (!ct || !dt) return false;
 		const clientTools = ['mybench-runner', 'pgbench', 'sysbench'];
-		const dbTools = ['postgresql']; // perf is optional, not required
+		const dbTools = ['postgresql', 'sysbench']; // perf is optional, not required
 		return (
 			clientTools.every(t => ct[t]?.ok || installResults[`client:${t}`] === true) &&
 			dbTools.every(t => dt[t]?.ok || installResults[`db:${t}`] === true)
@@ -197,6 +197,18 @@
 		}
 	}
 
+	async function installAllDbTools() {
+		const pgStatus = dbInspect?.tools?.['postgresql'];
+		if (!pgStatus?.ok && !installResults['db:postgresql']) {
+			await installPostgres();
+		}
+
+		const sysbenchStatus = dbInspect?.tools?.['sysbench'];
+		if (!sysbenchStatus?.ok && !installResults['db:sysbench']) {
+			await installDbSysbench();
+		}
+	}
+
 	async function installClientTool(tool: 'mybench-runner' | 'pgbench' | 'sysbench') {
 		const key = `client:${tool}`;
 		installing = new Set([...installing, key]);
@@ -221,6 +233,23 @@
 		installResults[key] = false;
 		try {
 			const ok = await sseStream('/api/onboard/install-pg', { host: dbHost, user: sshUser, private_key: sshKey },
+				(line) => { installOutputs[key] += line + '\n'; });
+			installResults[key] = ok;
+			const res = await fetch('/api/onboard/inspect', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ host: dbHost, user: sshUser, private_key: sshKey, role: 'db' }) });
+			dbInspect = await res.json();
+		} finally {
+			installing = new Set([...installing].filter(k => k !== key));
+		}
+	}
+
+	async function installDbSysbench() {
+		const key = 'db:sysbench';
+		installing = new Set([...installing, key]);
+		installOutputs[key] = '';
+		installResults[key] = false;
+		try {
+			const ok = await sseStream('/api/ec2/install', { host: dbHost, user: sshUser, private_key: sshKey, remote_dir: '~/mybench-bench', log_dir: '/tmp/mybench-logs', tool: 'sysbench' },
 				(line) => { installOutputs[key] += line + '\n'; });
 			installResults[key] = ok;
 			const res = await fetch('/api/onboard/inspect', { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -518,7 +547,16 @@
 					</div>
 					<!-- DB tools -->
 					<div class="droplet-card">
-						<div class="droplet-label">DB Droplet</div>
+						<div class="droplet-label">
+							DB Droplet
+							{#if dbInspect?.ok && ['postgresql', 'sysbench'].some(t => !dbInspect?.tools?.[t]?.ok && !installResults[`db:${t}`])}
+								<button style="margin-left:auto; font-size:12px"
+									disabled={isInstallBlocked('db:postgresql')}
+									onclick={installAllDbTools}>
+									{[...installing].some(k => k.startsWith('db:')) ? 'Installing…' : 'Install All'}
+								</button>
+							{/if}
+						</div>
 						{#if dbInspect?.ok}
 							{@const pgKey = 'db:postgresql'}
 							{@const pgS = dbInspect.tools?.['postgresql']}
@@ -554,6 +592,24 @@
 							</div>
 							{#if installOutputs[perfKey]}
 								<pre class="output install-out">{installOutputs[perfKey]}</pre>
+							{/if}
+
+							{@const sysbenchKey = 'db:sysbench'}
+							{@const sysbenchS = dbInspect.tools?.['sysbench']}
+							{@const sysbenchInstalled = sysbenchS?.ok || installResults[sysbenchKey]}
+							<div class="tool-row">
+								<span class="tool-icon {toolClass(sysbenchS, sysbenchKey)}">{toolIcon(sysbenchS, sysbenchKey)}</span>
+								<span class="tool-name">sysbench <span style="color:#888; font-size:11px">(system tests)</span></span>
+								{#if sysbenchInstalled}
+									<span class="tool-version">{sysbenchS?.version ?? 'installed'}</span>
+								{:else}
+									<button disabled={isInstallBlocked(sysbenchKey)} onclick={() => installDbSysbench()}>
+										{installing.has(sysbenchKey) ? 'Installing…' : 'Install'}
+									</button>
+								{/if}
+							</div>
+							{#if installOutputs[sysbenchKey]}
+								<pre class="output install-out">{installOutputs[sysbenchKey]}</pre>
 							{/if}
 							{#if dbInspect.perf}
 								{@const perf = dbInspect.perf}
@@ -601,7 +657,7 @@
 					</div>
 				</div>
 				<div class="row" style="gap:8px; margin-top:12px">
-					<button onclick={runInspect} disabled={inspecting || installing !== null}>Re-check</button>
+					<button onclick={runInspect} disabled={inspecting || installing.size > 0}>Re-check</button>
 					<button class="primary" disabled={!step3Done} onclick={() => currentStep = 4}>Next: Configure PostgreSQL →</button>
 				</div>
 			{/if}
