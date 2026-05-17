@@ -4342,6 +4342,37 @@ function buildHostSystemSection(db: Database.Database, runId: number, runStartMs
 			{ rd_sectors: 'Read KB/s', wr_sectors: 'Write KB/s', dc_sectors: 'Discard KB/s' },
 			{ rd_sectors: 'Kilobytes read per second (rd_sectors × 512 bytes)', wr_sectors: 'Kilobytes written per second (wr_sectors × 512 bytes)', dc_sectors: 'Kilobytes discarded (TRIMmed) per second (dc_sectors × 512 bytes)' });
 		pushChartMetric(chartMetrics, withChartGroup(g2, 'Block Devices', dev));
+		const gReqSize = buildHostDerivedRateGroup(`disk_${dev}_req_size`, 'Request Size', `Disk ${dev} — Avg Request Size`,
+			devRows, [
+				{
+					label: 'Read B/op',
+					description: 'Average bytes per completed read operation (rd_sectors × 512 / rd_ios) — only shown for intervals with at least one read I/O',
+					valueFn: (cur, prev) => {
+						const dIos = Number(cur.rd_ios) - Number(prev.rd_ios);
+						if (dIos <= 0) return null;
+						return (Number(cur.rd_sectors) - Number(prev.rd_sectors)) * 512 / dIos;
+					},
+				},
+				{
+					label: 'Write B/op',
+					description: 'Average bytes per completed write operation (wr_sectors × 512 / wr_ios) — only shown for intervals with at least one write I/O',
+					valueFn: (cur, prev) => {
+						const dIos = Number(cur.wr_ios) - Number(prev.wr_ios);
+						if (dIos <= 0) return null;
+						return (Number(cur.wr_sectors) - Number(prev.wr_sectors)) * 512 / dIos;
+					},
+				},
+				{
+					label: 'Discard B/op',
+					description: 'Average bytes per completed discard (TRIM) operation (dc_sectors × 512 / dc_ios) — only shown for intervals with at least one discard I/O',
+					valueFn: (cur, prev) => {
+						const dIos = Number(cur.dc_ios) - Number(prev.dc_ios);
+						if (dIos <= 0) return null;
+						return (Number(cur.dc_sectors) - Number(prev.dc_sectors)) * 512 / dIos;
+					},
+				},
+			], 'bytes', runStartMs);
+		pushChartMetric(chartMetrics, withChartGroup(gReqSize, 'Block Devices', dev));
 		const g3 = buildInstantGroup(`disk_${dev}_queue`, 'Queue', `Disk ${dev} — In-flight I/Os`, devRows,
 			['in_flight'], 'count', runStartMs, 1, L, D);
 		pushChartMetric(chartMetrics, withChartGroup(g3, 'Block Devices', dev));
@@ -4446,6 +4477,28 @@ function buildHostSystemSection(db: Database.Database, runId: number, runStartMs
 		const g2 = buildRateGroup(`net_${iface}_pkts`, 'Packets', `Net ${iface} — Packets /s`,
 			ifaceRows, ['rx_packets', 'tx_packets', 'rx_errs', 'tx_errs', 'rx_drop', 'tx_drop'], 'count', runStartMs, 1, L, D);
 		pushChartMetric(chartMetrics, withChartGroup(g2, 'Network', iface));
+		const gPktSize = buildHostDerivedRateGroup(`net_${iface}_pkt_size`, 'Packet Size', `Net ${iface} — Avg Packet Size`,
+			ifaceRows, [
+				{
+					label: 'Recv B/pkt',
+					description: 'Average bytes per received packet (rx_bytes / rx_packets) — only shown for intervals with at least one received packet',
+					valueFn: (cur, prev) => {
+						const dPkts = Number(cur.rx_packets) - Number(prev.rx_packets);
+						if (dPkts <= 0) return null;
+						return (Number(cur.rx_bytes) - Number(prev.rx_bytes)) / dPkts;
+					},
+				},
+				{
+					label: 'Send B/pkt',
+					description: 'Average bytes per transmitted packet (tx_bytes / tx_packets) — only shown for intervals with at least one transmitted packet',
+					valueFn: (cur, prev) => {
+						const dPkts = Number(cur.tx_packets) - Number(prev.tx_packets);
+						if (dPkts <= 0) return null;
+						return (Number(cur.tx_bytes) - Number(prev.tx_bytes)) / dPkts;
+					},
+				},
+			], 'bytes', runStartMs);
+		pushChartMetric(chartMetrics, withChartGroup(gPktSize, 'Network', iface));
 		const g3 = buildRateGroup(`net_${iface}_errors`, 'Error Detail', `Net ${iface} — Error Detail /s`,
 			ifaceRows, ['rx_fifo', 'rx_frame', 'tx_fifo', 'tx_colls', 'tx_carrier', 'rx_multicast'], 'count', runStartMs, 1, L, D);
 		pushChartMetric(chartMetrics, withChartGroup(g3, 'Network', iface));
