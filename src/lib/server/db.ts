@@ -5,6 +5,7 @@ import { PG_STAT_STATEMENTS_SQLITE_COLUMNS } from './pg-stat-statements-schema';
 
 const DATA_DIR = process.env.DATA_DIR ?? join(process.cwd(), 'data');
 if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
+const PERF_SCRIPT_DIR = join(process.cwd(), 'data', 'perf');
 
 const DB_PATH = join(DATA_DIR, 'mybench.db');
 const OLD_DEFAULT_PERF_EVENTS =
@@ -738,6 +739,8 @@ function migrate(db: Database.Database) {
       cli_log_dir  TEXT    NOT NULL DEFAULT '/tmp/gocli-logs'
     );
   `);
+
+  mkdirSync(PERF_SCRIPT_DIR, { recursive: true });
 
   // Add ssl column to pg_servers if it doesn't exist (idempotent)
   const hasSslCol = (db.prepare(`PRAGMA table_info(pg_servers)`).all() as { name: string }[]).some(c => c.name === 'ssl');

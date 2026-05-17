@@ -1,5 +1,23 @@
 import getDb from '$lib/server/db';
 import { getPgStatStatementsSqliteType } from '$lib/server/pg-stat-statements-schema';
+import { mkdirSync, writeFileSync } from 'fs';
+import { join } from 'path';
+
+const PERF_SCRIPT_DIR = 'data/perf';
+
+function perfScriptPath(runId: number, stepId: number, mode: string): string {
+	const safeMode = mode.replace(/[^a-zA-Z0-9_-]/g, '_');
+	return `${PERF_SCRIPT_DIR}/${runId}_${stepId}_${safeMode}.perf_script`;
+}
+
+function persistPerfScriptOutput(runId: number, stepId: number, mode: string, scriptOutput?: string): string {
+	if (!scriptOutput) return '';
+
+	mkdirSync(PERF_SCRIPT_DIR, { recursive: true });
+	const path = perfScriptPath(runId, stepId, mode);
+	writeFileSync(join(process.cwd(), path), scriptOutput, 'utf8');
+	return path;
+}
 
 export interface RunnerResultRun {
 	status: string;
@@ -228,6 +246,7 @@ export function importResultIntoRun(runId: number, result: RunnerResult): void {
 				);
 				for (const perf of s.perfs ?? (s.perf ? [s.perf] : [])) {
 					const mode = perf.mode ?? 'stat';
+					const perfScriptOutput = persistPerfScriptOutput(runId, s.step_id, mode, perf.script_output);
 					const resultJson = mode === 'record'
 						? JSON.stringify({ top_functions: perf.top_functions ?? [] })
 						: mode === 'trace'
@@ -244,7 +263,7 @@ export function importResultIntoRun(runId: number, result: RunnerResult): void {
 						perf.raw_error ?? '',
 						mode,
 						resultJson,
-						perf.script_output ?? '',
+						perfScriptOutput,
 						perf.warnings ? JSON.stringify(perf.warnings) : '',
 						perf.started_at ?? null,
 						perf.finished_at ?? null
