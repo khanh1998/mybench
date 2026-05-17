@@ -611,7 +611,7 @@ Call this after create_design to assign a server before running the design.`,
 Step types:
   "sql"      — provide script (SQL text, supports {{PARAM}})
   "pgbench"  — provide pgbench_options and pgbench_scripts [{name, weight, script}]
-  "sysbench" — provide script (Lua script content) and pgbench_options (sysbench CLI flags). Executor is a stub — implementation pending.
+  "sysbench" — provide pgbench_options as "testname command [flags]" (e.g. "oltp_read_write run --tables=10 --threads=4 --time=60") or script (custom Lua content).
   "collect"  — provide duration_secs (seconds to wait while collecting pg_stat_* snapshots)
   "pg_stat_statements_reset"   — no extra fields; resets pg_stat_statements and logs a warning if unavailable
   "pg_stat_statements_collect" — no extra fields; captures one pg_stat_statements snapshot for the current database
@@ -626,7 +626,7 @@ Use {{PARAM_NAME}} in scripts and pgbench_options — values come from set_param
 				enabled: z.boolean().default(true),
 				script: z.string().optional().describe('SQL text for type=sql; Lua script content for type=sysbench'),
 				no_transaction: z.boolean().optional().describe('If true, SQL runs without wrapping in a transaction'),
-				pgbench_options: z.string().optional().describe('pgbench CLI flags for type=pgbench (e.g. "-c {{NUM_CLIENTS}} -j 2 -T 60 --no-vacuum"); sysbench CLI flags for type=sysbench (e.g. "--threads={{NUM_CLIENTS}} --time=60 --batch-size={{BATCH_SIZE}}")'),
+				pgbench_options: z.string().optional().describe('pgbench CLI flags for type=pgbench (e.g. "-c {{NUM_CLIENTS}} -j 2 -T 60 --no-vacuum"); for type=sysbench: "testname command [flags]" (e.g. "oltp_read_write run --tables=10 --threads=4 --time=60")'),
 				pgbench_scripts: z.array(z.object({
 					name: z.string(),
 					weight: z.number().int().default(1),

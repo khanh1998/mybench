@@ -35,6 +35,7 @@
     type: DesignStepType;
     script: string;
     pgbench_options: string;
+
     duration_secs: number;
     no_transaction: number;
     collect_perf: number;
@@ -102,7 +103,6 @@
     { value: 'pg_stat_statements_reset', label: 'reset pg_stat_statements' },
     { value: 'pg_stat_statements_collect', label: 'collect pg_stat_statements' }
   ];
-
   // Run history panel
   let runsCollapsed = $state(false);
   let runsHeight = $state(280);
@@ -581,6 +581,7 @@
       type: 'sql',
       script: '',
       pgbench_options: '',
+
       duration_secs: 0,
       no_transaction: 0,
       collect_perf: 0,

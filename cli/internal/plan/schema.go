@@ -89,8 +89,8 @@ type Step struct {
 	PerfRecordDelay    string          `json:"perf_record_delay,omitempty"`
 	PerfTraceDelay     string          `json:"perf_trace_delay,omitempty"`
 	PerfCgroup         string          `json:"perf_cgroup,omitempty"`
-	PgbenchOptions     string          `json:"pgbench_options,omitempty"`
-	PgbenchScripts     []PgbenchScript `json:"pgbench_scripts,omitempty"`
+	PgbenchOptions string          `json:"pgbench_options,omitempty"`
+	PgbenchScripts []PgbenchScript `json:"pgbench_scripts,omitempty"`
 }
 
 // PgbenchScript is a named pgbench custom script with a weight.

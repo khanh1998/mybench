@@ -53,6 +53,8 @@ function createTestDb() {
       type TEXT NOT NULL DEFAULT 'sql',
       script TEXT NOT NULL DEFAULT '',
       pgbench_options TEXT NOT NULL DEFAULT '',
+      sysbench_builtin TEXT NOT NULL DEFAULT '',
+      sysbench_command TEXT NOT NULL DEFAULT '',
       enabled INTEGER NOT NULL DEFAULT 1,
       duration_secs INTEGER NOT NULL DEFAULT 0,
       no_transaction INTEGER NOT NULL DEFAULT 0,
@@ -174,7 +176,7 @@ function exportPlan(db: Database.Database, designId: number) {
 
 	const steps = db.prepare(
 		'SELECT * FROM design_steps WHERE design_id = ? AND enabled = 1 ORDER BY position'
-	).all(designId) as { id: number; type: string; position: number; name: string; script: string; no_transaction: number; duration_secs: number; collect_perf: number; perf_duration: string; perf_stat_duration: string; perf_record_duration: string; perf_trace_duration: string; perf_stat_enabled: number; perf_record_enabled: number; perf_trace_enabled: number; perf_delay: string; perf_stat_delay: string; perf_record_delay: string; perf_trace_delay: string; perf_mode: string; perf_cgroup: string; perf_events: string; perf_repeat: string; perf_freq: string; perf_call_graph: string; perf_mmap_pages: string; pgbench_options: string; enabled: number }[];
+	).all(designId) as { id: number; type: string; position: number; name: string; script: string; no_transaction: number; duration_secs: number; collect_perf: number; perf_duration: string; perf_stat_duration: string; perf_record_duration: string; perf_trace_duration: string; perf_stat_enabled: number; perf_record_enabled: number; perf_trace_enabled: number; perf_delay: string; perf_stat_delay: string; perf_record_delay: string; perf_trace_delay: string; perf_mode: string; perf_cgroup: string; perf_events: string; perf_repeat: string; perf_freq: string; perf_call_graph: string; perf_mmap_pages: string; pgbench_options: string; sysbench_builtin: string; sysbench_command: string; enabled: number }[];
 
 	const pgbenchScripts = db.prepare(
 		'SELECT * FROM pgbench_scripts WHERE step_id IN (SELECT id FROM design_steps WHERE design_id = ? AND enabled = 1) ORDER BY step_id, position'
@@ -220,6 +222,8 @@ function exportPlan(db: Database.Database, designId: number) {
 		no_transaction: !!s.no_transaction,
 		duration_secs: s.duration_secs,
 		pgbench_options: s.pgbench_options,
+		sysbench_builtin: s.sysbench_builtin ?? '',
+		sysbench_command: s.sysbench_command ?? '',
 		pgbench_scripts: s.type === 'pgbench' ? (scriptsByStep.get(s.id) ?? []).map(ps => ({
 			id: ps.id, name: ps.name, weight: ps.weight, script: ps.script
 		})) : []

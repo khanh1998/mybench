@@ -87,7 +87,9 @@ export const PUT: RequestHandler = async ({ params: routeParams, request }) => {
          perf_repeat=excluded.perf_repeat, perf_freq=excluded.perf_freq,
          perf_call_graph=excluded.perf_call_graph, perf_mmap_pages=excluded.perf_mmap_pages`
 		);
-		const submittedStepIds = body.steps.map((s: { id: number }) => s.id);
+		const submittedStepIds = body.steps
+			.map((s: { id?: number }) => s.id)
+			.filter((stepId: unknown): stepId is number => typeof stepId === 'number');
 		const deleteRemovedSteps =
 			submittedStepIds.length > 0
 				? db.prepare(
@@ -98,9 +100,11 @@ export const PUT: RequestHandler = async ({ params: routeParams, request }) => {
 		const doUpsert = db.transaction(() => {
 			deleteRemovedSteps.run(designId, ...submittedStepIds);
 			for (const s of body.steps) {
-				upsert.run({
+				const result = upsert.run({
 					...s,
+					id: s.id ?? null,
 					design_id: designId,
+					script: s.script ?? '',
 					duration_secs: s.duration_secs ?? 0,
 					no_transaction: s.no_transaction ?? 0,
 					collect_perf: s.collect_perf ?? 0,
@@ -122,10 +126,11 @@ export const PUT: RequestHandler = async ({ params: routeParams, request }) => {
 					perf_call_graph: s.perf_call_graph ?? 'dwarf',
 					perf_mmap_pages: s.perf_mmap_pages ?? ''
 				});
-				deleteScripts.run(s.id);
+				const stepId = (s.id ?? result.lastInsertRowid) as number;
+				deleteScripts.run(stepId);
 				if (s.type === 'pgbench') {
 					for (const ps of s.pgbench_scripts ?? []) {
-						insertScript.run(s.id, ps.position, ps.name, ps.weight, ps.weight_expr ?? null, ps.script);
+						insertScript.run(stepId, ps.position, ps.name, ps.weight, ps.weight_expr ?? null, ps.script);
 					}
 				}
 			}

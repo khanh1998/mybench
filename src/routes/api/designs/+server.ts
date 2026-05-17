@@ -31,16 +31,17 @@ export const POST: RequestHandler = async ({ request }) => {
 
 	const designId = result.lastInsertRowid as number;
 
-	// Insert default steps
-	const insertStep = db.prepare(
-		'INSERT INTO design_steps (design_id, position, name, type, script, pgbench_options, enabled) VALUES (?, ?, ?, ?, ?, ?, ?)'
-	);
-	const doInsert = db.transaction(() => {
-		for (const s of DEFAULT_STEPS) {
-			insertStep.run(designId, s.position, s.name, s.type, s.script, s.pgbench_options, s.enabled);
-		}
-	});
-	doInsert();
+	if (!body.skip_default_steps) {
+		const insertStep = db.prepare(
+			'INSERT INTO design_steps (design_id, position, name, type, script, pgbench_options, enabled) VALUES (?, ?, ?, ?, ?, ?, ?)'
+		);
+		const doInsert = db.transaction(() => {
+			for (const s of DEFAULT_STEPS) {
+				insertStep.run(designId, s.position, s.name, s.type, s.script, s.pgbench_options, s.enabled);
+			}
+		});
+		doInsert();
+	}
 
 	const design = db.prepare('SELECT * FROM designs WHERE id = ?').get(designId);
 	return json(design, { status: 201 });

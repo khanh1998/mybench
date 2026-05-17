@@ -18,6 +18,40 @@
   let formError = $state('');
   let showForm = $state(false);
 
+  type QuickTool = 'pgbench' | 'sysbench';
+  type QuickParam = { position: number; name: string; value: string };
+  const PGBENCH_TESTS = [
+    { value: 'tpcb-like', label: 'TPC-B (tpcb-like)' },
+    { value: 'simple-update', label: 'Simple Update (simple-update)' },
+    { value: 'select-only', label: 'Select Only (select-only)' }
+  ];
+  const SYSBENCH_TESTS = [
+    { value: 'oltp_read_write', label: 'Read/Write (oltp_read_write)' },
+    { value: 'oltp_read_only', label: 'Read Only (oltp_read_only)' },
+    { value: 'oltp_write_only', label: 'Write Only (oltp_write_only)' },
+    { value: 'oltp_point_select', label: 'Point Select (oltp_point_select)' },
+    { value: 'oltp_update_index', label: 'Update Index (oltp_update_index)' },
+    { value: 'oltp_update_non_index', label: 'Update Non-Index (oltp_update_non_index)' }
+  ];
+  let showQuickModal = $state(false);
+  let quickCreating = $state(false);
+  let quickError = $state('');
+  let quickTool = $state<QuickTool>('pgbench');
+  let quickPgbenchTest = $state('tpcb-like');
+  let quickSysbenchTest = $state('oltp_read_write');
+  let quickScale = $state(10);
+  let quickClients = $state(10);
+  let quickPgThreads = $state(2);
+  let quickPgDuration = $state(60);
+  let quickTables = $state(10);
+  let quickTableSize = $state(100000);
+  let quickSysThreads = $state(4);
+  let quickSysDuration = $state(60);
+  let quickName = $state('');
+  let quickDesc = $state('');
+  let quickServerId = $state<number|null>(null);
+  let quickDatabase = $state('');
+
   // Tab state
   type DecisionTab = 'designs' | 'parameters';
   let activeTab = $state<DecisionTab>('designs');
@@ -244,6 +278,113 @@
     goto(`/designs/${d.id}`);
   }
 
+  function openQuickModal() {
+    quickTool = 'pgbench';
+    quickPgbenchTest = 'tpcb-like';
+    quickSysbenchTest = 'oltp_read_write';
+    quickScale = 10;
+    quickClients = 10;
+    quickPgThreads = 2;
+    quickPgDuration = 60;
+    quickTables = 10;
+    quickTableSize = 100000;
+    quickSysThreads = 4;
+    quickSysDuration = 60;
+    quickName = 'pgbench tpcb-like';
+    quickDesc = '';
+    quickServerId = null;
+    quickDatabase = '';
+    quickError = '';
+    showQuickModal = true;
+  }
+
+  function setQuickTool(tool: QuickTool) {
+    quickTool = tool;
+    quickName = tool === 'pgbench' ? `pgbench ${quickPgbenchTest}` : `sysbench ${quickSysbenchTest}`;
+  }
+
+  function setQuickPgbenchTest(test: string) {
+    quickPgbenchTest = test;
+    if (quickTool === 'pgbench') quickName = `pgbench ${test}`;
+  }
+
+  function setQuickSysbenchTest(test: string) {
+    quickSysbenchTest = test;
+    if (quickTool === 'sysbench') quickName = `sysbench ${test}`;
+  }
+
+  function quickParams(): QuickParam[] {
+    if (quickTool === 'pgbench') {
+      return [
+        { position: 0, name: 'SCALE', value: String(quickScale) },
+        { position: 1, name: 'CLIENTS', value: String(quickClients) },
+        { position: 2, name: 'THREADS', value: String(quickPgThreads) },
+        { position: 3, name: 'DURATION', value: String(quickPgDuration) }
+      ];
+    }
+    return [
+      { position: 0, name: 'TABLES', value: String(quickTables) },
+      { position: 1, name: 'TABLE_SIZE', value: String(quickTableSize) },
+      { position: 2, name: 'THREADS', value: String(quickSysThreads) },
+      { position: 3, name: 'DURATION', value: String(quickSysDuration) }
+    ];
+  }
+
+  function quickSteps() {
+    if (quickTool === 'pgbench') {
+      return [
+        { type: 'pgbench', name: 'Initialize', position: 0, pgbench_options: '-i -s {{SCALE}}', enabled: 1 },
+        { type: 'pgbench', name: 'Benchmark', position: 1, pgbench_options: `-c {{CLIENTS}} -j {{THREADS}} -T {{DURATION}} -b ${quickPgbenchTest}`, enabled: 1 }
+      ];
+    }
+    return [
+      { type: 'sysbench', name: 'Prepare', position: 0, pgbench_options: 'oltp_common prepare --tables={{TABLES}} --table-size={{TABLE_SIZE}}', enabled: 1 },
+      { type: 'sysbench', name: 'Benchmark', position: 1, pgbench_options: `${quickSysbenchTest} run --tables={{TABLES}} --table-size={{TABLE_SIZE}} --threads={{THREADS}} --time={{DURATION}}`, enabled: 1 },
+      { type: 'sysbench', name: 'Cleanup', position: 2, pgbench_options: 'oltp_common cleanup --tables={{TABLES}} --table-size={{TABLE_SIZE}}', enabled: 1 }
+    ];
+  }
+
+  async function createQuickBenchmark() {
+    if (!quickName.trim()) { quickError = 'Name is required'; return; }
+    quickCreating = true;
+    quickError = '';
+    try {
+      const createRes = await fetch('/api/designs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          decision_id: id,
+          name: quickName,
+          description: quickDesc,
+          server_id: quickServerId,
+          database: quickDatabase,
+          skip_default_steps: true
+        })
+      });
+      if (!createRes.ok) throw new Error('Could not create design');
+      const created = await createRes.json();
+      const updateRes = await fetch(`/api/designs/${created.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...created,
+          name: quickName,
+          description: quickDesc,
+          server_id: quickServerId,
+          database: quickDatabase,
+          steps: quickSteps(),
+          params: quickParams()
+        })
+      });
+      if (!updateRes.ok) throw new Error('Could not configure design');
+      showQuickModal = false;
+      goto(`/designs/${created.id}`);
+    } catch (err) {
+      quickError = err instanceof Error ? err.message : 'Could not create quick benchmark';
+      quickCreating = false;
+    }
+  }
+
   async function deleteDecision() {
     if (!confirm('Delete this decision and all its designs?')) return;
     await fetch(`/api/decisions/${id}`, { method: 'DELETE' });
@@ -280,8 +421,126 @@
   <div class="row" style="margin-bottom: 12px;">
     <h2>Designs</h2>
     <span class="spacer"></span>
+    <button onclick={openQuickModal}>⚡ Quick Benchmark</button>
     <button class="primary" onclick={() => showForm = !showForm}>+ New Design</button>
   </div>
+
+  {#if showQuickModal}
+    <div
+      class="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="quick-modal-title"
+      tabindex="-1"
+      onclick={(e) => { if (e.currentTarget === e.target) showQuickModal = false; }}
+      onkeydown={(e) => { if (e.key === 'Escape') showQuickModal = false; }}
+    >
+      <div class="modal quick-modal">
+        <h3 id="quick-modal-title" style="margin:0 0 16px">Quick Benchmark</h3>
+
+        <fieldset class="modal-fieldset">
+          <legend>Tool</legend>
+          <div class="quick-choice-row">
+            <label class={quickTool === 'pgbench' ? 'quick-choice-active' : ''}>
+              <input type="radio" name="quick-tool" checked={quickTool === 'pgbench'} onchange={() => setQuickTool('pgbench')} />
+              pgbench
+            </label>
+            <label class={quickTool === 'sysbench' ? 'quick-choice-active' : ''}>
+              <input type="radio" name="quick-tool" checked={quickTool === 'sysbench'} onchange={() => setQuickTool('sysbench')} />
+              sysbench
+            </label>
+          </div>
+        </fieldset>
+
+        <div class="form-group">
+          <label for="quick-test">Test</label>
+          {#if quickTool === 'pgbench'}
+            <select id="quick-test" value={quickPgbenchTest} onchange={(e) => setQuickPgbenchTest((e.currentTarget as HTMLSelectElement).value)}>
+              {#each PGBENCH_TESTS as test}
+                <option value={test.value}>{test.label}</option>
+              {/each}
+            </select>
+          {:else}
+            <select id="quick-test" value={quickSysbenchTest} onchange={(e) => setQuickSysbenchTest((e.currentTarget as HTMLSelectElement).value)}>
+              {#each SYSBENCH_TESTS as test}
+                <option value={test.value}>{test.label}</option>
+              {/each}
+            </select>
+          {/if}
+        </div>
+
+        <div class="quick-grid">
+          {#if quickTool === 'pgbench'}
+            <div class="form-group">
+              <label for="quick-scale">Scale Factor</label>
+              <input id="quick-scale" type="number" bind:value={quickScale} min="1" />
+            </div>
+            <div class="form-group">
+              <label for="quick-clients">Clients</label>
+              <input id="quick-clients" type="number" bind:value={quickClients} min="1" />
+            </div>
+            <div class="form-group">
+              <label for="quick-pg-threads">Threads</label>
+              <input id="quick-pg-threads" type="number" bind:value={quickPgThreads} min="1" />
+            </div>
+            <div class="form-group">
+              <label for="quick-pg-duration">Duration seconds</label>
+              <input id="quick-pg-duration" type="number" bind:value={quickPgDuration} min="1" />
+            </div>
+          {:else}
+            <div class="form-group">
+              <label for="quick-tables">Tables</label>
+              <input id="quick-tables" type="number" bind:value={quickTables} min="1" />
+            </div>
+            <div class="form-group">
+              <label for="quick-table-size">Table size</label>
+              <input id="quick-table-size" type="number" bind:value={quickTableSize} min="1" />
+            </div>
+            <div class="form-group">
+              <label for="quick-sys-threads">Threads</label>
+              <input id="quick-sys-threads" type="number" bind:value={quickSysThreads} min="1" />
+            </div>
+            <div class="form-group">
+              <label for="quick-sys-duration">Duration seconds</label>
+              <input id="quick-sys-duration" type="number" bind:value={quickSysDuration} min="1" />
+            </div>
+          {/if}
+        </div>
+
+        <div class="form-group">
+          <label for="quick-name">Name</label>
+          <input id="quick-name" bind:value={quickName} />
+        </div>
+        <div class="form-group">
+          <label for="quick-desc">Description</label>
+          <textarea id="quick-desc" bind:value={quickDesc} rows="2"></textarea>
+        </div>
+        <div class="quick-grid">
+          <div class="form-group">
+            <label for="quick-server">PostgreSQL Server</label>
+            <select id="quick-server" bind:value={quickServerId}>
+              <option value={null}>-- select server --</option>
+              {#each servers as s}
+                <option value={s.id}>{s.name}</option>
+              {/each}
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="quick-db">Database</label>
+            <input id="quick-db" bind:value={quickDatabase} placeholder="my_benchmark_db" />
+          </div>
+        </div>
+
+        {#if quickError}<p class="error">{quickError}</p>{/if}
+        <div class="modal-actions">
+          <button onclick={() => showQuickModal = false}>Cancel</button>
+          <button class="primary" onclick={createQuickBenchmark} disabled={quickCreating || !quickName.trim()}>
+            {quickCreating ? 'Creating...' : 'Create Benchmark'}
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
 
   {#if showForm}
     <div class="card">
@@ -643,6 +902,31 @@
   .modal-fieldset { border: 0; padding: 0; margin: 0 0 14px; min-width: 0; }
   .modal-fieldset legend { font-size: 12px; font-weight: 600; color: #555; margin-bottom: 4px; padding: 0; }
   .disabled { opacity: 0.5; }
+  .quick-modal { width: 620px; }
+  .quick-choice-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .quick-choice-row label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    padding: 10px 12px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .quick-choice-row label.quick-choice-active {
+    border-color: #0066cc;
+    background: #eef6ff;
+    color: #0055aa;
+  }
+  .quick-choice-row input { width: auto; }
+  .quick-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
+  .modal textarea { width: 100%; box-sizing: border-box; }
 
   .suite-designs-list { display: flex; flex-direction: column; gap: 8px; }
   .suite-design-block { border: 1px solid #e0e0e0; border-radius: 6px; overflow: hidden; }

@@ -168,26 +168,7 @@ func runSysbenchStep(
 	server := opts.Plan.Server
 	var res sysbenchResult
 
-	// Write Lua script to a temp file.
-	luaFile := fmt.Sprintf("%s/mybench-%s-%d.lua", opts.LogDir, opts.Timestamp, step.ID)
-	script := plan.SubstituteParams(step.Script, opts.Plan.Params)
-	if err := os.WriteFile(luaFile, []byte(script), 0644); err != nil {
-		return sysbenchResult{}, fmt.Errorf("writing sysbench script: %w", err)
-	}
-	res.ProcessedScript = script
-
-	// Build sysbench args.
-	userOptions := strings.Fields(plan.SubstituteParams(step.PgbenchOptions, opts.Plan.Params))
-
-	hasReportInterval := false
-	for _, o := range userOptions {
-		if strings.HasPrefix(o, "--report-interval") {
-			hasReportInterval = true
-			break
-		}
-	}
-
-	args := []string{
+	connArgs := []string{
 		"--db-driver=pgsql",
 		fmt.Sprintf("--pgsql-host=%s", server.Host),
 		fmt.Sprintf("--pgsql-port=%d", server.Port),
@@ -195,11 +176,60 @@ func runSysbenchStep(
 		fmt.Sprintf("--pgsql-password=%s", server.Password),
 		fmt.Sprintf("--pgsql-db=%s", server.Database),
 	}
-	args = append(args, userOptions...)
-	if !hasReportInterval {
-		args = append(args, "--report-interval=5")
+
+	substitutedOptions := plan.SubstituteParams(step.PgbenchOptions, opts.Plan.Params)
+	var args []string
+	var command string
+
+	if strings.TrimSpace(step.Script) == "" {
+		// Built-in mode: pgbench_options = "testname command [flags]"
+		tokens := strings.Fields(substitutedOptions)
+		if len(tokens) < 2 {
+			return sysbenchResult{}, fmt.Errorf("sysbench step requires 'testname command [flags]' in options field (e.g. 'oltp_read_write run --tables=10')")
+		}
+		testName := tokens[0]
+		command = tokens[1]
+		testOpts := tokens[2:]
+
+		args = append(connArgs, testName)
+		args = append(args, testOpts...)
+		if command == "run" {
+			hasReportInterval := false
+			for _, o := range testOpts {
+				if strings.HasPrefix(o, "--report-interval") {
+					hasReportInterval = true
+					break
+				}
+			}
+			if !hasReportInterval {
+				args = append(args, "--report-interval=5")
+			}
+		}
+		args = append(args, command)
+	} else {
+		// Custom Lua script mode.
+		luaFile := fmt.Sprintf("%s/mybench-%s-%d.lua", opts.LogDir, opts.Timestamp, step.ID)
+		script := plan.SubstituteParams(step.Script, opts.Plan.Params)
+		if err := os.WriteFile(luaFile, []byte(script), 0644); err != nil {
+			return sysbenchResult{}, fmt.Errorf("writing sysbench script: %w", err)
+		}
+		res.ProcessedScript = script
+
+		userOptions := strings.Fields(substitutedOptions)
+		command = "run"
+		args = append(connArgs, userOptions...)
+		hasReportInterval := false
+		for _, o := range userOptions {
+			if strings.HasPrefix(o, "--report-interval") {
+				hasReportInterval = true
+				break
+			}
+		}
+		if !hasReportInterval {
+			args = append(args, "--report-interval=5")
+		}
+		args = append(args, luaFile, command)
 	}
-	args = append(args, luaFile, "run")
 
 	res.Command = "sysbench " + strings.Join(args, " ")
 
