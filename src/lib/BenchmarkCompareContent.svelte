@@ -933,6 +933,7 @@
                   <option value={option.key}>{option.label}</option>
                 {/each}
               </select>
+              <span class="perf-metric-hint">or click a row below</span>
             </label>
             <div class="perf-chart-shell">
               <svg class="perf-compare-chart" viewBox="0 0 760 280" role="img" aria-label="Perf metric comparison chart">
@@ -999,7 +1000,15 @@
                       {@const validValues = row.values.filter((v): v is number => v !== null)}
                       {@const bestValue = perfViewMode !== 'per_tx' || row.lowerIsBetter === null || validValues.length < 2 ? null :
                         row.lowerIsBetter ? Math.min(...validValues) : Math.max(...validValues)}
-                      <tr class:perf-cmp-computed={row.isComputed}>
+                      {@const rowMetricKey = row.isComputed ? `derived:${row.eventName}` : `${perfViewMode}:${row.eventName}`}
+                      <tr
+                        class:perf-cmp-computed={row.isComputed}
+                        class:perf-event-row--selected={selectedPerfMetric === rowMetricKey}
+                        class="perf-event-row"
+                        tabindex="0"
+                        onclick={() => { selectedPerfMetric = rowMetricKey; document.querySelector('.perf-chart-section')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }}
+                        onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { selectedPerfMetric = rowMetricKey; document.querySelector('.perf-chart-section')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } }}
+                      >
                         <td class="col-event">
                           <code class="cmp-event-name" class:cmp-event-computed={row.isComputed}>{row.eventName}</code>
                           {#if row.isComputed}<span class="cmp-computed-badge">computed</span>{/if}
@@ -1410,6 +1419,9 @@
   .perf-all-events-table thead tr { background: #f5f7fa; }
   .perf-all-events-table th { padding: 7px 10px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: #888; }
   .perf-all-events-table td { padding: 6px 10px; border-top: 1px solid #f0f0f0; color: #333; }
+  .perf-all-events-table tbody tr.perf-event-row { cursor: pointer; }
+  .perf-all-events-table tbody tr.perf-event-row:hover { background: #f0f4ff; }
+  .perf-all-events-table tbody tr.perf-event-row--selected { background: #e6edff !important; outline: 2px solid #6c8cff; outline-offset: -2px; }
   .perf-all-events-table tbody tr:hover { background: #f8f9fc; }
   .perf-all-events-table .col-event { text-align: left; }
   .perf-all-events-table .col-num { text-align: right; }
@@ -1432,6 +1444,8 @@
     font-weight: 600;
     color: #666;
   }
+
+  .perf-metric-hint { font-size: 11px; color: #aaa; margin-left: 2px; }
 
   .perf-metric-picker select {
     min-width: 240px;
