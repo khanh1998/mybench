@@ -143,7 +143,7 @@ func collectPendingPerf(p *pendingPerfCollect) {
 }
 
 func buildPerfStatCmd(step plan.Step, opts RunOpts, durationSecs int, perfRes *result.PerfResult) (string, error) {
-	events := strings.TrimSpace(step.PerfEvents)
+	events := strings.TrimSpace(plan.SubstituteParams(step.PerfEvents, opts.Plan.Params))
 	if events == "" {
 		events = opts.Plan.Server.PerfEvents
 	}

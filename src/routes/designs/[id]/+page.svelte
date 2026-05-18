@@ -1356,9 +1356,15 @@
                   <textarea
                     bind:value={selectedStep.perf_events}
                     rows="3"
-                    placeholder="task-clock,context-switches,page-faults,minor-faults,major-faults"
+                    placeholder={'task-clock,context-switches,page-faults or {{EVENTS}}'}
                     spellcheck="false"
                   ></textarea>
+                  {#if resolveParamPreview(selectedStep.perf_events)}
+                    {@const preview = resolveParamPreview(selectedStep.perf_events)!}
+                    <span class="param-preview" class:param-preview-error={preview.unresolved.length > 0}>
+                      {preview.unresolved.length > 0 ? `unresolved: ${preview.unresolved.join(', ')}` : `→ ${preview.text}`}
+                    </span>
+                  {/if}
                 </label>
                 <div class="perf-grid">
                   <label>
