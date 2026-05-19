@@ -645,7 +645,7 @@
         </div>
 
         <div class="form-group">
-          <label>Profiles <span style="color:#aaa; font-weight:400; font-size:11px">(run order — applied to all designs)</span></label>
+          <div class="group-label">Profiles <span style="color:#aaa; font-weight:400; font-size:11px">(run order — applied to all designs)</span></div>
           {#if suiteLoadingProfiles}
             <p style="color:#999; font-size:12px">Loading…</p>
           {:else if suiteAvailableDecisionProfiles.length === 0}
@@ -684,7 +684,7 @@
         </div>
 
         <div class="form-group">
-          <label>Designs</label>
+          <div class="group-label">Designs</div>
           {#if suiteLoadingProfiles}
             <p style="color:#999; font-size:12px">Loading…</p>
           {:else}
@@ -835,7 +835,7 @@
         </div>
         {#if decisionProfileFormValues.length > 0}
           <div class="form-group">
-            <label>Parameter overrides</label>
+            <div class="group-label">Parameter overrides</div>
             {#each decisionProfileFormValues as fv}
               <div class="param-row" style="margin-bottom:6px">
                 <span class="param-name-label">{fv.param_name}</span>
@@ -870,7 +870,6 @@
   .tab-badge { background: #0066cc; color: #fff; border-radius: 10px; padding: 1px 6px; font-size: 10px; font-weight: 700; margin-left: 4px; }
 
   .params-tab { max-width: 640px; }
-  .params-section { }
   .params-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
   .param-row { display: flex; align-items: center; gap: 8px; }
   .param-name-input { width: 180px; font-family: monospace; font-size: 13px; }
@@ -897,6 +896,7 @@
   }
   .modal .form-group { margin-bottom: 14px; }
   .modal .form-group label { display: block; font-size: 12px; font-weight: 600; color: #555; margin-bottom: 4px; }
+  .modal .form-group .group-label { display: block; font-size: 12px; font-weight: 600; color: #555; margin-bottom: 4px; }
   .modal .form-group input, .modal .form-group select { width: 100%; box-sizing: border-box; }
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
   .modal-fieldset { border: 0; padding: 0; margin: 0 0 14px; min-width: 0; }
@@ -933,7 +933,6 @@
   .suite-design-block.suite-design-disabled { opacity: 0.6; }
   .suite-design-header { padding: 8px 10px; background: #f8f8f8; border-bottom: 1px solid #e0e0e0; display: flex; align-items: center; }
   .suite-design-block.suite-design-disabled .suite-design-header { border-bottom: none; }
-  .suite-profiles-list { }
 
   .series-profile-row { display: flex; align-items: center; gap: 8px; padding: 5px 10px; border-bottom: 1px solid #f0f0f0; background: #fafafa; }
   .series-profile-row:last-child { border-bottom: none; }

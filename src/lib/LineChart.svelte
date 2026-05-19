@@ -265,8 +265,8 @@
     const lines = [fmtTimestamp(hoveredTime), ...tooltipRows.map(r => `${r.label}: ${fmtVal(r.v)}`)];
     navigator.clipboard.writeText(lines.join('\n'));
     const wRect = wrapperEl!.getBoundingClientRect();
-    copyFlashX = e.clientX - wRect.left;
-    copyFlashY = e.clientY - wRect.top - 28;
+    copyFlashX = e.detail === 0 ? wRect.width / 2 : e.clientX - wRect.left;
+    copyFlashY = e.detail === 0 ? H / 2 : e.clientY - wRect.top - 28;
     copyFlash = true;
     if (copyFlashTimer) clearTimeout(copyFlashTimer);
     copyFlashTimer = setTimeout(() => { copyFlash = false; }, 1200);
@@ -310,72 +310,79 @@
   {:else if allPts.length === 0}
     <div class="no-data">No data</div>
   {:else}
-    <svg bind:this={svgEl} role="img" aria-label={title} width="100%" viewBox="0 0 {W} {H}" preserveAspectRatio="none"
-         style="display:block;cursor:{hoveredTime !== null ? 'copy' : 'crosshair'}"
-         onmousemove={onMouseMove} onmouseleave={() => { setHoveredTime(null); hoveredSeries = null; }}
-         onclick={onChartClick}>
-      <g transform="translate({ML},{MT})">
-        <!-- Grid + Y axis -->
-        {#each [0, 0.25, 0.5, 0.75, 1] as f}
-          {@const yp = IH - f * IH}
-          {@const val = vMin + f * vRange}
-          <line x1="0" y1={yp} x2={IW} y2={yp} stroke="#eee" stroke-width="1" />
-          <text x="-6" y={yp} text-anchor="end" dominant-baseline="middle" font-size="10" fill="#999">{fmtVal(val)}</text>
-        {/each}
-        <line x1="0" y1="0" x2="0" y2={IH} stroke="#ddd" />
-        <line x1="0" y1={IH} x2={IW} y2={IH} stroke="#ddd" />
-        <!-- X axis labels -->
-        {#each [0, 0.25, 0.5, 0.75, 1] as f}
-          {@const xp = f * IW}
-          {@const relMs = f * tRange}
-          <text x={xp} y={IH + 14} text-anchor="middle" font-size="10" fill="#999">{fmtRelTime(relMs)}</text>
-        {/each}
-        <!-- Markers -->
-        {#each markers as m}
-          {@const xp = tx(m.t)}
-          <line x1={xp} y1="0" x2={xp} y2={IH} stroke={m.color ?? '#aaa'} stroke-width="1" stroke-dasharray="4,3" />
-          <text x={xp + 3} y="8" font-size="9" fill={m.color ?? '#999'}>{m.label}</text>
-        {/each}
-        <!-- Series (highlighted last = on top) -->
-        {#each orderedSeries as s}
-          {@const isHighlighted = hoveredSeries === s.label}
-          {@const isDimmed = hoveredSeries !== null && !isHighlighted}
-          {#if s.points.length > 1}
-            <polyline
-              points={pts(s.points)}
-              fill="none"
-              stroke={s.color}
-              stroke-width={isHighlighted ? 2.5 : 1.5}
-              stroke-linejoin="round"
-              stroke-linecap="round"
-              opacity={isDimmed ? 0.2 : 1}
-            />
-          {/if}
-          <!-- Dots: all points when no hover, only hovered time when hovering -->
-          {#if hoveredTime === null}
-            {#each s.points as p}
-              <circle cx={tx(p.t)} cy={ty(p.v)} r="2.5" fill={s.color} />
-            {/each}
-          {:else}
-            {@const pt = nearestPoint(s.points, hoveredTime)}
-            {#if pt}
-              <circle cx={tx(pt.t)} cy={ty(pt.v)}
-                      r={isHighlighted ? 4.5 : 3}
-                      fill={s.color}
-                      stroke={isHighlighted ? '#fff' : 'none'}
-                      stroke-width="1.5"
-                      opacity={isDimmed ? 0.2 : 1}
-                      pointer-events="none" />
+    <button
+      type="button"
+      class="chart-surface"
+      aria-label={`${title}. Copy hovered chart values.`}
+      style="cursor:{hoveredTime !== null ? 'copy' : 'crosshair'}"
+      onmousemove={onMouseMove}
+      onmouseleave={() => { setHoveredTime(null); hoveredSeries = null; }}
+      onclick={onChartClick}
+    >
+      <svg bind:this={svgEl} aria-hidden="true" width="100%" viewBox="0 0 {W} {H}" preserveAspectRatio="none">
+        <g transform="translate({ML},{MT})">
+          <!-- Grid + Y axis -->
+          {#each [0, 0.25, 0.5, 0.75, 1] as f}
+            {@const yp = IH - f * IH}
+            {@const val = vMin + f * vRange}
+            <line x1="0" y1={yp} x2={IW} y2={yp} stroke="#eee" stroke-width="1" />
+            <text x="-6" y={yp} text-anchor="end" dominant-baseline="middle" font-size="10" fill="#999">{fmtVal(val)}</text>
+          {/each}
+          <line x1="0" y1="0" x2="0" y2={IH} stroke="#ddd" />
+          <line x1="0" y1={IH} x2={IW} y2={IH} stroke="#ddd" />
+          <!-- X axis labels -->
+          {#each [0, 0.25, 0.5, 0.75, 1] as f}
+            {@const xp = f * IW}
+            {@const relMs = f * tRange}
+            <text x={xp} y={IH + 14} text-anchor="middle" font-size="10" fill="#999">{fmtRelTime(relMs)}</text>
+          {/each}
+          <!-- Markers -->
+          {#each markers as m}
+            {@const xp = tx(m.t)}
+            <line x1={xp} y1="0" x2={xp} y2={IH} stroke={m.color ?? '#aaa'} stroke-width="1" stroke-dasharray="4,3" />
+            <text x={xp + 3} y="8" font-size="9" fill={m.color ?? '#999'}>{m.label}</text>
+          {/each}
+          <!-- Series (highlighted last = on top) -->
+          {#each orderedSeries as s}
+            {@const isHighlighted = hoveredSeries === s.label}
+            {@const isDimmed = hoveredSeries !== null && !isHighlighted}
+            {#if s.points.length > 1}
+              <polyline
+                points={pts(s.points)}
+                fill="none"
+                stroke={s.color}
+                stroke-width={isHighlighted ? 2.5 : 1.5}
+                stroke-linejoin="round"
+                stroke-linecap="round"
+                opacity={isDimmed ? 0.2 : 1}
+              />
             {/if}
+            <!-- Dots: all points when no hover, only hovered time when hovering -->
+            {#if hoveredTime === null}
+              {#each s.points as p}
+                <circle cx={tx(p.t)} cy={ty(p.v)} r="2.5" fill={s.color} />
+              {/each}
+            {:else}
+              {@const pt = nearestPoint(s.points, hoveredTime)}
+              {#if pt}
+                <circle cx={tx(pt.t)} cy={ty(pt.v)}
+                        r={isHighlighted ? 4.5 : 3}
+                        fill={s.color}
+                        stroke={isHighlighted ? '#fff' : 'none'}
+                        stroke-width="1.5"
+                        opacity={isDimmed ? 0.2 : 1}
+                        pointer-events="none" />
+              {/if}
+            {/if}
+          {/each}
+          <!-- Crosshair -->
+          {#if crosshairX !== null}
+            <line x1={crosshairX} y1="0" x2={crosshairX} y2={IH}
+                  stroke="#555" stroke-width="1" stroke-dasharray="3,2" pointer-events="none" />
           {/if}
-        {/each}
-        <!-- Crosshair -->
-        {#if crosshairX !== null}
-          <line x1={crosshairX} y1="0" x2={crosshairX} y2={IH}
-                stroke="#555" stroke-width="1" stroke-dasharray="3,2" pointer-events="none" />
-        {/if}
-      </g>
-    </svg>
+        </g>
+      </svg>
+    </button>
 
     <!-- Copy flash -->
     {#if copyFlash}
@@ -437,6 +444,22 @@
   .leg-item.hidden { opacity: 0.45; }
   .leg-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .no-data { font-size: 12px; color: #aaa; padding: 20px 0; text-align: center; }
+  .chart-surface {
+    display: block;
+    width: 100%;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    line-height: 0;
+    text-align: initial;
+  }
+  .chart-surface:focus-visible {
+    outline: 2px solid #0066cc;
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+  .chart-surface svg { display: block; }
 
   .tooltip {
     position: absolute; z-index: 20; pointer-events: none;

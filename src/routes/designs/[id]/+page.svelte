@@ -971,7 +971,7 @@
       </div>
 
       <div class="form-group">
-        <label>Run order <span style="color:#aaa;font-weight:400">(drag or use arrows)</span></label>
+        <div class="group-label">Run order <span style="color:#aaa;font-weight:400">(drag or use arrows)</span></div>
         <div class="series-profiles-list">
           {#each seriesProfiles as pid, i}
             {@const prof = allSeriesAvailableProfiles.find(p => p.id === pid)}
@@ -1732,10 +1732,9 @@
   }
   .modal .form-group { margin-bottom: 14px; }
   .modal .form-group label { display: block; font-size: 12px; font-weight: 600; color: #555; margin-bottom: 4px; }
+  .modal .form-group .group-label { display: block; font-size: 12px; font-weight: 600; color: #555; margin-bottom: 4px; }
   .modal .form-group input, .modal .form-group select { width: 100%; box-sizing: border-box; }
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
-  .modal-fieldset { border: 0; padding: 0; margin: 0 0 14px; min-width: 0; }
-  .modal-fieldset legend { font-size: 12px; font-weight: 600; color: #555; margin-bottom: 4px; padding: 0; }
   .modal-wide { width: 540px !important; }
 
   .series-profiles-list { border: 1px solid #e0e0e0; border-radius: 4px; overflow: hidden; }

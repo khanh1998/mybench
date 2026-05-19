@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import type { PageData } from './$types';
 
   let { data }: { data: PageData } = $props();
@@ -10,9 +10,9 @@
   type Series = { id: number; name: string; status: string; created_at: string; finished_at: string | null;
     design_id: number; delay_seconds: number; design_name: string; };
 
-  let suite = $state(data.suite);
-  let seriesList = $state<Series[]>(data.seriesList as Series[]);
-  let runs = $state<Run[]>(data.runs as Run[]);
+  let suite = $state(untrack(() => data.suite));
+  let seriesList = $state<Series[]>(untrack(() => data.seriesList as Series[]));
+  let runs = $state<Run[]>(untrack(() => data.runs as Run[]));
 
   let logLines = $state<string[]>([]);
   let completedDesignIds = $state<Set<number>>(new Set());

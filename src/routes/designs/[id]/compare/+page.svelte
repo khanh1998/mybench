@@ -208,20 +208,6 @@
     font-size: 13px;
   }
 
-  .run-chip-profile {
-    font-size: 11px;
-    background: #e8f0ff;
-    color: #0055aa;
-    padding: 1px 6px;
-    border-radius: 8px;
-  }
-
-  .run-chip-tps {
-    font-size: 11px;
-    color: #00996b;
-    font-weight: 600;
-  }
-
   .run-chip-date {
     font-size: 11px;
     color: #999;
