@@ -11,6 +11,7 @@ export const load: PageServerLoad = () => {
 			ds.decision_id, dec.name AS decision_name,
 			COUNT(DISTINCT bs.id) AS series_count,
 			COUNT(br.id) AS run_count,
+			GROUP_CONCAT(DISTINCT d.id) AS design_ids,
 			GROUP_CONCAT(DISTINCT d.name) AS design_names
 		FROM decision_suites ds
 		JOIN decisions dec ON ds.decision_id = dec.id
@@ -23,7 +24,7 @@ export const load: PageServerLoad = () => {
 	`).all() as {
 		id: number; name: string; status: string; created_at: string; finished_at: string | null;
 		decision_id: number; decision_name: string; series_count: number; run_count: number;
-		design_names: string | null;
+		design_ids: string | null; design_names: string | null;
 	}[];
 
 	// Series that are NOT part of a suite
@@ -98,5 +99,11 @@ export const load: PageServerLoad = () => {
 	const decisions = [...decisionsMap.entries()].map(([id, name]) => ({ id, name }))
 		.sort((a, b) => a.name.localeCompare(b.name));
 
-	return { suiteList, seriesWithRuns, standaloneRuns, decisions };
+	const designs = db.prepare(`
+		SELECT id, decision_id, name
+		FROM designs
+		ORDER BY name ASC
+	`).all() as { id: number; decision_id: number; name: string }[];
+
+	return { suiteList, seriesWithRuns, standaloneRuns, decisions, designs };
 };

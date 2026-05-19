@@ -17,23 +17,41 @@
   type SuiteItem = {
     id: number; name: string; status: string; created_at: string; finished_at: string | null;
     decision_id: number; decision_name: string; series_count: number; run_count: number;
-    design_names: string | null;
+    design_ids: string | null; design_names: string | null;
   };
   type RunItem = {
     id: number; status: string; started_at: string; finished_at: string | null;
     tps: number | null; latency_avg_ms: number | null; profile_name: string; name: string;
     design_id: number; design_name: string; decision_id: number; decision_name: string;
   };
+  type DecisionDesign = { id: number; decision_id: number; name: string };
 
   // Filters — initialised from URL so they survive navigation / bookmarks
   let filterKind = $state(page.url.searchParams.get('kind') ?? 'all');
   let filterDecisionId = $state(page.url.searchParams.get('decision') ?? 'all');
+  let filterDesignId = $state(page.url.searchParams.get('design') ?? 'all');
   let filterStatus = $state(page.url.searchParams.get('status') ?? 'all');
+
+  const decisionDesigns = $derived(() => {
+    if (filterDecisionId === 'all') return [];
+    return (data.designs as DecisionDesign[]).filter((d) => String(d.decision_id) === filterDecisionId);
+  });
+
+  $effect(() => {
+    if (filterDecisionId === 'all') {
+      filterDesignId = 'all';
+      return;
+    }
+    if (filterDesignId !== 'all' && !decisionDesigns().some((d) => String(d.id) === filterDesignId)) {
+      filterDesignId = 'all';
+    }
+  });
 
   $effect(() => {
     const params = new URLSearchParams();
     if (filterKind !== 'all') params.set('kind', filterKind);
     if (filterDecisionId !== 'all') params.set('decision', filterDecisionId);
+    if (filterDecisionId !== 'all' && filterDesignId !== 'all') params.set('design', filterDesignId);
     if (filterStatus !== 'all') params.set('status', filterStatus);
     const search = params.toString();
     history.replaceState(history.state, '', search ? `?${search}` : location.pathname);
@@ -49,6 +67,7 @@
     if (filterKind === 'all' || filterKind === 'suite') {
       for (const s of (data.suiteList as SuiteItem[])) {
         if (filterDecisionId !== 'all' && String(s.decision_id) !== filterDecisionId) continue;
+        if (filterDesignId !== 'all' && !suiteHasDesign(s, filterDesignId)) continue;
         if (filterStatus !== 'all' && s.status !== filterStatus) continue;
         entries.push({ kind: 'suite', sortKey: s.created_at, item: s });
       }
@@ -56,6 +75,7 @@
     if (filterKind === 'all' || filterKind === 'series') {
       for (const s of data.seriesWithRuns) {
         if (filterDecisionId !== 'all' && String(s.decision_id) !== filterDecisionId) continue;
+        if (filterDesignId !== 'all' && String(s.design_id) !== filterDesignId) continue;
         if (filterStatus !== 'all' && s.status !== filterStatus) continue;
         entries.push({ kind: 'series', sortKey: s.created_at, item: s });
       }
@@ -63,6 +83,7 @@
     if (filterKind === 'all' || filterKind === 'run') {
       for (const r of data.standaloneRuns) {
         if (filterDecisionId !== 'all' && String(r.decision_id) !== filterDecisionId) continue;
+        if (filterDesignId !== 'all' && String(r.design_id) !== filterDesignId) continue;
         if (filterStatus !== 'all' && r.status !== filterStatus) continue;
         entries.push({ kind: 'run', sortKey: r.started_at, item: r });
       }
@@ -202,6 +223,21 @@
     if (!names) return [];
     return [...new Set(names.split(',').map(n => n.trim()))].sort();
   }
+
+  function suiteHasDesign(suite: SuiteItem, designId: string): boolean {
+    return (suite.design_ids ?? '').split(',').some((id) => id.trim() === designId);
+  }
+
+  function clearFilters() {
+    filterKind = 'all';
+    filterDecisionId = 'all';
+    filterDesignId = 'all';
+    filterStatus = 'all';
+  }
+
+  function hasActiveFilters() {
+    return filterKind !== 'all' || filterDecisionId !== 'all' || filterDesignId !== 'all' || filterStatus !== 'all';
+  }
 </script>
 
 <div class="page">
@@ -220,6 +256,14 @@
           <option value={String(d.id)}>{d.name}</option>
         {/each}
       </select>
+      {#if filterDecisionId !== 'all'}
+        <select bind:value={filterDesignId}>
+          <option value="all">All designs</option>
+          {#each decisionDesigns() as d}
+            <option value={String(d.id)}>{d.name}</option>
+          {/each}
+        </select>
+      {/if}
       <select bind:value={filterStatus}>
         <option value="all">All statuses</option>
         <option value="running">Running</option>
@@ -267,9 +311,9 @@
 
   {#if timeline().length === 0}
     <div class="empty">
-      <p>No runs yet{filterKind !== 'all' || filterDecisionId !== 'all' || filterStatus !== 'all' ? ' matching these filters' : ''}.</p>
-      {#if filterKind !== 'all' || filterDecisionId !== 'all' || filterStatus !== 'all'}
-        <button class="clear-filters" onclick={() => { filterKind = 'all'; filterDecisionId = 'all'; filterStatus = 'all'; }}>
+      <p>No runs yet{hasActiveFilters() ? ' matching these filters' : ''}.</p>
+      {#if hasActiveFilters()}
+        <button class="clear-filters" onclick={clearFilters}>
           Clear filters
         </button>
       {/if}
