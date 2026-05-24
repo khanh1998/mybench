@@ -22,6 +22,8 @@ export interface PgServer {
 	ssh_private_key: string | null;
 	private_host: string; // optional private/VPC IP for runner→PG communication
 	vpc: string;          // VPC name tag; matched against Ec2Server.vpc to auto-enable private_host
+	spec?: string;        // free-text instance hardware description
+	pg_config?: string;   // optional freeform PostgreSQL config notes
 	perf_enabled: number; // 0 or 1
 	perf_scope: 'postgres_cgroup' | 'system' | 'disabled';
 	perf_cgroup: string;
@@ -151,6 +153,9 @@ export interface BenchmarkRun {
 	ec2_server_id: number | null;
 	ec2_run_token: string | null;
 	series_id: number | null;
+	runner_spec: string;
+	db_spec: string;
+	db_pg_config: string;
 }
 
 export interface BenchmarkSeries {
@@ -250,6 +255,7 @@ export interface Ec2Server {
 	log_dir: string;       // pgbench log directory on EC2
 	cli_log_dir: string;   // directory on VPS for persistent Go CLI stderr logs
 	vpc: string;           // VPC name tag; matched against PgServer.vpc to auto-enable private_host
+	spec?: string;         // free-text instance hardware description
 }
 
 export interface SavedQuery {

@@ -30,6 +30,9 @@ export interface CompareRunInfo {
   post_started_at: string | null;
   finished_at: string | null;
   host_config?: string | null;
+  runner_spec?: string | null;
+  db_spec?: string | null;
+  db_pg_config?: string | null;
   design_id?: number;
   design_name?: string | null;
   compare_label?: string;

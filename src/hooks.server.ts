@@ -11,7 +11,7 @@ recoverStaleRuns();
 recoverEc2Runs();
 recoverStaleLocalSuites();
 
-const PUBLIC_PATHS = ['/login', '/favicon.ico'];
+const PUBLIC_PATHS = ['/login', '/favicon.ico', '/.well-known/', '/mcp/.well-known/'];
 
 export const handle = async ({ event, resolve }: { event: import('@sveltejs/kit').RequestEvent; resolve: (event: import('@sveltejs/kit').RequestEvent) => Promise<Response> }) => {
 	const secret = env.AUTH_SECRET;

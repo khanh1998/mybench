@@ -4,7 +4,7 @@
   interface Server {
     id: number; name: string; host: string; port: number; username: string; password: string; ssl: number;
     ssh_enabled: number; ssh_host: string | null; ssh_port: number; ssh_user: string | null; ssh_private_key: string | null;
-    private_host: string; vpc: string;
+    private_host: string; vpc: string; spec: string; pg_config: string;
   }
   interface TableSel { table_name: string; enabled: number; }
 
@@ -25,7 +25,7 @@
   // ── EC2 Servers ──────────────────────────────────────────────────────────────
   interface Ec2Server {
     id: number; name: string; host: string; user: string; port: number;
-    private_key: string; remote_dir: string; log_dir: string; cli_log_dir: string; vpc: string;
+    private_key: string; remote_dir: string; log_dir: string; cli_log_dir: string; vpc: string; spec: string;
   }
 
   let ec2Servers: Ec2Server[] = $state([]);
@@ -47,6 +47,42 @@
   let ec2Installing = $state<string | null>(null);
   let ec2InstallOutput = $state<string>('');
   let ec2InstallOutputEl = $state<HTMLPreElement | null>(null);
+  let ec2DetectingSpec = $state(false);
+  let pgDetectingSpec = $state(false);
+
+  async function detectEc2Spec() {
+    if (!ec2Editing?.host || !ec2Editing?.private_key) return;
+    ec2DetectingSpec = true;
+    try {
+      const res = await fetch('/api/onboard/detect-spec', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host: ec2Editing.host, user: ec2Editing.user, private_key: ec2Editing.private_key })
+      });
+      const data = await res.json();
+      if (data.ok && data.spec && ec2Editing) ec2Editing.spec = data.spec;
+    } finally {
+      ec2DetectingSpec = false;
+    }
+  }
+
+  async function detectPgSpec() {
+    if (!editing?.ssh_user || !editing?.ssh_private_key) return;
+    const host = editing.ssh_host || editing.host;
+    if (!host) return;
+    pgDetectingSpec = true;
+    try {
+      const res = await fetch('/api/onboard/detect-spec', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host, user: editing.ssh_user, private_key: editing.ssh_private_key })
+      });
+      const data = await res.json();
+      if (data.ok && data.spec && editing) editing.spec = data.spec;
+    } finally {
+      pgDetectingSpec = false;
+    }
+  }
 
   async function installTool(tool: string) {
     if (!ec2Editing) return;
@@ -111,7 +147,7 @@
   }
 
   function startNewEc2() {
-    ec2Editing = { name: '', host: '', user: 'ec2-user', port: 22, private_key: '', remote_dir: '~/mybench-bench', log_dir: '/tmp/mybench-logs', cli_log_dir: '/tmp/gocli-logs', vpc: '' };
+    ec2Editing = { name: '', host: '', user: 'ec2-user', port: 22, private_key: '', remote_dir: '~/mybench-bench', log_dir: '/tmp/mybench-logs', cli_log_dir: '/tmp/gocli-logs', vpc: '', spec: '' };
     ec2IsNew = true;
     ec2TestResult = null;
     ec2InstallOutput = '';
@@ -178,7 +214,7 @@
   }
 
   function startNew() {
-    editing = { name: '', host: 'localhost', port: 5432, username: 'postgres', password: '', ssl: 0, ssh_enabled: 0, ssh_host: null, ssh_port: 22, ssh_user: null, ssh_private_key: null, private_host: '', vpc: '' };
+    editing = { name: '', host: 'localhost', port: 5432, username: 'postgres', password: '', ssl: 0, ssh_enabled: 0, ssh_host: null, ssh_port: 22, ssh_user: null, ssh_private_key: null, private_host: '', vpc: '', spec: '', pg_config: '' };
     isNew = true;
     testMsg = '';
     testOk = null;
@@ -351,6 +387,33 @@
         <label for="conn-vpc">VPC <span style="font-weight:normal;color:#888">(optional)</span></label>
         <input id="conn-vpc" list="vpc-list" bind:value={editing.vpc} placeholder="default-sgp1" />
       </div>
+    </div>
+
+    <div class="row" style="margin-top:4px">
+      <div class="form-group" style="flex:1">
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px">
+          <label for="conn-spec" style="margin:0">Instance spec <span style="font-weight:normal;color:#888">(optional)</span></label>
+          {#if editing.ssh_enabled && editing.ssh_user && editing.ssh_private_key}
+            <button
+              type="button"
+              onclick={detectPgSpec}
+              disabled={pgDetectingSpec}
+              style="font-size:11px; padding:2px 8px"
+            >{pgDetectingSpec ? 'Detecting…' : 'Auto-detect'}</button>
+          {/if}
+        </div>
+        <input id="conn-spec" bind:value={editing.spec} placeholder="8 vCPU (Intel Xeon Platinum 8168 @ 2.70GHz), 32 GB RAM, 500 GB SSD" />
+      </div>
+    </div>
+    <div class="form-group" style="margin-top:4px">
+      <label for="conn-pg-config">PostgreSQL config notes <span style="font-weight:normal;color:#888">(optional — freeform, e.g. max_connections = 200)</span></label>
+      <textarea
+        id="conn-pg-config"
+        bind:value={editing.pg_config}
+        placeholder="max_connections = 200&#10;shared_buffers = 4GB&#10;work_mem = 64MB"
+        rows="3"
+        style="font-family:monospace; font-size:12px; resize:vertical"
+      ></textarea>
     </div>
 
     <!-- OS Metrics via SSH -->
@@ -540,6 +603,18 @@
         <label for="ec2-cli-log-dir">CLI Log Dir</label>
         <input id="ec2-cli-log-dir" bind:value={ec2Editing.cli_log_dir} placeholder="/tmp/gocli-logs" />
       </div>
+    </div>
+    <div class="form-group" style="margin-top:4px">
+      <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px">
+        <label for="ec2-spec" style="margin:0">Instance spec <span style="font-weight:normal;color:#888">(optional)</span></label>
+        <button
+          type="button"
+          onclick={detectEc2Spec}
+          disabled={ec2DetectingSpec || !ec2Editing?.host || !ec2Editing?.private_key}
+          style="font-size:11px; padding:2px 8px"
+        >{ec2DetectingSpec ? 'Detecting…' : 'Auto-detect'}</button>
+      </div>
+      <input id="ec2-spec" bind:value={ec2Editing.spec} placeholder="4 vCPU (Intel Xeon Platinum 8168 @ 2.70GHz), 8 GB RAM, 50 GB SSD" />
     </div>
     <div class="row">
       <button class="primary" onclick={saveEc2} disabled={ec2Saving}>{ec2Saving ? 'Saving…' : 'Save'}</button>

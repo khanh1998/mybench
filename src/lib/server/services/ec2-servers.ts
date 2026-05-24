@@ -13,6 +13,7 @@ export interface SaveEc2ServerInput {
 	log_dir?: string;
 	cli_log_dir?: string;
 	vpc?: string;
+	spec?: string;
 }
 
 export interface TestEc2ServerInput {
@@ -50,20 +51,21 @@ export function saveEc2Server(input: SaveEc2ServerInput): { action: 'created' | 
 		remote_dir: input.remote_dir ?? existing?.remote_dir ?? '~/mybench-bench',
 		log_dir: input.log_dir ?? existing?.log_dir ?? '/tmp/mybench-logs',
 		cli_log_dir: input.cli_log_dir ?? existing?.cli_log_dir ?? '/tmp/gocli-logs',
-		vpc: input.vpc ?? existing?.vpc ?? ''
+		vpc: input.vpc ?? existing?.vpc ?? '',
+		spec: input.spec ?? existing?.spec ?? ''
 	};
 	if (!next.name.trim()) throw new Error('name is required');
 
 	if (existing) {
 		db.prepare(
-			'UPDATE ec2_servers SET name=?, host=?, user=?, port=?, private_key=?, remote_dir=?, log_dir=?, cli_log_dir=?, vpc=? WHERE id=?'
-		).run(next.name, next.host, next.user, next.port, next.private_key, next.remote_dir, next.log_dir, next.cli_log_dir, next.vpc, input.ec2_server_id);
+			'UPDATE ec2_servers SET name=?, host=?, user=?, port=?, private_key=?, remote_dir=?, log_dir=?, cli_log_dir=?, vpc=?, spec=? WHERE id=?'
+		).run(next.name, next.host, next.user, next.port, next.private_key, next.remote_dir, next.log_dir, next.cli_log_dir, next.vpc, next.spec, input.ec2_server_id);
 		return { action: 'updated', server: getEc2Server(input.ec2_server_id!)! };
 	}
 
 	const result = db.prepare(
-		'INSERT INTO ec2_servers (name, host, user, port, private_key, remote_dir, log_dir, cli_log_dir, vpc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-	).run(next.name, next.host, next.user, next.port, next.private_key, next.remote_dir, next.log_dir, next.cli_log_dir, next.vpc);
+		'INSERT INTO ec2_servers (name, host, user, port, private_key, remote_dir, log_dir, cli_log_dir, vpc, spec) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+	).run(next.name, next.host, next.user, next.port, next.private_key, next.remote_dir, next.log_dir, next.cli_log_dir, next.vpc, next.spec);
 	return { action: 'created', server: getEc2Server(result.lastInsertRowid as number)! };
 }
 

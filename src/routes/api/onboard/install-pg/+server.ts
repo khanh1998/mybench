@@ -12,7 +12,7 @@ sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc --fail \\
 . /etc/os-release
 sudo sh -c "echo 'deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt \${VERSION_CODENAME}-pgdg main' > /etc/apt/sources.list.d/pgdg.list"
 echo "==> Updating apt..."
-sudo apt-get update -y
+sudo apt-get update -y || true
 echo "==> Installing postgresql-18..."
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-18
 echo "==> Enabling and starting PostgreSQL service..."

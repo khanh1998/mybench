@@ -86,7 +86,7 @@ export function startEc2Run(
 	const db = getDb();
 
 	const design = db.prepare('SELECT * FROM designs WHERE id = ?').get(Number(designId)) as
-		| { id: number; name: string; database: string; pre_collect_secs: number; post_collect_secs: number }
+		| { id: number; name: string; database: string; server_id: number | null; pre_collect_secs: number; post_collect_secs: number }
 		| undefined;
 	if (!design) throw new Error(`Design ${designId} not found`);
 	const resolvedDatabase = opts.database ?? design.database;
@@ -94,6 +94,10 @@ export function startEc2Run(
 	const ec2Server = db.prepare('SELECT * FROM ec2_servers WHERE id = ?').get(Number(ec2ServerId)) as
 		Ec2Server | undefined;
 	if (!ec2Server) throw new Error(`EC2 server ${ec2ServerId} not found`);
+
+	const pgServerSnap = design.server_id
+		? db.prepare('SELECT spec, pg_config FROM pg_servers WHERE id = ?').get(design.server_id) as { spec: string; pg_config: string } | undefined
+		: undefined;
 
 	// Resolve profile name from decision or design profiles table
 	let profileName = '';
@@ -115,8 +119,9 @@ export function startEc2Run(
 		INSERT INTO benchmark_runs (
 			design_id, database, status, started_at,
 			snapshot_interval_seconds, pre_collect_secs, post_collect_secs,
-			name, profile_name, ec2_server_id, ec2_run_token
-		) VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?)
+			name, profile_name, ec2_server_id, ec2_run_token,
+			runner_spec, db_spec, db_pg_config
+		) VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 		.run(
 			design.id,
@@ -128,7 +133,10 @@ export function startEc2Run(
 			runName,
 			profileName,
 			ec2ServerId,
-			ec2RunToken
+			ec2RunToken,
+			ec2Server.spec ?? '',
+			pgServerSnap?.spec ?? '',
+			pgServerSnap?.pg_config ?? ''
 		);
 
 	const runId = insertResult.lastInsertRowid as number;
@@ -500,14 +508,31 @@ async function executeEc2RunAsync(
 
 		// Reconnect after tail: forcibly closing the tail channel from within its onData callback
 		// can leave the ssh2 connection in a state where subsequent exec() calls return empty stdout.
+		// Retry up to 3 times with a short delay — SSH reconnect can occasionally return empty
+		// stdout on the first exec after a forced channel close.
 		conn.end();
-		conn = await connectSsh(ec2Server);
+		conn = undefined;
+
+		let remoteResultExists = false;
+		for (let attempt = 1; attempt <= 3; attempt++) {
+			if (attempt > 1) await new Promise((r) => setTimeout(r, 2000 * attempt));
+			try {
+				conn?.end();
+				conn = await connectSsh(ec2Server);
+				const checkOut = (await exec(conn, `test -f ${shellQuote(remoteResultPath)} && echo yes || echo no`)).stdout.trim();
+				if (checkOut === 'yes') { remoteResultExists = true; break; }
+				if (checkOut === 'no') break; // definitive — file not there
+				// Empty stdout — connection in bad state, retry
+				console.warn(`[ec2-executor] Run ${runId}: empty stdout on result check (attempt ${attempt}), retrying...`);
+			} catch (connErr) {
+				console.warn(`[ec2-executor] Run ${runId}: SSH reconnect failed on attempt ${attempt}: ${connErr instanceof Error ? connErr.message : connErr}`);
+			}
+		}
 
 		// Download and import result
-		const remoteResultExists = (await exec(conn, `test -f ${shellQuote(remoteResultPath)} && echo yes || echo no`)).stdout.trim() === 'yes';
 		if (remoteResultExists) {
 			emit(`Downloading result from EC2...`);
-			await downloadFile(conn, remoteResultPath, localResultPath);
+			await downloadFile(conn!, remoteResultPath, localResultPath);
 			emit(`Importing result...`);
 			importResultIntoRun(runId, JSON.parse(readFileSync(localResultPath, 'utf8')));
 		} else {

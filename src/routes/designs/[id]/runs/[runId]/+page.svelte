@@ -82,6 +82,9 @@
     is_imported?: number;
     name: string; notes: string; profile_name: string; run_params: string;
     host_config?: string | null;
+    runner_spec?: string | null;
+    db_spec?: string | null;
+    db_pg_config?: string | null;
     ec2_server_id?: number | null;
     ec2_run_token?: string | null;
     steps: StepResult[];
@@ -772,6 +775,32 @@
 
 {/if}
 
+{#if run && (run.runner_spec || run.db_spec || run.db_pg_config)}
+  <div class="card" style="margin-bottom:12px">
+    <h3 style="margin-bottom:10px">Instance Info</h3>
+    <div class="instance-info-grid">
+      {#if run.runner_spec}
+        <div class="instance-info-row">
+          <span class="instance-info-label">Runner</span>
+          <span class="instance-info-val">{run.runner_spec}</span>
+        </div>
+      {/if}
+      {#if run.db_spec}
+        <div class="instance-info-row">
+          <span class="instance-info-label">DB</span>
+          <span class="instance-info-val">{run.db_spec}</span>
+        </div>
+      {/if}
+      {#if run.db_pg_config}
+        <div class="instance-info-row">
+          <span class="instance-info-label">PG config</span>
+          <pre class="instance-info-pre">{run.db_pg_config}</pre>
+        </div>
+      {/if}
+    </div>
+  </div>
+{/if}
+
 <div class="card" style="margin-bottom:12px">
   <div class="row" style="margin-bottom:8px">
     <h3>Output</h3>
@@ -1175,6 +1204,11 @@
   }
   .run-params-title { font-size: 18px; font-weight: 600; color: #222; }
   .run-params-meta { color: #888; font-size: 12px; }
+  .instance-info-grid { display: flex; flex-direction: column; gap: 8px; }
+  .instance-info-row { display: flex; align-items: baseline; gap: 12px; }
+  .instance-info-label { font-size: 11px; font-weight: 600; text-transform: uppercase; color: #888; min-width: 70px; }
+  .instance-info-val { font-size: 13px; color: #333; }
+  .instance-info-pre { margin: 0; font-size: 12px; color: #333; font-family: monospace; white-space: pre-wrap; background: #f7f7f7; border: 1px solid #e0e0e0; border-radius: 4px; padding: 6px 8px; }
   .params-grid { display: flex; flex-direction: column; gap: 4px; }
   .param-row { display: flex; align-items: center; gap: 8px; }
   .param-name { background: #f0f0f0; color: #5500aa; padding: 1px 6px; border-radius: 3px; font-size: 12px; }

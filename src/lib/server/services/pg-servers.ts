@@ -20,6 +20,8 @@ export interface SavePgServerInput {
 	ssh_private_key?: string | null;
 	private_host?: string;
 	vpc?: string;
+	spec?: string;
+	pg_config?: string;
 	perf_enabled?: boolean | number;
 	perf_scope?: 'postgres_cgroup' | 'system' | 'disabled';
 	perf_cgroup?: string;
@@ -73,6 +75,8 @@ export function savePgServer(input: SavePgServerInput): { action: 'created' | 'u
 		ssh_private_key: input.ssh_private_key !== undefined ? (input.ssh_private_key || null) : (existing?.ssh_private_key ?? null),
 		private_host: input.private_host ?? existing?.private_host ?? '',
 		vpc: input.vpc ?? existing?.vpc ?? '',
+		spec: input.spec ?? existing?.spec ?? '',
+		pg_config: input.pg_config ?? existing?.pg_config ?? '',
 		perf_enabled: input.perf_enabled !== undefined ? (input.perf_enabled ? 1 : 0) : (existing?.perf_enabled ?? 0),
 		perf_scope: input.perf_scope ?? existing?.perf_scope ?? 'disabled',
 		perf_cgroup: input.perf_cgroup ?? existing?.perf_cgroup ?? '',
@@ -83,14 +87,14 @@ export function savePgServer(input: SavePgServerInput): { action: 'created' | 'u
 
 	if (existing) {
 		db.prepare(
-			'UPDATE pg_servers SET name=?, host=?, port=?, username=?, password=?, ssl=?, ssh_enabled=?, ssh_host=?, ssh_port=?, ssh_user=?, ssh_private_key=?, private_host=?, vpc=?, perf_enabled=?, perf_scope=?, perf_cgroup=?, perf_events=?, perf_status_json=? WHERE id=?'
-		).run(next.name, next.host, next.port, next.username, next.password, next.ssl, next.ssh_enabled, next.ssh_host, next.ssh_port, next.ssh_user, next.ssh_private_key, next.private_host, next.vpc, next.perf_enabled, next.perf_scope, next.perf_cgroup, next.perf_events, next.perf_status_json, input.server_id);
+			'UPDATE pg_servers SET name=?, host=?, port=?, username=?, password=?, ssl=?, ssh_enabled=?, ssh_host=?, ssh_port=?, ssh_user=?, ssh_private_key=?, private_host=?, vpc=?, spec=?, pg_config=?, perf_enabled=?, perf_scope=?, perf_cgroup=?, perf_events=?, perf_status_json=? WHERE id=?'
+		).run(next.name, next.host, next.port, next.username, next.password, next.ssl, next.ssh_enabled, next.ssh_host, next.ssh_port, next.ssh_user, next.ssh_private_key, next.private_host, next.vpc, next.spec, next.pg_config, next.perf_enabled, next.perf_scope, next.perf_cgroup, next.perf_events, next.perf_status_json, input.server_id);
 		return { action: 'updated', server: getPgServer(input.server_id!)! };
 	}
 
 	const result = db.prepare(
-		'INSERT INTO pg_servers (name, host, port, username, password, ssl, ssh_enabled, ssh_host, ssh_port, ssh_user, ssh_private_key, private_host, vpc, perf_enabled, perf_scope, perf_cgroup, perf_events, perf_status_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-	).run(next.name, next.host, next.port, next.username, next.password, next.ssl, next.ssh_enabled, next.ssh_host, next.ssh_port, next.ssh_user, next.ssh_private_key, next.private_host, next.vpc, next.perf_enabled, next.perf_scope, next.perf_cgroup, next.perf_events, next.perf_status_json);
+		'INSERT INTO pg_servers (name, host, port, username, password, ssl, ssh_enabled, ssh_host, ssh_port, ssh_user, ssh_private_key, private_host, vpc, spec, pg_config, perf_enabled, perf_scope, perf_cgroup, perf_events, perf_status_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+	).run(next.name, next.host, next.port, next.username, next.password, next.ssl, next.ssh_enabled, next.ssh_host, next.ssh_port, next.ssh_user, next.ssh_private_key, next.private_host, next.vpc, next.spec, next.pg_config, next.perf_enabled, next.perf_scope, next.perf_cgroup, next.perf_events, next.perf_status_json);
 	return { action: 'created', server: getPgServer(result.lastInsertRowid as number)! };
 }
 

@@ -68,6 +68,8 @@
 	let clientPrivateIp = $state('');
 	let dbPrivateIp = $state('');
 	let vpcTag = $state(randomVpcTag());
+	let clientSpec = $state('');
+	let dbSpec = $state('');
 
 	// Step 3
 	let clientInspect = $state<InspectResult | null>(null);
@@ -164,6 +166,19 @@
 			} else {
 				dbInfo = data;
 				if (data.ok && data.private_ip) dbPrivateIp = data.private_ip;
+			}
+			// Auto-detect hardware spec in the background after a successful connect
+			if (data.ok) {
+				fetch('/api/onboard/detect-spec', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ host, user: sshUser, private_key: sshKey })
+				}).then(r => r.json()).then(d => {
+					if (d.ok && d.spec) {
+						if (role === 'client') clientSpec = d.spec;
+						else dbSpec = d.spec;
+					}
+				}).catch(() => { /* spec detection is best-effort */ });
 			}
 		} finally {
 			if (role === 'client') connectingClient = false;
@@ -324,8 +339,8 @@
 				method: 'POST', headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
 					cluster_name: clusterName,
-					client: { host: clientHost, user: sshUser, private_key: sshKey, private_ip: clientPrivateIp.trim(), vpc: vpcTag },
-					db: { public_host: dbHost, private_ip: dbPrivateIp.trim(), user: sshUser, private_key: sshKey, vpc: vpcTag },
+					client: { host: clientHost, user: sshUser, private_key: sshKey, private_ip: clientPrivateIp.trim(), vpc: vpcTag, spec: clientSpec.trim() },
+					db: { public_host: dbHost, private_ip: dbPrivateIp.trim(), user: sshUser, private_key: sshKey, vpc: vpcTag, spec: dbSpec.trim(), pg_config: tuneConfig.trim() },
 					pg_config: { db_user: pgUser, db_pass: pgPass, db_name: pgDb },
 					perf: dbInspect?.perf ?? null
 				})
@@ -447,6 +462,10 @@
 							<label for="client-private-ip">Private IP</label>
 							<input id="client-private-ip" bind:value={clientPrivateIp} placeholder="10.x.x.x" />
 						</div>
+						<div class="form-group" style="margin-top:10px">
+							<label for="client-spec">Runner spec <span style="color:#888; font-weight:400">(optional)</span></label>
+							<input id="client-spec" bind:value={clientSpec} placeholder="4 vCPU, 8 GB RAM, 100 GB SSD" />
+						</div>
 					{/if}
 				</div>
 				<!-- DB -->
@@ -473,6 +492,10 @@
 						<div class="form-group" style="margin-top:10px">
 							<label for="db-private-ip">Private IP</label>
 							<input id="db-private-ip" bind:value={dbPrivateIp} placeholder="10.x.x.x" />
+						</div>
+						<div class="form-group" style="margin-top:10px">
+							<label for="db-spec">DB spec <span style="color:#888; font-weight:400">(optional)</span></label>
+							<input id="db-spec" bind:value={dbSpec} placeholder="8 vCPU, 32 GB RAM, 500 GB SSD" />
 						</div>
 					{/if}
 				</div>

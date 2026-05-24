@@ -1111,6 +1111,29 @@ FROM snap_pg_stat_bgwriter WHERE _run_id = ? ORDER BY _collected_at DESC LIMIT 1
 		db.exec(`ALTER TABLE benchmark_runs ADD COLUMN host_config TEXT`);
 	}
 
+	// spec / pg_config fields on server tables; runner_spec/db_spec/db_pg_config snapshots on runs
+	const ec2Cols2 = (db.prepare(`PRAGMA table_info(ec2_servers)`).all() as { name: string }[]).map(c => c.name);
+	if (!ec2Cols2.includes('spec')) {
+		db.exec(`ALTER TABLE ec2_servers ADD COLUMN spec TEXT NOT NULL DEFAULT ''`);
+	}
+	const pgCols2 = (db.prepare(`PRAGMA table_info(pg_servers)`).all() as { name: string }[]).map(c => c.name);
+	if (!pgCols2.includes('spec')) {
+		db.exec(`ALTER TABLE pg_servers ADD COLUMN spec TEXT NOT NULL DEFAULT ''`);
+	}
+	if (!pgCols2.includes('pg_config')) {
+		db.exec(`ALTER TABLE pg_servers ADD COLUMN pg_config TEXT NOT NULL DEFAULT ''`);
+	}
+	const runColsSpec = (db.prepare(`PRAGMA table_info(benchmark_runs)`).all() as { name: string }[]).map(c => c.name);
+	if (!runColsSpec.includes('runner_spec')) {
+		db.exec(`ALTER TABLE benchmark_runs ADD COLUMN runner_spec TEXT NOT NULL DEFAULT ''`);
+	}
+	if (!runColsSpec.includes('db_spec')) {
+		db.exec(`ALTER TABLE benchmark_runs ADD COLUMN db_spec TEXT NOT NULL DEFAULT ''`);
+	}
+	if (!runColsSpec.includes('db_pg_config')) {
+		db.exec(`ALTER TABLE benchmark_runs ADD COLUMN db_pg_config TEXT NOT NULL DEFAULT ''`);
+	}
+
 	// host_snap_* timeseries tables — base schemas; data columns added dynamically by importer
 	db.exec(`
     CREATE TABLE IF NOT EXISTS host_snap_vmstat (

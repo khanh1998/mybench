@@ -19,6 +19,7 @@
   interface SummaryContextRow {
     label: string;
     values: (string | null)[];
+    uniform?: boolean; // all non-null values are identical — collapse to single cell
   }
 
   interface PerfMetricOption {
@@ -646,7 +647,22 @@
       ])
     ];
 
-    return rows.filter((row) => row.values.some((value) => value !== null && value !== ''));
+    const filtered = rows.filter((row) => row.values.some((value) => value !== null && value !== ''));
+
+    // Append spec/config rows with uniform-collapse flag
+    const specRows: SummaryContextRow[] = [
+      { label: 'Runner spec', values: runs.map((run) => run?.runner_spec?.trim() || null) },
+      { label: 'DB spec', values: runs.map((run) => run?.db_spec?.trim() || null) },
+      { label: 'DB config', values: runs.map((run) => run?.db_pg_config?.trim() || null) }
+    ]
+      .filter((row) => row.values.some((v) => v !== null))
+      .map((row) => {
+        const nonNull = row.values.filter((v): v is string => v !== null);
+        const uniform = nonNull.length > 0 && nonNull.every((v) => v === nonNull[0]);
+        return { ...row, uniform };
+      });
+
+    return [...filtered, ...specRows];
   });
 
   const benchType = $derived((): 'pgbench' | 'sysbench' | 'mixed' | null => {
@@ -850,9 +866,13 @@
                 {#each summaryContextRows() as row}
                   <tr>
                     <td class="metric-label">{row.label}</td>
-                    {#each row.values as value}
-                      <td>{value ?? '—'}</td>
-                    {/each}
+                    {#if row.uniform}
+                      <td colspan={selectedRunIds.length} style="color:#555; font-style:italic">{row.values.find((v) => v !== null) ?? '—'}</td>
+                    {:else}
+                      {#each row.values as value}
+                        <td>{value ?? '—'}</td>
+                      {/each}
+                    {/if}
                   </tr>
                 {/each}
               </tbody>

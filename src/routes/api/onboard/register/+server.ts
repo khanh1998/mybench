@@ -35,7 +35,8 @@ export const POST: RequestHandler = async ({ request }) => {
 		private_key: client.private_key,
 		remote_dir: '~/mybench-bench',
 		log_dir: '/tmp/mybench-logs',
-		vpc
+		vpc,
+		spec: client.spec ?? ''
 	});
 
 	// Save PG server — connect via public IP (mybench runs locally, can't reach private VPC)
@@ -54,6 +55,8 @@ export const POST: RequestHandler = async ({ request }) => {
 		ssh_private_key: db.private_key,
 		private_host: db.private_ip,
 		vpc,
+		spec: db.spec ?? '',
+		pg_config: db.pg_config ?? '',
 		perf_enabled: perf?.scope === 'postgres_cgroup' || perf?.scope === 'system',
 		perf_scope: perf?.scope ?? 'disabled',
 		perf_cgroup: perf?.perf_cgroup ?? '',
