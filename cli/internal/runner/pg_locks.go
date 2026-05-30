@@ -12,11 +12,18 @@ import (
 
 const pgLocksSnapTable = "snap_pg_locks"
 
+// TODO: wire this to plan.json once pg_stat step is implemented.
+// Set to true to re-enable pg_locks collection.
+const pgLocksEnabled = false
+
 var warnedPgLocks bool
 
 // collectPgLocksOnce queries pg_locks and appends snapshot rows to snapshots["snap_pg_locks"].
 // Errors are non-fatal: a single warning is printed and the function returns silently.
 func collectPgLocksOnce(ctx context.Context, pool *pgxpool.Pool, phase string, snapshots map[string][]result.SnapshotRow) {
+	if !pgLocksEnabled {
+		return
+	}
 	const query = `
 		SELECT locktype,
 		       database, relation, page, tuple,
