@@ -216,34 +216,41 @@ export function buildInstallCommand(tool: 'mybench-runner' | 'pgbench' | 'sysben
 	if (tool === 'mybench-runner') {
 		return `
 set -e
-export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin
-echo "==> Checking Go..."
-if ! command -v go >/dev/null 2>&1; then
-  echo "==> Go not found. Installing Go..."
-  ARCH=$(uname -m)
-  case "$ARCH" in aarch64|arm64) GOARCH="arm64" ;; *) GOARCH="amd64" ;; esac
-  GOVERSION="1.24.3"
-  curl -fsSL "https://go.dev/dl/go\${GOVERSION}.linux-\${GOARCH}.tar.gz" | sudo tar -C /usr/local -xzf -
-  export PATH=$PATH:/usr/local/go/bin
-fi
-echo "==> Go: $(go version)"
-MEM_MB=$(free -m | awk '/^Mem:/{print $2}')
-if [ "$MEM_MB" -lt 1024 ] && ! swapon --show | grep -q .; then
-  echo "==> Low memory (\${MEM_MB}MB RAM). Creating 2GB swap file to prevent OOM during build..."
-  sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
-  echo "==> Swap enabled."
-fi
+ARCH=$(uname -m)
+case "$ARCH" in aarch64|arm64) GOARCH="arm64" ;; *) GOARCH="amd64" ;; esac
+BINARY_URL="https://github.com/khanh1998/mybench/releases/download/cli-latest/mybench-runner-linux-\${GOARCH}"
 mkdir -p ${shellQuote(remoteDir)}
-if [ -d ${shellQuote(remoteDir + '/src/.git')} ]; then
-  echo "==> Updating mybench source..."
-  cd ${shellQuote(remoteDir + '/src')} && git pull
+echo "==> Trying to download pre-built mybench-runner (\${GOARCH})..."
+if curl -fsSL "\${BINARY_URL}" -o ${shellQuote(remoteDir + '/mybench-runner')} 2>/dev/null; then
+  chmod +x ${shellQuote(remoteDir + '/mybench-runner')}
+  echo "==> Done: $(${shellQuote(remoteDir + '/mybench-runner')} --version)"
 else
-  echo "==> Cloning mybench source..."
-  git clone https://github.com/khanh1998/mybench ${shellQuote(remoteDir + '/src')}
+  echo "==> Pre-built binary not available, falling back to building from source..."
+  export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin
+  if ! command -v go >/dev/null 2>&1; then
+    echo "==> Go not found. Installing Go..."
+    GOVERSION="1.24.3"
+    curl -fsSL "https://go.dev/dl/go\${GOVERSION}.linux-\${GOARCH}.tar.gz" | sudo tar -C /usr/local -xzf -
+    export PATH=$PATH:/usr/local/go/bin
+  fi
+  echo "==> Go: $(go version)"
+  MEM_MB=$(free -m | awk '/^Mem:/{print $2}')
+  if [ "$MEM_MB" -lt 1024 ] && ! swapon --show | grep -q .; then
+    echo "==> Low memory (\${MEM_MB}MB RAM). Creating 2GB swap file to prevent OOM during build..."
+    sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+    echo "==> Swap enabled."
+  fi
+  if [ -d ${shellQuote(remoteDir + '/src/.git')} ]; then
+    echo "==> Updating mybench source..."
+    cd ${shellQuote(remoteDir + '/src')} && git pull
+  else
+    echo "==> Cloning mybench source..."
+    git clone https://github.com/khanh1998/mybench ${shellQuote(remoteDir + '/src')}
+  fi
+  echo "==> Building mybench-runner..."
+  cd ${shellQuote(remoteDir + '/src/cli')} && go build -o ${shellQuote(remoteDir + '/mybench-runner')} ./cmd/
+  echo "==> Done: $(${shellQuote(remoteDir + '/mybench-runner')} --version)"
 fi
-echo "==> Building mybench-runner..."
-cd ${shellQuote(remoteDir + '/src/cli')} && go build -o ${shellQuote(remoteDir + '/mybench-runner')} ./cmd/
-echo "==> Done: $(${shellQuote(remoteDir + '/mybench-runner')} --version)"
 `.trim();
 	}
 

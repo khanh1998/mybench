@@ -1,5 +1,9 @@
 # mybench
 
+[![CLI Release](https://img.shields.io/github/v/release/khanh1998/mybench?include_prereleases&filter=cli-latest&label=CLI%20binary&color=blue)](https://github.com/khanh1998/mybench/releases/tag/cli-latest)
+[![linux/amd64](https://img.shields.io/badge/linux%2Famd64-supported-brightgreen)](https://github.com/khanh1998/mybench/releases/download/cli-latest/mybench-runner-linux-amd64)
+[![linux/arm64](https://img.shields.io/badge/linux%2Farm64-supported-brightgreen)](https://github.com/khanh1998/mybench/releases/download/cli-latest/mybench-runner-linux-arm64)
+
 `mybench` is a benchmark workbench for PostgreSQL schema and query design decisions.
 
 It helps you answer questions like:
@@ -250,9 +254,23 @@ If you are new to the app, keep the first experiment small:
 
 That gets you familiar with the workflow before you introduce profiles, series runs, EC2 execution, or lots of telemetry.
 
-## Building the Optional EC2 Runner
+## The Optional EC2 Runner
 
-The remote runner lives in `cli/` and builds to `bin/mybench-runner`.
+The remote runner (`mybench-runner`) executes benchmark plans on the VPS. Pre-built binaries are published automatically on every push to `master`:
+
+| Platform | Download |
+|---|---|
+| Linux x86-64 (Intel / AMD) | [mybench-runner-linux-amd64](https://github.com/khanh1998/mybench/releases/download/cli-latest/mybench-runner-linux-amd64) |
+| Linux ARM64 (Graviton / ARM VMs) | [mybench-runner-linux-arm64](https://github.com/khanh1998/mybench/releases/download/cli-latest/mybench-runner-linux-arm64) |
+
+```bash
+# Quick install on the VPS (auto-detects amd64 or arm64)
+ARCH=$(uname -m); case "$ARCH" in aarch64|arm64) GOARCH="arm64" ;; *) GOARCH="amd64" ;; esac
+curl -fsSL "https://github.com/khanh1998/mybench/releases/download/cli-latest/mybench-runner-linux-${GOARCH}" \
+  -o ~/mybench-bench/mybench-runner && chmod +x ~/mybench-bench/mybench-runner
+```
+
+Alternatively, build from source:
 
 ```bash
 cd cli
