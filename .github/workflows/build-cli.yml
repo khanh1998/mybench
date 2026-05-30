@@ -1,0 +1,53 @@
+name: Build CLI
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'cli/**'
+      - '.github/workflows/build-cli.yml'
+
+jobs:
+  build:
+    name: Build mybench-runner
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+
+      - name: Build linux/amd64
+        working-directory: cli
+        run: GOOS=linux GOARCH=amd64 go build -o ../bin/mybench-runner-linux-amd64 ./cmd/...
+
+      - name: Build linux/arm64
+        working-directory: cli
+        run: GOOS=linux GOARCH=arm64 go build -o ../bin/mybench-runner-linux-arm64 ./cmd/...
+
+      - name: Publish cli-latest release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: cli-latest
+          name: CLI (latest build)
+          prerelease: true
+          make_latest: false
+          body: |
+            Pre-built `mybench-runner` binaries, updated on every push to `master`.
+
+            **Download:**
+            ```
+            # amd64 (Intel / AMD — most VPS/EC2)
+            curl -fsSL https://github.com/khanh1998/mybench/releases/download/cli-latest/mybench-runner-linux-amd64 -o mybench-runner && chmod +x mybench-runner
+
+            # arm64 (Graviton / ARM VMs)
+            curl -fsSL https://github.com/khanh1998/mybench/releases/download/cli-latest/mybench-runner-linux-arm64 -o mybench-runner && chmod +x mybench-runner
+            ```
+          files: |
+            bin/mybench-runner-linux-amd64
+            bin/mybench-runner-linux-arm64
