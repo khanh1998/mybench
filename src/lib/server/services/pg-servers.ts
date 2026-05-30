@@ -1,6 +1,5 @@
 import getDb from '$lib/server/db';
-import { SNAP_TABLE_MAP } from '$lib/server/pg-stats';
-import { discoverPgStatTables, testConnection } from '$lib/server/pg-client';
+import { testConnection } from '$lib/server/pg-client';
 import { connectSsh, exec } from '$lib/server/ec2-runner';
 import { DEFAULT_PERF_EVENTS } from '$lib/server/perf-inspect';
 import type { PgServer } from '$lib/types';
@@ -37,12 +36,6 @@ export interface TestPgServerInput {
 	password?: string;
 	ssl?: boolean | number;
 	database?: string;
-	populate_table_selections?: boolean;
-}
-
-export interface TableSelectionInput {
-	table_name: string;
-	enabled: boolean;
 }
 
 export function listPgServers(): PgServer[] {
@@ -115,12 +108,6 @@ export async function testPgServer(input: TestPgServerInput): Promise<{
 	database: string;
 	version?: string;
 	error?: string;
-	table_selection_sync?: {
-		discovered_tables: string[];
-		version_num: number;
-		table_selections: { table_name: string; enabled: boolean }[];
-	};
-	table_selection_warning?: string;
 }> {
 	const targetDatabase = input.database ?? 'postgres';
 
@@ -164,117 +151,11 @@ export async function testPgServer(input: TestPgServerInput): Promise<{
 		};
 	}
 
-	let tableSelectionSync:
-		| { discovered_tables: string[]; version_num: number; table_selections: { table_name: string; enabled: boolean }[] }
-		| undefined;
-	let tableSelectionWarning: string | undefined;
-	if (input.server_id && input.populate_table_selections !== false) {
-		try {
-			tableSelectionSync = await syncPgServerTableSelections(input.server_id, targetDatabase);
-		} catch (err) {
-			tableSelectionWarning = err instanceof Error ? err.message : String(err);
-		}
-	}
-
 	return {
 		ok: true,
 		server_id: input.server_id ?? null,
 		database: targetDatabase,
-		version: result.version,
-		table_selection_sync: tableSelectionSync,
-		table_selection_warning: tableSelectionWarning
-	};
-}
-
-export async function syncPgServerTableSelections(serverId: number, database: string): Promise<{
-	discovered_tables: string[];
-	version_num: number;
-	table_selections: { table_name: string; enabled: boolean }[];
-}> {
-	const db = getDb();
-	const server = getPgServer(serverId);
-	if (!server) throw new Error(`PostgreSQL connection ${serverId} not found`);
-
-	const { tables, versionNum } = await discoverPgStatTables(server, database);
-	const supportedTables = Object.keys(SNAP_TABLE_MAP);
-	const insert = db.prepare(
-		'INSERT OR IGNORE INTO pg_stat_table_selections (server_id, table_name, enabled) VALUES (?, ?, 1)'
-	);
-	const disable = db.prepare(
-		'UPDATE pg_stat_table_selections SET enabled = 0 WHERE server_id = ? AND table_name = ?'
-	);
-
-	db.transaction(() => {
-		for (const tableName of supportedTables) {
-			insert.run(server.id, tableName);
-		}
-		if (versionNum < 140000) disable.run(server.id, 'pg_stat_replication_slots');
-		if (versionNum < 150000) disable.run(server.id, 'pg_stat_subscription_stats');
-		if (versionNum < 180000) {
-			disable.run(server.id, 'pg_stat_wal');
-			disable.run(server.id, 'pg_stat_io');
-		}
-		if (versionNum < 170000) disable.run(server.id, 'pg_stat_checkpointer');
-	})();
-
-	return {
-		discovered_tables: tables,
-		version_num: versionNum,
-		table_selections: getPgServerTableSelections(serverId).map((row) => ({
-			table_name: row.table_name,
-			enabled: !!row.enabled
-		}))
-	};
-}
-
-export function getPgServerTableSelections(serverId: number): { table_name: string; enabled: number }[] {
-	const db = getDb();
-	const server = db.prepare('SELECT id FROM pg_servers WHERE id = ?').get(serverId);
-	if (!server) throw new Error(`PostgreSQL connection ${serverId} not found`);
-
-	return db
-		.prepare('SELECT table_name, enabled FROM pg_stat_table_selections WHERE server_id = ? ORDER BY table_name')
-		.all(serverId) as { table_name: string; enabled: number }[];
-}
-
-export function setPgServerTableSelections(serverId: number, selections: TableSelectionInput[]): {
-	updated: true;
-	server_id: number;
-	table_selections: { table_name: string; enabled: boolean }[];
-} {
-	const db = getDb();
-	const existing = db.prepare('SELECT id FROM pg_servers WHERE id = ?').get(serverId);
-	if (!existing) throw new Error(`PostgreSQL connection ${serverId} not found`);
-
-	const currentRows = db
-		.prepare('SELECT table_name FROM pg_stat_table_selections WHERE server_id = ?')
-		.all(serverId) as { table_name: string }[];
-	if (currentRows.length === 0) {
-		throw new Error(`No table selections exist for PostgreSQL connection ${serverId}. Run test_pg_server(server_id) first.`);
-	}
-
-	const validNames = new Set(currentRows.map((row) => row.table_name));
-	const unknown = selections.map((row) => row.table_name).filter((name) => !validNames.has(name));
-	if (unknown.length > 0) {
-		throw new Error(`Unknown table selection(s): ${unknown.join(', ')}`);
-	}
-
-	const update = db.prepare(
-		'UPDATE pg_stat_table_selections SET enabled = ? WHERE server_id = ? AND table_name = ?'
-	);
-	db.transaction(() => {
-		for (const item of selections) {
-			update.run(item.enabled ? 1 : 0, serverId, item.table_name);
-		}
-	})();
-
-	return {
-		updated: true,
-		server_id: serverId,
-		table_selections: getPgServerTableSelections(serverId).map((row) => ({
-			table_name: row.table_name,
-			enabled: !!row.enabled
-		}))
+		version: result.version
 	};
 }
 

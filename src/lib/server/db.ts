@@ -486,19 +486,6 @@ FROM snap_pg_stat_bgwriter WHERE _run_id = ? ORDER BY _collected_at DESC LIMIT 1
 	db.prepare(`INSERT INTO schema_migrations (id) VALUES (?)`).run(migrationId);
 }
 
-function backfillPgStatCheckpointerSelections(db: Database.Database): void {
-	const migrationId = 'pg_stat_checkpointer_selection_v1';
-	const migrated = db.prepare(`SELECT id FROM schema_migrations WHERE id = ?`).get(migrationId);
-	if (migrated) return;
-
-	db.exec(`
-    INSERT OR IGNORE INTO pg_stat_table_selections (server_id, table_name, enabled)
-    SELECT id, 'pg_stat_checkpointer', 1
-    FROM pg_servers
-  `);
-
-	db.prepare(`INSERT INTO schema_migrations (id) VALUES (?)`).run(migrationId);
-}
 
 function migratePg18WalAndIoTables(db: Database.Database): void {
 	const migrationId = 'snap_pg18_wal_io_v1';
@@ -550,13 +537,6 @@ function migrate(db: Database.Database) {
       perf_cgroup TEXT NOT NULL DEFAULT '',
       perf_events TEXT NOT NULL DEFAULT 'task-clock,cpu-clock,context-switches,cpu-migrations,page-faults,minor-faults,major-faults',
       perf_status_json TEXT NOT NULL DEFAULT ''
-    );
-
-    CREATE TABLE IF NOT EXISTS pg_stat_table_selections (
-      server_id INTEGER NOT NULL REFERENCES pg_servers(id) ON DELETE CASCADE,
-      table_name TEXT NOT NULL,
-      enabled INTEGER NOT NULL DEFAULT 1,
-      PRIMARY KEY (server_id, table_name)
     );
 
     CREATE TABLE IF NOT EXISTS decisions (
@@ -960,6 +940,14 @@ function migrate(db: Database.Database) {
 	if (!stepCols.includes('perf_freq')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_freq TEXT NOT NULL DEFAULT ''`);
 	if (!stepCols.includes('perf_call_graph')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_call_graph TEXT NOT NULL DEFAULT 'dwarf'`);
 	if (!stepCols.includes('perf_mmap_pages')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_mmap_pages TEXT NOT NULL DEFAULT ''`);
+	// pg_stat step columns
+	if (!stepCols.includes('pg_stat_tables')) db.exec(`ALTER TABLE design_steps ADD COLUMN pg_stat_tables TEXT NOT NULL DEFAULT '[]'`);
+	if (!stepCols.includes('pg_stat_interval_seconds')) db.exec(`ALTER TABLE design_steps ADD COLUMN pg_stat_interval_seconds TEXT NOT NULL DEFAULT ''`);
+	if (!stepCols.includes('pg_stat_pg_locks_enabled')) db.exec(`ALTER TABLE design_steps ADD COLUMN pg_stat_pg_locks_enabled INTEGER NOT NULL DEFAULT 0`);
+	if (!stepCols.includes('pg_stat_pg_locks_interval')) db.exec(`ALTER TABLE design_steps ADD COLUMN pg_stat_pg_locks_interval TEXT NOT NULL DEFAULT ''`);
+	if (!stepCols.includes('pg_stat_reset_stats')) db.exec(`ALTER TABLE design_steps ADD COLUMN pg_stat_reset_stats INTEGER NOT NULL DEFAULT 0`);
+	if (!stepCols.includes('pg_stat_reset_statements')) db.exec(`ALTER TABLE design_steps ADD COLUMN pg_stat_reset_statements INTEGER NOT NULL DEFAULT 0`);
+	if (!stepCols.includes('pg_stat_collect_statements')) db.exec(`ALTER TABLE design_steps ADD COLUMN pg_stat_collect_statements INTEGER NOT NULL DEFAULT 0`);
 	const perfModeToggleMigrated = db.prepare(`SELECT id FROM schema_migrations WHERE id = 'perf_mode_toggles_v1'`).get();
 	if (!perfModeToggleMigrated) {
 		db.exec(`
@@ -1075,7 +1063,6 @@ FROM snap_pg_stat_bgwriter WHERE _run_id = ? ORDER BY _collected_at DESC LIMIT 1
 	}
 
 	migrateBgwriterQueriesAndMetrics(db);
-	backfillPgStatCheckpointerSelections(db);
 
 	// SSH columns on pg_servers for OS metrics collection
 	const pgServerSshMigrated = db.prepare(`SELECT id FROM schema_migrations WHERE id = 'pg_server_ssh_v1'`).get();

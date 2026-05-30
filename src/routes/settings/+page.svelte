@@ -6,7 +6,6 @@
     ssh_enabled: number; ssh_host: string | null; ssh_port: number; ssh_user: string | null; ssh_private_key: string | null;
     private_host: string; vpc: string; spec: string; pg_config: string;
   }
-  interface TableSel { table_name: string; enabled: number; }
 
   let activeTab = $state<'db-servers' | 'runners'>('db-servers');
 
@@ -16,8 +15,6 @@
   let testMsg = $state('');
   let testOk = $state<boolean|null>(null);
   let testDb = $state('postgres');
-  let selectedServer = $state<number|null>(null);
-  let tables: TableSel[] = $state([]);
   let saving = $state(false);
   let sshTesting = $state(false);
   let sshTestResult = $state<{ ok: boolean; tools?: string[]; error?: string } | null>(null);
@@ -294,22 +291,6 @@
     editing.ssh_private_key = await file.text();
   }
 
-  async function loadTables(serverId: number) {
-    selectedServer = serverId;
-    const res = await fetch(`/api/connections/${serverId}/tables`);
-    tables = await res.json();
-  }
-
-  async function saveTables() {
-    if (!selectedServer) return;
-    await fetch(`/api/connections/${selectedServer}/tables`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(tables)
-    });
-    testMsg = 'Table selections saved.';
-  }
-
   function serverTypeBadge(s: Server): string {
     if (s.ssh_enabled) return 'SSH';
     return 'Local';
@@ -505,31 +486,9 @@
         <span style="color:#666; font-size:12px; margin-left:8px">{s.username}@{s.host}:{s.port}{s.ssl ? ' · SSL' : ''}</span>
       </div>
       <span class="spacer"></span>
-      <button onclick={() => loadTables(s.id)}>pg_stat tables</button>
       <button onclick={() => startEdit(s)}>Edit</button>
       <button class="danger" onclick={() => del(s.id)}>Delete</button>
     </div>
-
-    {#if selectedServer === s.id && tables.length > 0}
-      <div style="margin-top:12px">
-        <h4 style="margin-bottom:8px">pg_stat Table Selections</h4>
-        <p style="color:#666; font-size:12px; margin-bottom:8px">
-          Uncheck tables you don't want to snapshot. Greyed tables may not exist in your PG version.
-        </p>
-        <div class="tables-grid">
-          {#each tables as t}
-            <label class="table-toggle">
-              <input type="checkbox" checked={!!t.enabled} onchange={(e) => t.enabled = (e.currentTarget as HTMLInputElement).checked ? 1 : 0} />
-              {t.table_name}
-            </label>
-          {/each}
-        </div>
-        <div style="margin-top:10px">
-          <button class="primary" onclick={saveTables}>Save Selections</button>
-          <button onclick={() => selectedServer = null} style="margin-left:8px">Close</button>
-        </div>
-      </div>
-    {/if}
   </div>
 {/each}
 
@@ -697,21 +656,6 @@
 {/if}
 
 <style>
-  .tables-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-    gap: 6px;
-  }
-  .table-toggle {
-    font-size: 12px;
-    font-weight: normal;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    cursor: pointer;
-  }
-  .table-toggle input { width: auto; }
-  h4 { margin: 0 0 8px; }
   .upload-btn {
     display: inline-flex;
     align-items: center;

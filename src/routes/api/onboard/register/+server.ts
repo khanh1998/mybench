@@ -67,7 +67,7 @@ export const POST: RequestHandler = async ({ request }) => {
 	// Test both
 	const [ec2Test, pgTest] = await Promise.allSettled([
 		testEc2Server({ ec2_server_id: ec2Server.id }),
-		testPgServer({ server_id: pgServer.id, database: dbName, populate_table_selections: true })
+		testPgServer({ server_id: pgServer.id, database: dbName })
 	]);
 
 	const ec2Result = ec2Test.status === 'fulfilled' ? ec2Test.value : { ok: false, error: String(ec2Test.reason) };

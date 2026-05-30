@@ -243,6 +243,9 @@ func runPgbenchStep(
 	pool *pgxpool.Pool,
 	snapshots map[string][]result.SnapshotRow,
 	intervalSecs int,
+	snapTables []plan.SnapTableSpec,
+	pgLocksEnabled bool,
+	pgLocksIntervalSecs int,
 ) (pgbenchResult, error) {
 	server := opts.Plan.Server
 	var res pgbenchResult
@@ -317,7 +320,7 @@ func runPgbenchStep(
 	}
 
 	// Start snapshot ticker.
-	ticker := NewSnapshotTicker(pool, opts.Plan.EnabledSnapTables, snapshots, intervalSecs, "bench")
+	ticker := NewSnapshotTicker(pool, snapTables, snapshots, intervalSecs, "bench", pgLocksEnabled, pgLocksIntervalSecs)
 	ticker.Start(ctx)
 
 	if err := cmd.Start(); err != nil {
@@ -374,8 +377,16 @@ func runPgbenchStep(
 	}
 	// Stop ticker and take final snapshot.
 	ticker.Stop()
-	_ = collectOnce(ctx, pool, opts.Plan.EnabledSnapTables, "bench", snapshots)
-	collectPgLocksOnce(ctx, pool, "bench", snapshots)
+	_ = collectOnce(ctx, pool, snapTables, "bench", snapshots)
+	collectPgLocksOnce(ctx, pool, "bench", snapshots, pgLocksEnabled)
+
+	// Collect pg_stat_statements at bench end if configured.
+	if opts.Plan.PgStatStep != nil && opts.Plan.PgStatStep.CollectStatements {
+		fakeStep := plan.Step{ID: step.ID}
+		if _, err := runPgStatStatementsCollectStep(ctx, opts, fakeStep, pool, snapshots); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: pg_stat_statements collect: %v\n", err)
+		}
+	}
 
 	if runErr != nil {
 		return res, fmt.Errorf("pgbench exited with error: %w", runErr)

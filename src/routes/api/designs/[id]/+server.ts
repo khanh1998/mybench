@@ -57,7 +57,10 @@ export const PUT: RequestHandler = async ({ params: routeParams, request }) => {
 				 perf_stat_duration, perf_record_duration, perf_trace_duration,
 				 perf_stat_enabled, perf_record_enabled, perf_trace_enabled, perf_delay,
 				 perf_stat_delay, perf_record_delay, perf_trace_delay,
-				 perf_cgroup, perf_events, perf_repeat, perf_freq, perf_call_graph, perf_mmap_pages
+				 perf_cgroup, perf_events, perf_repeat, perf_freq, perf_call_graph, perf_mmap_pages,
+				 pg_stat_tables, pg_stat_interval_seconds, pg_stat_pg_locks_enabled,
+				 pg_stat_pg_locks_interval, pg_stat_reset_stats, pg_stat_reset_statements,
+				 pg_stat_collect_statements
 			 )
        VALUES (
 				 @id, @design_id, @position, @name, @type, @script, @pgbench_options, @enabled,
@@ -65,7 +68,10 @@ export const PUT: RequestHandler = async ({ params: routeParams, request }) => {
 				 @perf_stat_duration, @perf_record_duration, @perf_trace_duration,
 				 @perf_stat_enabled, @perf_record_enabled, @perf_trace_enabled, @perf_delay,
 				 @perf_stat_delay, @perf_record_delay, @perf_trace_delay,
-				 @perf_cgroup, @perf_events, @perf_repeat, @perf_freq, @perf_call_graph, @perf_mmap_pages
+				 @perf_cgroup, @perf_events, @perf_repeat, @perf_freq, @perf_call_graph, @perf_mmap_pages,
+				 @pg_stat_tables, @pg_stat_interval_seconds, @pg_stat_pg_locks_enabled,
+				 @pg_stat_pg_locks_interval, @pg_stat_reset_stats, @pg_stat_reset_statements,
+				 @pg_stat_collect_statements
 			 )
        ON CONFLICT(id) DO UPDATE SET
          position=excluded.position, name=excluded.name, type=excluded.type,
@@ -85,7 +91,14 @@ export const PUT: RequestHandler = async ({ params: routeParams, request }) => {
          perf_cgroup=excluded.perf_cgroup,
          perf_events=excluded.perf_events,
          perf_repeat=excluded.perf_repeat, perf_freq=excluded.perf_freq,
-         perf_call_graph=excluded.perf_call_graph, perf_mmap_pages=excluded.perf_mmap_pages`
+         perf_call_graph=excluded.perf_call_graph, perf_mmap_pages=excluded.perf_mmap_pages,
+         pg_stat_tables=excluded.pg_stat_tables,
+         pg_stat_interval_seconds=excluded.pg_stat_interval_seconds,
+         pg_stat_pg_locks_enabled=excluded.pg_stat_pg_locks_enabled,
+         pg_stat_pg_locks_interval=excluded.pg_stat_pg_locks_interval,
+         pg_stat_reset_stats=excluded.pg_stat_reset_stats,
+         pg_stat_reset_statements=excluded.pg_stat_reset_statements,
+         pg_stat_collect_statements=excluded.pg_stat_collect_statements`
 		);
 		const submittedStepIds = body.steps
 			.map((s: { id?: number }) => s.id)
@@ -124,7 +137,14 @@ export const PUT: RequestHandler = async ({ params: routeParams, request }) => {
 					perf_repeat: s.perf_repeat ?? '',
 					perf_freq: s.perf_freq ?? '',
 					perf_call_graph: s.perf_call_graph ?? 'dwarf',
-					perf_mmap_pages: s.perf_mmap_pages ?? ''
+					perf_mmap_pages: s.perf_mmap_pages ?? '',
+					pg_stat_tables: s.pg_stat_tables ?? '[]',
+					pg_stat_interval_seconds: s.pg_stat_interval_seconds ?? '',
+					pg_stat_pg_locks_enabled: s.pg_stat_pg_locks_enabled ?? 0,
+					pg_stat_pg_locks_interval: s.pg_stat_pg_locks_interval ?? '',
+					pg_stat_reset_stats: s.pg_stat_reset_stats ?? 0,
+					pg_stat_reset_statements: s.pg_stat_reset_statements ?? 0,
+					pg_stat_collect_statements: s.pg_stat_collect_statements ?? 0,
 				});
 				const stepId = (s.id ?? result.lastInsertRowid) as number;
 				deleteScripts.run(stepId);

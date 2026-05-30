@@ -23,12 +23,6 @@ function createTestDb() {
       perf_events TEXT NOT NULL DEFAULT '',
       perf_status_json TEXT NOT NULL DEFAULT ''
     );
-    CREATE TABLE pg_stat_table_selections (
-      server_id INTEGER NOT NULL REFERENCES pg_servers(id) ON DELETE CASCADE,
-      table_name TEXT NOT NULL,
-      enabled INTEGER NOT NULL DEFAULT 1,
-      PRIMARY KEY (server_id, table_name)
-    );
     CREATE TABLE decisions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
@@ -244,26 +238,19 @@ function exportPlan(db: Database.Database, designId: number) {
 	}
 
 	const enabledSnapTables: Array<{ pg_view_name: string; snap_table_name: string; columns: string[] }> = [];
-	if (design.server_id) {
-		const enabledRows = db.prepare(
-			`SELECT table_name FROM pg_stat_table_selections WHERE server_id = ? AND enabled = 1`
-		).all(design.server_id) as { table_name: string }[];
-
-		for (const row of enabledRows) {
-			const pgViewName = row.table_name;
-			const snapTableName = SNAP_TABLE_MAP[pgViewName];
-			if (!snapTableName) continue;
-			let columns: string[] = [];
-			try {
-				const pragmaRows = db.prepare(`PRAGMA table_info(${snapTableName})`).all() as { name: string }[];
-				if (pragmaRows.length > 0) {
-					columns = pragmaRows.map(r => r.name).filter(name => !EXCLUDED_SNAP_COLS.has(name));
-				}
-			} catch {
-				// table doesn't exist
+	for (const pgViewName of Object.keys(SNAP_TABLE_MAP)) {
+		const snapTableName = SNAP_TABLE_MAP[pgViewName];
+		if (!snapTableName) continue;
+		let columns: string[] = [];
+		try {
+			const pragmaRows = db.prepare(`PRAGMA table_info(${snapTableName})`).all() as { name: string }[];
+			if (pragmaRows.length > 0) {
+				columns = pragmaRows.map(r => r.name).filter(name => !EXCLUDED_SNAP_COLS.has(name));
 			}
-			enabledSnapTables.push({ pg_view_name: pgViewName, snap_table_name: snapTableName, columns });
+		} catch {
+			// table doesn't exist
 		}
+		enabledSnapTables.push({ pg_view_name: pgViewName, snap_table_name: snapTableName, columns });
 	}
 	if (steps.some(s => s.type === 'pg_stat_statements_collect')) {
 		let columns: string[] = [];
@@ -309,9 +296,6 @@ function seedDb(db: Database.Database) {
 	db.prepare(`INSERT INTO design_steps (id, design_id, position, name, type, script, pgbench_options, enabled, duration_secs, no_transaction) VALUES (4, 1, 3, 'Collect statements', 'pg_stat_statements_collect', '', '', 1, 0, 0)`).run();
 	db.prepare(`INSERT INTO pgbench_scripts (id, step_id, position, name, weight, script) VALUES (1, 3, 0, 'main', 100, 'SELECT 1;')`).run();
 	db.prepare(`INSERT INTO design_params (id, design_id, position, name, value) VALUES (1, 1, 0, 'scale', '10')`).run();
-	db.prepare(`INSERT INTO pg_stat_table_selections (server_id, table_name, enabled) VALUES (1, 'pg_stat_database', 1)`).run();
-	db.prepare(`INSERT INTO pg_stat_table_selections (server_id, table_name, enabled) VALUES (1, 'pg_stat_bgwriter', 1)`).run();
-	db.prepare(`INSERT INTO pg_stat_table_selections (server_id, table_name, enabled) VALUES (1, 'pg_stat_checkpointer', 1)`).run();
 }
 
 // ---------------------------------------------------------------------------

@@ -14,10 +14,8 @@ import {
 } from '$lib/server/services/ec2-servers';
 import {
 	deletePgServer,
-	getPgServerTableSelections,
 	listPgServers,
 	savePgServer,
-	setPgServerTableSelections,
 	testPgServer
 } from '$lib/server/services/pg-servers';
 
@@ -323,7 +321,7 @@ and the recommended workflow for creating and running a benchmark plan.`
 	server.registerTool(
 		'test_pg_server',
 		{
-			description: 'Tests a PostgreSQL connection. If server_id is provided, tests the saved connection; otherwise tests the provided fields without saving. Saved-connection tests can also discover and populate pg_stat table selections like the Settings screen.',
+			description: 'Tests a PostgreSQL connection. If server_id is provided, tests the saved connection; otherwise tests the provided fields without saving.',
 			inputSchema: {
 				server_id: z.number().int().optional().describe('Optional saved PostgreSQL connection ID'),
 				host: z.string().optional().describe('Required when server_id is omitted'),
@@ -331,57 +329,12 @@ and the recommended workflow for creating and running a benchmark plan.`
 				username: z.string().optional(),
 				password: z.string().optional(),
 				ssl: z.boolean().optional(),
-				database: z.string().optional().describe('Database name to test against; defaults to "postgres"'),
-				populate_table_selections: z.boolean().optional().describe('When testing a saved connection, discover and sync pg_stat table selections (default true)')
+				database: z.string().optional().describe('Database name to test against; defaults to "postgres"')
 			}
 		},
-		async ({ server_id, host, port, username, password, ssl, database, populate_table_selections }) => {
+		async ({ server_id, host, port, username, password, ssl, database }) => {
 			try {
-				return text(await testPgServer({ server_id, host, port, username, password, ssl, database, populate_table_selections }));
-			} catch (err) {
-				return text({ error: err instanceof Error ? err.message : String(err) });
-			}
-		}
-	);
-
-	server.registerTool(
-		'get_pg_server_table_selections',
-		{
-			description: 'Returns the saved pg_stat table selections for a PostgreSQL connection. Use test_pg_server(server_id) first to discover and initialize them.',
-			inputSchema: {
-				server_id: z.number().int()
-			}
-		},
-		async ({ server_id }) => {
-			try {
-				return text({
-					server_id,
-					table_selections: getPgServerTableSelections(server_id).map((row) => ({
-						table_name: row.table_name,
-						enabled: !!row.enabled
-					}))
-				});
-			} catch (err) {
-				return text({ error: err instanceof Error ? err.message : String(err) });
-			}
-		}
-	);
-
-	server.registerTool(
-		'set_pg_server_table_selections',
-		{
-			description: 'Updates the enabled/disabled pg_stat table selections for a saved PostgreSQL connection.',
-			inputSchema: {
-				server_id: z.number().int(),
-				selections: z.array(z.object({
-					table_name: z.string(),
-					enabled: z.boolean()
-				})).describe('Complete or partial list of table selections to update')
-			}
-		},
-		async ({ server_id, selections }) => {
-			try {
-				return text(setPgServerTableSelections(server_id, selections));
+				return text(await testPgServer({ server_id, host, port, username, password, ssl, database }));
 			} catch (err) {
 				return text({ error: err instanceof Error ? err.message : String(err) });
 			}
@@ -1080,15 +1033,12 @@ Use this after validating the plan with run_design.`,
 			}
 
 			const enabledSnapTables: { pg_view_name: string; snap_table_name: string; columns: string[] }[] = [];
-			if (design.server_id) {
-				const enabled = db.prepare('SELECT table_name FROM pg_stat_table_selections WHERE server_id = ? AND enabled = 1').all(design.server_id) as { table_name: string }[];
-				for (const { table_name } of enabled) {
-					const snapTable = SNAP_TABLE_MAP[table_name];
-					if (!snapTable) continue;
-					let cols: string[] = [];
-					try { cols = (db.prepare(`PRAGMA table_info(${snapTable})`).all() as { name: string }[]).map(r => r.name).filter(n => !EXCLUDED_SNAP_COLS.has(n)); } catch { /* not yet created */ }
-					enabledSnapTables.push({ pg_view_name: table_name, snap_table_name: snapTable, columns: cols });
-				}
+			for (const table_name of Object.keys(SNAP_TABLE_MAP)) {
+				const snapTable = SNAP_TABLE_MAP[table_name];
+				if (!snapTable) continue;
+				let cols: string[] = [];
+				try { cols = (db.prepare(`PRAGMA table_info(${snapTable})`).all() as { name: string }[]).map(r => r.name).filter(n => !EXCLUDED_SNAP_COLS.has(n)); } catch { /* not yet created */ }
+				enabledSnapTables.push({ pg_view_name: table_name, snap_table_name: snapTable, columns: cols });
 			}
 			if (steps.some((step) => step.type === 'pg_stat_statements_collect')) {
 				let cols: string[] = [];

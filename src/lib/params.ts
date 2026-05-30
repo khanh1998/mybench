@@ -36,6 +36,8 @@ export interface DesignLike {
 		perf_freq?: string;
 		perf_mmap_pages?: string;
 		pgbench_scripts?: { name: string; weight?: number; weight_expr?: string | null; script: string }[];
+		pg_stat_interval_seconds?: string;
+		pg_stat_pg_locks_interval?: string;
 	}[];
 }
 
@@ -154,6 +156,18 @@ export function validateDesignParams(design: DesignLike): ValidationError[] {
 		if (step.perf_mmap_pages) {
 			for (const ph of findPlaceholders(step.perf_mmap_pages)) {
 				if (!defined.has(ph)) errors.push({ step: step.name, script: 'perf mmap pages', placeholder: ph });
+			}
+		}
+		if (step.type === 'pg_stat') {
+			if (step.pg_stat_interval_seconds) {
+				for (const ph of findPlaceholders(step.pg_stat_interval_seconds)) {
+					if (!defined.has(ph)) errors.push({ step: step.name, script: 'pg_stat interval', placeholder: ph });
+				}
+			}
+			if (step.pg_stat_pg_locks_interval) {
+				for (const ph of findPlaceholders(step.pg_stat_pg_locks_interval)) {
+					if (!defined.has(ph)) errors.push({ step: step.name, script: 'pg_locks interval', placeholder: ph });
+				}
 			}
 		}
 		// Also validate placeholders in weight expressions

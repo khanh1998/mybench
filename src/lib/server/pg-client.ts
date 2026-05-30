@@ -60,29 +60,3 @@ export async function testConnection(server: PgServer, database: string = 'postg
 	}
 }
 
-export async function discoverPgStatTables(server: PgServer, database: string = 'postgres'): Promise<{ tables: string[]; versionNum: number }> {
-	const pool = new pg.Pool({
-		host: server.host,
-		port: server.port,
-		user: server.username,
-		password: server.password,
-		database,
-		ssl: sslConfig(server),
-		max: 1,
-		connectionTimeoutMillis: 5000
-	});
-	try {
-		const verResult = await pool.query(`SELECT current_setting('server_version_num')::int AS ver`);
-		const versionNum: number = verResult.rows[0].ver;
-
-		const result = await pool.query(`
-      SELECT viewname FROM pg_catalog.pg_views
-      WHERE schemaname = 'pg_catalog' AND viewname LIKE 'pg_stat%'
-      ORDER BY viewname
-    `);
-		const tables: string[] = result.rows.map((r: { viewname: string }) => r.viewname);
-		return { tables, versionNum };
-	} finally {
-		await pool.end();
-	}
-}

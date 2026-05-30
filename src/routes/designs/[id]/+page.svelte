@@ -5,6 +5,7 @@
   import CodeEditor from '$lib/CodeEditor.svelte';
   import { getRunnablePgbenchScripts, validateDesignParams, validateScriptWeights, resolveScriptWeight, type ValidationError, type WeightError } from '$lib/params';
   import type { DesignStepType } from '$lib/types';
+  import { SUPPORTED_SNAP_TABLES } from '$lib/snap-tables';
   import type { PageData } from './$types';
 
   let { data }: { data: PageData } = $props();
@@ -58,6 +59,14 @@
     perf_mmap_pages: string;
     enabled: number;
     pgbench_scripts?: PgbenchScript[];
+    // pg_stat step fields
+    pg_stat_tables: string;
+    pg_stat_interval_seconds: string;
+    pg_stat_pg_locks_enabled: number;
+    pg_stat_pg_locks_interval: string;
+    pg_stat_reset_stats: number;
+    pg_stat_reset_statements: number;
+    pg_stat_collect_statements: number;
   }
   interface Design {
     id: number; decision_id: number; name: string; description: string;
@@ -94,15 +103,22 @@
   let importError = $state('');
   let importing = $state(false);
 
+  // All supported pg_stat tables (PG18, hardcoded — no per-server filtering needed)
+  const availableSnapTables: readonly string[] = SUPPORTED_SNAP_TABLES;
+
   const STEP_TYPE_OPTIONS: { value: DesignStepType; label: string }[] = [
     { value: 'sql', label: 'SQL' },
     { value: 'pgbench', label: 'pgbench' },
     { value: 'sysbench', label: 'sysbench' },
     { value: 'perf', label: 'perf' },
-    { value: 'collect', label: 'wait' },
-    { value: 'pg_stat_statements_reset', label: 'reset pg_stat_statements' },
-    { value: 'pg_stat_statements_collect', label: 'collect pg_stat_statements' }
+    { value: 'pg_stat', label: 'pg_stat' },
   ];
+  // Labels for legacy step types that may still exist in saved designs
+  const LEGACY_STEP_LABELS: Partial<Record<DesignStepType, string>> = {
+    collect: 'wait (legacy)',
+    pg_stat_statements_reset: 'reset pss (legacy)',
+    pg_stat_statements_collect: 'collect pss (legacy)',
+  };
   // Run history panel
   let runsCollapsed = $state(false);
   let runsHeight = $state(280);
@@ -469,7 +485,9 @@
   const isValid = $derived(validationErrors.length === 0 && weightErrors.length === 0 && !hasScriptWeightErrors && !hasPerfDurationErrors);
 
   function stepTypeLabel(type: DesignStepType): string {
-    return STEP_TYPE_OPTIONS.find((option) => option.value === type)?.label ?? type;
+    const found = STEP_TYPE_OPTIONS.find((option) => option.value === type);
+    if (found) return found.label;
+    return LEGACY_STEP_LABELS[type] ?? type;
   }
 
   async function save() {
@@ -602,6 +620,13 @@
       perf_freq: '',
       perf_call_graph: 'dwarf',
       perf_mmap_pages: '',
+      pg_stat_tables: '[]',
+      pg_stat_interval_seconds: '',
+      pg_stat_pg_locks_enabled: 0,
+      pg_stat_pg_locks_interval: '',
+      pg_stat_reset_stats: 1,
+      pg_stat_reset_statements: 1,
+      pg_stat_collect_statements: 1,
       enabled: 1,
       pgbench_scripts: []
     };
@@ -1262,6 +1287,8 @@
           </label>
         {:else if selectedStep.type === 'perf'}
           <span class="no-txn-label">DB host perf</span>
+        {:else if selectedStep.type === 'pg_stat'}
+          <!-- no extra badge for pg_stat -->
         {:else}
           <label class="no-txn-label" title="Run statements outside a transaction block — required for VACUUM, CREATE INDEX CONCURRENTLY, etc.">
             <input
@@ -1488,6 +1515,129 @@
             <br>This is a one-time collection step, not a time-series snapshot.
             <br>Place it after pgbench to capture the workload you just ran.
           </div>
+        </div>
+      {:else if selectedStep.type === 'pg_stat'}
+        {@const poolTables = availableSnapTables as string[]}
+        {@const selectedTables = (() => { try { return JSON.parse(selectedStep.pg_stat_tables || '[]') as string[]; } catch { return [] as string[]; } })()}
+        <div class="perf-step-panel">
+
+          <!-- Table selection -->
+          <div class="perf-mode-section">
+            <div class="pg-stat-section-header">
+              Tables to collect
+              <span class="pg-stat-section-hint">Postgres 18</span>
+            </div>
+            {#if poolTables.length === 0}
+              <p style="color:#888;font-size:12px;margin:0">No supported tables found.</p>
+            {:else}
+              <div class="snap-table-grid">
+                {#each poolTables as tableName}
+                  <label class="snap-table-item">
+                    <input
+                      type="checkbox"
+                      checked={selectedTables.length === 0 || selectedTables.includes(tableName)}
+                      onchange={(e) => {
+                        const checked = (e.currentTarget as HTMLInputElement).checked;
+                        let current: string[] = [];
+                        try { current = JSON.parse(selectedStep!.pg_stat_tables || '[]'); } catch { /* empty */ }
+                        if (current.length === 0) {
+                          current = checked ? poolTables : poolTables.filter(t => t !== tableName);
+                        } else {
+                          current = checked ? [...current, tableName] : current.filter(t => t !== tableName);
+                          if (current.length === poolTables.length) current = [];
+                        }
+                        selectedStep!.pg_stat_tables = JSON.stringify(current);
+                      }}
+                    />
+                    {tableName}{tableName === 'pg_stat_statements' ? ' *' : ''}
+                  </label>
+                {/each}
+              </div>
+              <p class="pg-stat-table-hint">
+                {selectedTables.length === 0
+                  ? '✓ all available tables'
+                  : `${selectedTables.length} of ${poolTables.length} selected`}
+                {' · '}* collected once at bench end
+              </p>
+            {/if}
+          </div>
+
+          <!-- Snapshot interval + Actions row -->
+          <div class="pg-stat-row">
+            <!-- Snapshot interval -->
+            <div class="perf-mode-section pg-stat-interval-box">
+              <div class="pg-stat-section-header">Snapshot interval</div>
+              <label style="font-weight:400">
+                <input
+                  bind:value={selectedStep.pg_stat_interval_seconds}
+                  placeholder="30 or {`{{INTERVAL}}`}"
+                  spellcheck="false"
+                />
+                {#if resolveParamPreview(selectedStep.pg_stat_interval_seconds)}
+                  {@const preview = resolveParamPreview(selectedStep.pg_stat_interval_seconds)!}
+                  <span class="param-preview" class:param-preview-error={preview.unresolved.length > 0}>
+                    {preview.unresolved.length > 0 ? `unresolved: ${preview.unresolved.join(', ')}` : `→ ${preview.text}`}
+                  </span>
+                {/if}
+              </label>
+            </div>
+
+            <!-- Actions -->
+            <div class="perf-mode-section pg-stat-actions-box">
+              <div class="pg-stat-section-header">
+                Actions
+                <span class="pg-stat-section-hint">fire when step executes</span>
+              </div>
+              <label class="perf-enable-toggle">
+                <input
+                  type="checkbox"
+                  checked={!!selectedStep.pg_stat_reset_stats}
+                  onchange={(e) => { selectedStep!.pg_stat_reset_stats = (e.currentTarget as HTMLInputElement).checked ? 1 : 0; }}
+                />
+                pg_stat_reset()
+              </label>
+              <label class="perf-enable-toggle">
+                <input
+                  type="checkbox"
+                  checked={!!selectedStep.pg_stat_reset_statements}
+                  onchange={(e) => { selectedStep!.pg_stat_reset_statements = (e.currentTarget as HTMLInputElement).checked ? 1 : 0; }}
+                />
+                pg_stat_statements_reset()
+              </label>
+            </div>
+          </div>
+
+          <!-- pg_locks -->
+          <div class="perf-mode-section" class:perf-mode-disabled={!selectedStep.pg_stat_pg_locks_enabled}>
+            <div class="pg-stat-section-header">pg_locks snapshots</div>
+            <label class="perf-enable-toggle">
+              <input
+                type="checkbox"
+                checked={!!selectedStep.pg_stat_pg_locks_enabled}
+                onchange={(e) => { selectedStep!.pg_stat_pg_locks_enabled = (e.currentTarget as HTMLInputElement).checked ? 1 : 0; }}
+              />
+              Enable pg_locks collection
+              <span class="pg-stat-section-hint" style="margin-left:4px">warning: high row volume under load</span>
+            </label>
+            {#if selectedStep.pg_stat_pg_locks_enabled}
+              <label>
+                pg_locks interval (s)
+                <span style="color:#888;font-size:11px;font-weight:400"> — leave empty to use snapshot interval</span>
+                <input
+                  bind:value={selectedStep.pg_stat_pg_locks_interval}
+                  placeholder="e.g. 60 or {`{{LOCKS_INTERVAL}}`}"
+                  spellcheck="false"
+                />
+                {#if resolveParamPreview(selectedStep.pg_stat_pg_locks_interval)}
+                  {@const preview = resolveParamPreview(selectedStep.pg_stat_pg_locks_interval)!}
+                  <span class="param-preview" class:param-preview-error={preview.unresolved.length > 0}>
+                    {preview.unresolved.length > 0 ? `unresolved: ${preview.unresolved.join(', ')}` : `→ ${preview.text}`}
+                  </span>
+                {/if}
+              </label>
+            {/if}
+          </div>
+
         </div>
       {:else if selectedStep.type === 'sysbench'}
         <div class="editor-wrap">
@@ -1805,6 +1955,65 @@
     color: #666;
     font-weight: 600;
     white-space: nowrap;
+  }
+
+  .snap-table-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 4px 12px;
+  }
+  .snap-table-item {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 400;
+    color: #ccc;
+    cursor: pointer;
+    padding: 2px 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* .perf-step-panel label has flex-direction:column — override it for table checkboxes */
+  .perf-step-panel .snap-table-item {
+    flex-direction: row;
+    align-items: center;
+  }
+  .snap-table-item input[type="checkbox"] {
+    flex-shrink: 0;
+    width: auto;
+    margin: 0;
+  }
+  .pg-stat-section-header {
+    font-size: 12px;
+    font-weight: 700;
+    color: #cfcfcf;
+    margin-bottom: 6px;
+  }
+  .pg-stat-section-hint {
+    font-weight: 400;
+    color: #666;
+    font-size: 11px;
+    margin-left: 6px;
+  }
+  .pg-stat-table-hint {
+    font-size: 11px;
+    color: #888;
+    margin: 6px 0 0;
+  }
+  .pg-stat-row {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    gap: 10px;
+    align-items: start;
+  }
+  .pg-stat-interval-box {
+    gap: 8px !important;
+  }
+  .pg-stat-actions-box {
+    gap: 8px !important;
   }
 
   .perf-step-panel {

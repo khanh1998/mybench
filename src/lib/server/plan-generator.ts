@@ -63,6 +63,10 @@ export function generatePlan(designId: number, overrides: PlanRunSettingsOverrid
 			type: s.type,
 			enabled: !!s.enabled
 		};
+		if (s.type === 'pg_stat') {
+			// Config is carried at plan level in pg_stat_step; step just needs identity fields
+			return { ...base };
+		}
 		if (s.type === 'perf') {
 			return {
 				...base,
@@ -195,54 +199,67 @@ export function generatePlan(designId: number, overrides: PlanRunSettingsOverrid
 		}
 	}
 
-	// Load enabled snap tables for this server
-	const enabledSnapTables: Array<{ pg_view_name: string; snap_table_name: string; columns: string[] }> = [];
-	if (resolvedServerId) {
-		const enabledRows = db.prepare(
-			`SELECT table_name FROM pg_stat_table_selections WHERE server_id = ? AND enabled = 1`
-		).all(resolvedServerId) as { table_name: string }[];
-
-		for (const row of enabledRows) {
-			const pgViewName = row.table_name;
-			const snapTableName = SNAP_TABLE_MAP[pgViewName];
-			if (!snapTableName) continue;
-
-			let columns: string[] = [];
-			try {
-				const pragmaRows = db.prepare(`PRAGMA table_info(${snapTableName})`).all() as { name: string }[];
-				if (pragmaRows.length > 0) {
-					columns = pragmaRows
-						.map(r => r.name)
-						.filter(name => !EXCLUDED_SNAP_COLS.has(name));
-				}
-			} catch {
-				// Table doesn't exist yet — fall back to empty columns
-			}
-
-			enabledSnapTables.push({
-				pg_view_name: pgViewName,
-				snap_table_name: snapTableName,
-				columns
-			});
+	// Helper: get columns for a snap table via PRAGMA
+	function getSnapColumns(snapTableName: string): string[] {
+		try {
+			const pragmaRows = db.prepare(`PRAGMA table_info(${snapTableName})`).all() as { name: string }[];
+			return pragmaRows.map(r => r.name).filter(name => !EXCLUDED_SNAP_COLS.has(name));
+		} catch {
+			return [];
 		}
 	}
 
-	if (steps.some((step) => step.type === 'pg_stat_statements_collect')) {
-		let columns: string[] = [];
-		try {
-			const pragmaRows = db.prepare(`PRAGMA table_info(snap_pg_stat_statements)`).all() as { name: string }[];
-			if (pragmaRows.length > 0) {
-				columns = pragmaRows.map((r) => r.name).filter((name) => !EXCLUDED_SNAP_COLS.has(name));
-			}
-		} catch {
-			// table doesn't exist yet
+	// Helper: resolve {{PARAM}} expressions using effectiveParams
+	function resolveParamExpr(expr: string): string {
+		return expr.replace(/\{\{(\w+)\}\}/g, (_, name) =>
+			effectiveParams.find(p => p.name === name)?.value ?? `{{${name}}}`
+		);
+	}
+
+	// Build snap table + pg_stat_step config from the pg_stat step (opt-in collection)
+	const pgStatStep = steps.find(s => s.type === 'pg_stat');
+	const resolvedSnapTables: Array<{ pg_view_name: string; snap_table_name: string; columns: string[] }> = [];
+	let pgStatStepConfig: object | null = null;
+
+	if (pgStatStep) {
+		// 1. Parse step's table selection (empty = all supported)
+		let selected: string[] = [];
+		try { selected = JSON.parse(pgStatStep.pg_stat_tables || '[]'); } catch { /* keep empty */ }
+
+		// 2. All supported tables are hardcoded (PG18); no per-server filtering needed
+		const allSupported = new Set(Object.keys(SNAP_TABLE_MAP));
+		const tablesToCollect = selected.length > 0
+			? selected.filter(t => allSupported.has(t))
+			: [...allSupported];
+
+		// 3. pg_stat_statements is special: collected once at bench end, not on interval.
+		//    If it's in the selection, set collect_statements=true and exclude from snap_tables.
+		const collectStatements = tablesToCollect.includes('pg_stat_statements');
+		const intervalTables = tablesToCollect.filter(t => t !== 'pg_stat_statements');
+
+		for (const pgViewName of intervalTables) {
+			const snapTableName = SNAP_TABLE_MAP[pgViewName];
+			if (!snapTableName) continue;
+			resolvedSnapTables.push({ pg_view_name: pgViewName, snap_table_name: snapTableName, columns: getSnapColumns(snapTableName) });
 		}
 
-		enabledSnapTables.push({
-			pg_view_name: 'pg_stat_statements',
-			snap_table_name: 'snap_pg_stat_statements',
-			columns
-		});
+		// 4. Resolve {{PARAM}} in interval fields
+		const intervalSecs = Math.max(5, parseInt(resolveParamExpr(pgStatStep.pg_stat_interval_seconds || '30'), 10) || 30);
+		const pgLocksIntervalSecs = parseInt(resolveParamExpr(pgStatStep.pg_stat_pg_locks_interval || ''), 10) || 0;
+
+		// 5. pg_stat_statements columns (only needed when collecting at bench end)
+		const pssColumns = collectStatements ? getSnapColumns('snap_pg_stat_statements') : [];
+
+		pgStatStepConfig = {
+			interval_seconds: intervalSecs,
+			snap_tables: resolvedSnapTables,
+			pg_locks_enabled: !!pgStatStep.pg_stat_pg_locks_enabled,
+			pg_locks_interval_seconds: pgLocksIntervalSecs,
+			reset_stats: !!pgStatStep.pg_stat_reset_stats,
+			reset_statements: !!pgStatStep.pg_stat_reset_statements,
+			collect_statements: collectStatements,
+			pg_stat_statements_columns: pssColumns,
+		};
 	}
 
 	return {
@@ -259,6 +276,7 @@ export function generatePlan(designId: number, overrides: PlanRunSettingsOverrid
 		params: effectiveParams,
 		profiles,
 		steps: stepsWithScripts,
-		enabled_snap_tables: enabledSnapTables
+		enabled_snap_tables: resolvedSnapTables,  // backward compat — same data as pg_stat_step.snap_tables
+		pg_stat_step: pgStatStepConfig,           // null = no collection
 	};
 }

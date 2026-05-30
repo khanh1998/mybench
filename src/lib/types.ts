@@ -5,7 +5,8 @@ export type DesignStepType =
 	| 'collect'
 	| 'pg_stat_statements_reset'
 	| 'pg_stat_statements_collect'
-	| 'perf';
+	| 'perf'
+	| 'pg_stat';
 
 export interface PgServer {
 	id: number;
@@ -129,6 +130,14 @@ export interface DesignStep {
 	perf_mmap_pages: string;
 	enabled: number; // 0 or 1
 	pgbench_scripts?: PgbenchScript[];
+	// pg_stat step fields
+	pg_stat_tables: string;              // JSON array of table names, '' or '[]' = all available
+	pg_stat_interval_seconds: string;    // TEXT, supports {{PARAM}}
+	pg_stat_pg_locks_enabled: number;    // 0 | 1
+	pg_stat_pg_locks_interval: string;   // TEXT, supports {{PARAM}}, empty = use snap interval
+	pg_stat_reset_stats: number;         // 0 | 1 — fires pg_stat_reset()
+	pg_stat_reset_statements: number;    // 0 | 1 — fires pg_stat_statements_reset()
+	pg_stat_collect_statements: number;  // 0 | 1 — collect pg_stat_statements at bench end
 }
 
 export type RunStatus = 'running' | 'completed' | 'failed' | 'stopped' | 'pending';

@@ -2,17 +2,31 @@ package plan
 
 // Plan is the top-level structure parsed from plan.json.
 type Plan struct {
-	Version           int             `json:"version"`
-	ExportedAt        string          `json:"exported_at"`
-	DesignID          int             `json:"design_id"`
-	DesignName        string          `json:"design_name"`
-	Server            ServerConfig    `json:"server"`
-	RunSettings       RunSettings     `json:"run_settings"`
-	Params            []Param         `json:"params"`
-	Profiles          []Profile       `json:"profiles,omitempty"`
-	ProfileName       string          `json:"profile_name,omitempty"`
-	Steps             []Step          `json:"steps"`
-	EnabledSnapTables []SnapTableSpec `json:"enabled_snap_tables"`
+	Version           int                `json:"version"`
+	ExportedAt        string             `json:"exported_at"`
+	DesignID          int                `json:"design_id"`
+	DesignName        string             `json:"design_name"`
+	Server            ServerConfig       `json:"server"`
+	RunSettings       RunSettings        `json:"run_settings"`
+	Params            []Param            `json:"params"`
+	Profiles          []Profile          `json:"profiles,omitempty"`
+	ProfileName       string             `json:"profile_name,omitempty"`
+	Steps             []Step             `json:"steps"`
+	EnabledSnapTables []SnapTableSpec    `json:"enabled_snap_tables"` // backward compat
+	PgStatStep        *PgStatStepConfig  `json:"pg_stat_step,omitempty"`
+}
+
+// PgStatStepConfig holds resolved pg_stat collection config from the pg_stat step.
+// Nil means no pg_stat collection for this run.
+type PgStatStepConfig struct {
+	IntervalSeconds         int             `json:"interval_seconds"`
+	SnapTables              []SnapTableSpec `json:"snap_tables"`
+	PgLocksEnabled          bool            `json:"pg_locks_enabled"`
+	PgLocksIntervalSeconds  int             `json:"pg_locks_interval_seconds"` // 0 = use IntervalSeconds
+	ResetStats              bool            `json:"reset_stats"`
+	ResetStatements         bool            `json:"reset_statements"`
+	CollectStatements       bool            `json:"collect_statements"`
+	PgStatStatementsColumns []string        `json:"pg_stat_statements_columns,omitempty"`
 }
 
 // Profile is a named set of param overrides exported from the web UI.
@@ -65,7 +79,7 @@ type Step struct {
 	ID                 int             `json:"id"`
 	Position           int             `json:"position"`
 	Name               string          `json:"name"`
-	Type               string          `json:"type"` // "sql", "pgbench", "collect", "pg_stat_statements_reset", "pg_stat_statements_collect"
+	Type               string          `json:"type"` // "sql", "pgbench", "sysbench", "pg_stat", "perf", "collect", "pg_stat_statements_reset", "pg_stat_statements_collect"
 	Enabled            bool            `json:"enabled"`
 	Script             string          `json:"script,omitempty"`
 	NoTransaction      bool            `json:"no_transaction,omitempty"`

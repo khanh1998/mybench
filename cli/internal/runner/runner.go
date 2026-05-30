@@ -206,6 +206,30 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 				stepRes.Log = msg
 			}
 
+		case "pg_stat":
+			opts.logInfo("[pg_stat] %s (instant)", step.Name)
+			var pgStatLog string
+			if opts.Plan.PgStatStep != nil {
+				cfg := opts.Plan.PgStatStep
+				if cfg.ResetStats {
+					if _, err := pool.Exec(ctx, "SELECT pg_stat_reset()"); err != nil {
+						fmt.Fprintf(os.Stderr, "warning: pg_stat_reset(): %v\n", err)
+					} else {
+						pgStatLog += "pg_stat_reset() OK\n"
+					}
+				}
+				if cfg.ResetStatements {
+					msg, err := runPgStatStatementsResetStep(ctx, opts, pool)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "warning: pg_stat_statements_reset: %v\n", err)
+					} else {
+						pgStatLog += msg + "\n"
+					}
+				}
+			}
+			stepRes.Command = "pg_stat"
+			stepRes.Log = strings.TrimSpace(pgStatLog)
+
 		case "perf":
 			modes := enabledPerfModes(step)
 			opts.logInfo("[perf %s] %s (non-blocking)", strings.Join(modes, ","), step.Name)
@@ -245,7 +269,8 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 			opts.logInfo("[pgbench] %s", step.Name)
 			benchStartTime = time.Now().UTC()
 			res.Run.BenchStartedAt = benchStartTime.Format(time.RFC3339)
-			pbRes, err := runPgbenchStep(ctx, opts, step, pool, res.Snapshots, opts.Plan.RunSettings.SnapshotIntervalSeconds)
+			snapTables, pgLocksEnabled, pgLocksIntervalSecs, snapIntervalSecs := resolvePgStatConfig(opts)
+			pbRes, err := runPgbenchStep(ctx, opts, step, pool, res.Snapshots, snapIntervalSecs, snapTables, pgLocksEnabled, pgLocksIntervalSecs)
 			benchEndTime = time.Now().UTC()
 			seenPgbench = true
 			stepRes.Command = pbRes.Command
@@ -282,7 +307,8 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 			opts.logInfo("[sysbench] %s", step.Name)
 			benchStartTime = time.Now().UTC()
 			res.Run.BenchStartedAt = benchStartTime.Format(time.RFC3339)
-			sbRes, err := runSysbenchStep(ctx, opts, step, pool, res.Snapshots, opts.Plan.RunSettings.SnapshotIntervalSeconds)
+			snapTables, pgLocksEnabled, pgLocksIntervalSecs, snapIntervalSecs := resolvePgStatConfig(opts)
+			sbRes, err := runSysbenchStep(ctx, opts, step, pool, res.Snapshots, snapIntervalSecs, snapTables, pgLocksEnabled, pgLocksIntervalSecs)
 			benchEndTime = time.Now().UTC()
 			seenPgbench = true
 			stepRes.Command = sbRes.Command
@@ -380,6 +406,18 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 	return res, nil
 }
 
+// resolvePgStatConfig returns the snap tables, pg_locks config, and interval to use for
+// pgbench/sysbench steps. When a pg_stat step is present its config takes precedence;
+// otherwise falls back to the plan-level enabled_snap_tables for backward compatibility.
+func resolvePgStatConfig(opts RunOpts) (snapTables []plan.SnapTableSpec, pgLocksEnabled bool, pgLocksIntervalSecs int, snapIntervalSecs int) {
+	if opts.Plan.PgStatStep != nil {
+		cfg := opts.Plan.PgStatStep
+		return cfg.SnapTables, cfg.PgLocksEnabled, cfg.PgLocksIntervalSeconds, cfg.IntervalSeconds
+	}
+	// Backward compat: no pg_stat step → use plan-level tables, no pg_locks, default interval
+	return opts.Plan.EnabledSnapTables, false, 0, opts.Plan.RunSettings.SnapshotIntervalSeconds
+}
+
 // tailFile reads the last n lines from path. Best-effort: returns "" on any error.
 func tailFile(path string, n int) string {
 	if n <= 0 || path == "" {
@@ -432,7 +470,7 @@ func runCollectStep(
 		if err := collectOnce(ctx, pool, opts.Plan.EnabledSnapTables, phase, snapshots); err != nil {
 			return err
 		}
-		collectPgLocksOnce(ctx, pool, phase, snapshots)
+		collectPgLocksOnce(ctx, pool, phase, snapshots, false) // legacy collect step never collects pg_locks
 
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
