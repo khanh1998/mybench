@@ -298,6 +298,10 @@ export function importResultIntoRun(runId: number, result: RunnerResult): void {
 				_run_id INTEGER
 			)`);
 
+			// Idempotent: clear any existing rows for this run before inserting.
+			// Guards against double-import (e.g. manual status reset + recovery re-run).
+			db.prepare(`DELETE FROM ${snapTableName} WHERE _run_id = ?`).run(runId);
+
 			const existingCols = new Set(
 				(db.prepare(`PRAGMA table_info(${snapTableName})`).all() as { name: string }[]).map(r => r.name)
 			);
@@ -361,6 +365,9 @@ export function importResultIntoRun(runId: number, result: RunnerResult): void {
 				_id INTEGER PRIMARY KEY AUTOINCREMENT,
 				_run_id INTEGER
 			)`);
+
+			// Idempotent: clear any existing rows for this run before inserting.
+			db.prepare(`DELETE FROM ${tableName} WHERE _run_id = ?`).run(runId);
 
 			const existingCols = new Set(
 				(db.prepare(`PRAGMA table_info(${tableName})`).all() as { name: string }[]).map(r => r.name)

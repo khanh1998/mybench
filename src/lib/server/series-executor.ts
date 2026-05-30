@@ -152,6 +152,10 @@ export function startSeries(opts: StartSeriesOptions): number {
 	const ec2Server = db.prepare('SELECT * FROM ec2_servers WHERE id = ?').get(opts.ec2_server_id) as Ec2Server | undefined;
 	if (!ec2Server) throw new Error(`EC2 server ${opts.ec2_server_id} not found`);
 
+	const pgServerSnap = design.server_id
+		? db.prepare('SELECT spec, pg_config FROM pg_servers WHERE id = ?').get(design.server_id) as { spec: string; pg_config: string } | undefined
+		: undefined;
+
 	const seriesToken = randomUUID();
 	db.prepare(`UPDATE benchmark_series SET ec2_run_token=? WHERE id=?`).run(seriesToken, seriesId);
 
@@ -179,12 +183,14 @@ export function startSeries(opts: StartSeriesOptions): number {
 			INSERT INTO benchmark_runs (
 				design_id, database, status, started_at,
 				snapshot_interval_seconds, pre_collect_secs, post_collect_secs,
-				name, profile_name, ec2_server_id, ec2_run_token, series_id
-			) VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				name, profile_name, ec2_server_id, ec2_run_token, series_id,
+				runner_spec, db_spec, db_pg_config
+			) VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`).run(
 			design.id, resolvedDatabase, now,
 			snapshot_interval_seconds, design.pre_collect_secs, design.post_collect_secs,
-			profileName, profileName, opts.ec2_server_id, runToken, seriesId
+			profileName, profileName, opts.ec2_server_id, runToken, seriesId,
+			ec2Server.spec ?? '', pgServerSnap?.spec ?? '', pgServerSnap?.pg_config ?? ''
 		);
 		const runId = insertResult.lastInsertRowid as number;
 

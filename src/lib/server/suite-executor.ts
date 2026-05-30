@@ -237,13 +237,18 @@ async function executeEc2SuiteAsync(
 
 	for (const dc of opts.designs) {
 		const design = db.prepare(`
-			SELECT name, database, pre_collect_secs, post_collect_secs, snapshot_interval_seconds
+			SELECT name, database, pre_collect_secs, post_collect_secs, snapshot_interval_seconds, server_id
 			FROM designs WHERE id = ?
 		`).get(dc.design_id) as {
-			name: string; database: string;
+			name: string; database: string; server_id: number | null;
 			pre_collect_secs: number; post_collect_secs: number; snapshot_interval_seconds: number;
 		} | undefined;
 		if (!design) continue;
+
+		const pgServerId = design.server_id ?? opts.server_id ?? null;
+		const pgServerSnap = pgServerId
+			? db.prepare('SELECT spec, pg_config FROM pg_servers WHERE id = ?').get(pgServerId) as { spec: string; pg_config: string } | undefined
+			: undefined;
 
 		const designName = design.name;
 		const designToken = randomUUID();
@@ -273,12 +278,14 @@ async function executeEc2SuiteAsync(
 				INSERT INTO benchmark_runs (
 					design_id, database, status, started_at,
 					snapshot_interval_seconds, pre_collect_secs, post_collect_secs,
-					name, profile_name, ec2_server_id, ec2_run_token, series_id
-				) VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+					name, profile_name, ec2_server_id, ec2_run_token, series_id,
+					runner_spec, db_spec, db_pg_config
+				) VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			`).run(
 				dc.design_id, resolvedDatabase, now,
 				snapshot_interval_seconds, design.pre_collect_secs, design.post_collect_secs,
-				profileName, profileName, opts.ec2_server_id, runToken, seriesId
+				profileName, profileName, opts.ec2_server_id, runToken, seriesId,
+				ec2Server.spec ?? '', pgServerSnap?.spec ?? '', pgServerSnap?.pg_config ?? ''
 			);
 			const runId = runResult.lastInsertRowid as number;
 

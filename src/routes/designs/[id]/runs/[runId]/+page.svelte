@@ -142,6 +142,28 @@
     }
   }
 
+  interface HostConfig {
+    cpu_model?: string;
+    nproc?: number;
+    mem_total_kb?: number;
+    kernel?: string;
+    swappiness?: number;
+    dirty_background_ratio?: number;
+    dirty_ratio?: number;
+    overcommit_memory?: number;
+    swap_total_kb?: number;
+    hugepagesize_kb?: number;
+    file_max?: number;
+  }
+
+  const hostConfig = $derived(parseJson<HostConfig>(run?.host_config ?? null));
+
+  function fmtMemKb(kb: number): string {
+    if (kb >= 1024 * 1024) return `${(kb / 1024 / 1024).toFixed(1)} GB`;
+    if (kb >= 1024) return `${(kb / 1024).toFixed(0)} MB`;
+    return `${kb} KB`;
+  }
+
   const pgbenchSteps = $derived(run?.steps.filter(s => s.type === 'pgbench') ?? []);
   const sysbenchSteps = $derived(run?.steps.filter(s => s.type === 'sysbench') ?? []);
   const perfSteps = $derived(run?.steps.filter(s => s.perfs?.length > 0) ?? []);
@@ -775,7 +797,7 @@
 
 {/if}
 
-{#if run && (run.runner_spec || run.db_spec || run.db_pg_config)}
+{#if run && (run.runner_spec || run.db_spec || run.db_pg_config || hostConfig)}
   <div class="card" style="margin-bottom:12px">
     <h3 style="margin-bottom:10px">Instance Info</h3>
     <div class="instance-info-grid">
@@ -784,6 +806,31 @@
           <span class="instance-info-label">Runner</span>
           <span class="instance-info-val">{run.runner_spec}</span>
         </div>
+      {/if}
+      {#if hostConfig && !run.runner_spec}
+        {#if hostConfig.cpu_model}
+          <div class="instance-info-row">
+            <span class="instance-info-label">CPU</span>
+            <span class="instance-info-val">{hostConfig.cpu_model}{hostConfig.nproc != null ? ` × ${hostConfig.nproc}` : ''}</span>
+          </div>
+        {:else if hostConfig.nproc != null}
+          <div class="instance-info-row">
+            <span class="instance-info-label">vCPUs</span>
+            <span class="instance-info-val">{hostConfig.nproc}</span>
+          </div>
+        {/if}
+        {#if hostConfig.mem_total_kb != null}
+          <div class="instance-info-row">
+            <span class="instance-info-label">Memory</span>
+            <span class="instance-info-val">{fmtMemKb(hostConfig.mem_total_kb)}{hostConfig.swap_total_kb ? ` + ${fmtMemKb(hostConfig.swap_total_kb)} swap` : ''}</span>
+          </div>
+        {/if}
+        {#if hostConfig.kernel}
+          <div class="instance-info-row">
+            <span class="instance-info-label">Kernel</span>
+            <span class="instance-info-val">{hostConfig.kernel}</span>
+          </div>
+        {/if}
       {/if}
       {#if run.db_spec}
         <div class="instance-info-row">
@@ -795,6 +842,19 @@
         <div class="instance-info-row">
           <span class="instance-info-label">PG config</span>
           <pre class="instance-info-pre">{run.db_pg_config}</pre>
+        </div>
+      {/if}
+      {#if hostConfig && !run.runner_spec && (hostConfig.swappiness != null || hostConfig.dirty_background_ratio != null || hostConfig.overcommit_memory != null)}
+        <div class="instance-info-row">
+          <span class="instance-info-label">OS params</span>
+          <span class="instance-info-val" style="font-size:12px; color:#555">
+            {[
+              hostConfig.swappiness != null ? `swappiness=${hostConfig.swappiness}` : null,
+              hostConfig.dirty_background_ratio != null ? `dirty_bg=${hostConfig.dirty_background_ratio}%` : null,
+              hostConfig.dirty_ratio != null ? `dirty=${hostConfig.dirty_ratio}%` : null,
+              hostConfig.overcommit_memory != null ? `overcommit=${hostConfig.overcommit_memory}` : null,
+            ].filter(Boolean).join('  ')}
+          </span>
         </div>
       {/if}
     </div>

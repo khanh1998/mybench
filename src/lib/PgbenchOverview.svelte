@@ -104,8 +104,12 @@
       const stored = parseJson<PgbenchStepSummary>(step.pgbench_summary_json);
       const storedScripts = parseJson<PgbenchScriptResult[]>(step.pgbench_scripts_json);
       const parsed = parsePgbenchFinalOutput(getOutput(step));
-      const scripts = mergeScripts(storedScripts, parsed.scripts, step);
       const summary = mergeSummary(stored, parsed.summary);
+      let scripts = mergeScripts(storedScripts, parsed.scripts, step);
+      // Single-script runs: pgbench omits per-script blocks, so promote summary stats
+      if (scripts.length === 1 && scripts[0].tps === null && summary) {
+        scripts = [{ ...scripts[0], tps: summary.tps, latency_avg_ms: summary.latency_avg_ms, latency_stddev_ms: summary.latency_stddev_ms, transactions: summary.transactions, failed_transactions: summary.failed_transactions }];
+      }
       return { step_id: step.step_id, step_name: step.name, summary, scripts, snapshotUnavailable: scripts.length > 0 && scripts.every(s => !s.script.trim()) };
     })
   );

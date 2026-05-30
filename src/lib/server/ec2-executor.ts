@@ -95,8 +95,9 @@ export function startEc2Run(
 		Ec2Server | undefined;
 	if (!ec2Server) throw new Error(`EC2 server ${ec2ServerId} not found`);
 
-	const pgServerSnap = design.server_id
-		? db.prepare('SELECT spec, pg_config FROM pg_servers WHERE id = ?').get(design.server_id) as { spec: string; pg_config: string } | undefined
+	const resolvedPgServerId = opts.server_id ?? design.server_id;
+	const pgServerSnap = resolvedPgServerId
+		? db.prepare('SELECT spec, pg_config FROM pg_servers WHERE id = ?').get(resolvedPgServerId) as { spec: string; pg_config: string } | undefined
 		: undefined;
 
 	// Resolve profile name from decision or design profiles table
