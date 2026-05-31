@@ -1575,7 +1575,7 @@
     <h4 class="section-title" style="margin:0">Top SQL</h4>
   </div>
   {#if !anySql}
-    <div class="empty">pg_stat_statements not available — add a <code>pg_stat_statements_collect</code> step to collect query stats.</div>
+    <div class="empty">pg_stat_statements not available — add a <code>pg_stat</code> step and select <code>pg_stat_statements</code> in the table list to collect query stats.</div>
   {:else}
     {@const isSingleSnapshot = runs.every(r => (sqlData[r.id] ?? [])[0]?.snapshot_count === 1)}
     <p class="section-desc">

@@ -226,8 +226,10 @@ export function generatePlan(designId: number, overrides: PlanRunSettingsOverrid
 		let selected: string[] = [];
 		try { selected = JSON.parse(pgStatStep.pg_stat_tables || '[]'); } catch { /* keep empty */ }
 
-		// 2. All supported tables are hardcoded (PG18); no per-server filtering needed
-		const allSupported = new Set(Object.keys(SNAP_TABLE_MAP));
+		// 2. All supported tables are hardcoded (PG18); no per-server filtering needed.
+		//    pg_stat_statements is NOT in SNAP_TABLE_MAP (bench-end only, not interval),
+		//    but must be in allSupported so it survives the filter and drives collect_statements.
+		const allSupported = new Set([...Object.keys(SNAP_TABLE_MAP), 'pg_stat_statements']);
 		const tablesToCollect = selected.length > 0
 			? selected.filter(t => allSupported.has(t))
 			: [...allSupported];
