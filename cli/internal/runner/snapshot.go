@@ -53,6 +53,8 @@ func NewSnapshotTicker(
 }
 
 // Start launches the snapshot goroutine.
+// An initial snapshot is collected immediately (t=0), then on each interval tick.
+// For a 60s bench at 30s interval this yields snapshots at t=0, t=30, t=60.
 func (s *SnapshotTicker) Start(ctx context.Context) {
 	go func() {
 		defer close(s.stopped)
@@ -61,6 +63,24 @@ func (s *SnapshotTicker) Start(ctx context.Context) {
 
 		var lastPgLocksAt time.Time // zero = never collected
 
+		// Collect immediately at t=0 so the first interval gives a real delta.
+		collect := func() {
+			if err := collectOnce(ctx, s.pool, s.snapTables, s.phase, s.snapshots); err != nil {
+				fmt.Printf("warning: snapshot collection error: %v\n", err)
+			}
+			if s.pgLocksEnabled {
+				effectiveInterval := s.pgLocksInterval
+				if effectiveInterval == 0 {
+					effectiveInterval = s.interval
+				}
+				if lastPgLocksAt.IsZero() || time.Since(lastPgLocksAt) >= effectiveInterval {
+					collectPgLocksOnce(ctx, s.pool, s.phase, s.snapshots, true)
+					lastPgLocksAt = time.Now()
+				}
+			}
+		}
+		collect()
+
 		for {
 			select {
 			case <-s.done:
@@ -68,19 +88,7 @@ func (s *SnapshotTicker) Start(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if err := collectOnce(ctx, s.pool, s.snapTables, s.phase, s.snapshots); err != nil {
-					fmt.Printf("warning: snapshot collection error: %v\n", err)
-				}
-				if s.pgLocksEnabled {
-					effectiveInterval := s.pgLocksInterval
-					if effectiveInterval == 0 {
-						effectiveInterval = s.interval
-					}
-					if lastPgLocksAt.IsZero() || time.Since(lastPgLocksAt) >= effectiveInterval {
-						collectPgLocksOnce(ctx, s.pool, s.phase, s.snapshots, true)
-						lastPgLocksAt = time.Now()
-					}
-				}
+				collect()
 			}
 		}
 	}()
