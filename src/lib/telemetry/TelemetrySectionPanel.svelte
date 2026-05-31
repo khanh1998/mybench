@@ -108,7 +108,7 @@
     const title = activeChartMetric?.title ?? section.chartTitle;
     if (activeValueView === 'avg') return `${title} · Avg`;
     if (!activeMetricHasRaw) return title;
-    return `${title} · ${activeValueView === 'raw' ? 'Raw delta' : 'Rate/s'}`;
+    return `${title} · ${activeValueView === 'raw' ? 'Raw' : 'Rate/s'}`;
   });
 
   const tableSnapshots = $derived(section.tableSnapshots ?? []);

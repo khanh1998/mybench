@@ -6,6 +6,7 @@ on:
     paths:
       - 'cli/**'
       - '.github/workflows/build-cli.yml'
+  workflow_dispatch: # allow manual trigger from GitHub Actions UI
 
 jobs:
   build:

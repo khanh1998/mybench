@@ -3573,6 +3573,16 @@ function buildCheckpointerSection(rows: SnapshotRow[], runStartMs: number, datab
 	};
 }
 
+// Normalize an ISO timestamp to include fractional seconds so that SQLite string
+// comparisons with sub-second timestamps work correctly.
+// '2026-05-31T07:03:22Z' -> '2026-05-31T07:03:22.000Z'
+// '2026-05-31T07:03:22.5Z' -> unchanged
+// Without this, '...22.209Z' < '...22Z' in SQLite because '.' (ASCII 46) < 'Z' (ASCII 90),
+// causing the t=0 host snapshot (collected ms after bench start) to be filtered out.
+function normalizeHostTs(ts: string): string {
+	return /\.\d+Z$/.test(ts) ? ts : ts.replace('Z', '.000Z');
+}
+
 // Fetch rows from a host_snap_* table filtered by phase time ranges.
 // host_snap_* tables have no _phase column, so phases are resolved via timestamps.
 function fetchHostRows(
@@ -3589,24 +3599,28 @@ function fetchHostRows(
 		if (!needsFilter) {
 			return db.prepare(`SELECT * FROM ${tableName} WHERE _run_id = ? ORDER BY _collected_at`).all(runId) as Record<string, unknown>[];
 		}
+		// Normalize bench/post timestamps to include fractional seconds so that
+		// sub-second snapshot timestamps compare correctly in SQLite string ordering.
+		const normBench = benchStartedAt ? normalizeHostTs(benchStartedAt) : null;
+		const normPost = postStartedAt ? normalizeHostTs(postStartedAt) : null;
 		const rangeClauses: string[] = [];
 		const rangeParams: unknown[] = [];
 		if (phases.includes('pre')) {
 			rangeClauses.push('_collected_at < ?');
-			rangeParams.push(benchStartedAt);
+			rangeParams.push(normBench);
 		}
 		if (phases.includes('bench')) {
-			if (postStartedAt !== null) {
+			if (normPost !== null) {
 				rangeClauses.push('(_collected_at >= ? AND _collected_at < ?)');
-				rangeParams.push(benchStartedAt, postStartedAt);
+				rangeParams.push(normBench, normPost);
 			} else {
 				rangeClauses.push('_collected_at >= ?');
-				rangeParams.push(benchStartedAt);
+				rangeParams.push(normBench);
 			}
 		}
-		if (phases.includes('post') && postStartedAt !== null) {
+		if (phases.includes('post') && normPost !== null) {
 			rangeClauses.push('_collected_at >= ?');
-			rangeParams.push(postStartedAt);
+			rangeParams.push(normPost);
 		}
 		if (rangeClauses.length === 0) return [];
 		const sql = `SELECT * FROM ${tableName} WHERE _run_id = ? AND (${rangeClauses.join(' OR ')}) ORDER BY _collected_at`;
@@ -4899,15 +4913,35 @@ function buildHostProcessesSection(db: Database.Database, runId: number, runStar
 	const pidFdRows        = fetchH('host_snap_proc_pid_fd_count');
 	const pidWchanRows     = fetchH('host_snap_proc_pid_wchan');
 
+	// Pre-group all per-PID rows by PID to avoid O(n²) .filter() calls in the main loop.
+	function groupByPid(rows: Record<string, unknown>[]): Map<number, Record<string, unknown>[]> {
+		const m = new Map<number, Record<string, unknown>[]>();
+		for (const row of rows) {
+			const pid = row.pid as number;
+			if (pid == null) continue;
+			if (!m.has(pid)) m.set(pid, []);
+			m.get(pid)!.push(row);
+		}
+		return m;
+	}
+
+	const statByPid    = groupByPid(pidStatRows);
+	const statmByPid   = groupByPid(pidStatmRows);
+	const ioByPid      = groupByPid(pidIoRows);
+	const statusByPid  = groupByPid(pidStatusRows);
+	const schedByPid   = groupByPid(pidSchedstatRows);
+	const fdByPid      = groupByPid(pidFdRows);
+	const wchanByPid   = groupByPid(pidWchanRows);
+
 	const allPids = [...new Set([
-		...pidStatRows.map(r => r.pid as number),
-		...pidStatmRows.map(r => r.pid as number),
-		...pidIoRows.map(r => r.pid as number),
-		...pidStatusRows.map(r => r.pid as number),
-		...pidSchedstatRows.map(r => r.pid as number),
-		...pidFdRows.map(r => r.pid as number),
-		...pidWchanRows.map(r => r.pid as number),
-	].filter(p => p != null))];
+		...statByPid.keys(),
+		...statmByPid.keys(),
+		...ioByPid.keys(),
+		...statusByPid.keys(),
+		...schedByPid.keys(),
+		...fdByPid.keys(),
+		...wchanByPid.keys(),
+	])];
 
 	if (allPids.length === 0) return noData;
 
@@ -4920,11 +4954,11 @@ function buildHostProcessesSection(db: Database.Database, runId: number, runStar
 	}
 
 	function pidScore(pid: number): number {
-		const pStatRows = pidStatRows.filter(r => r.pid === pid);
-		const pIoRows = pidIoRows.filter(r => r.pid === pid);
-		const pSchedRows = pidSchedstatRows.filter(r => r.pid === pid);
-		const pStatusRows = pidStatusRows.filter(r => r.pid === pid);
-		const pFdRows = pidFdRows.filter(r => r.pid === pid);
+		const pStatRows   = statByPid.get(pid)   ?? [];
+		const pIoRows     = ioByPid.get(pid)      ?? [];
+		const pSchedRows  = schedByPid.get(pid)   ?? [];
+		const pStatusRows = statusByPid.get(pid)  ?? [];
+		const pFdRows     = fdByPid.get(pid)      ?? [];
 
 		return (
 			scoreDelta(pStatRows, 'utime') +
@@ -4939,11 +4973,14 @@ function buildHostProcessesSection(db: Database.Database, runId: number, runStar
 		);
 	}
 
-	const displayedPids = [...allPids]
-		.sort((a, b) => {
-			const byScore = pidScore(b) - pidScore(a);
-			return byScore !== 0 ? byScore : a - b;
-		});
+	// Sort all PIDs by score descending. Only the top CHART_PID_LIMIT get chart
+	// metrics to bound the response size; all PIDs appear in the table.
+	const CHART_PID_LIMIT = 50;
+	const displayedPids = [...allPids].sort((a, b) => {
+		const byScore = pidScore(b) - pidScore(a);
+		return byScore !== 0 ? byScore : a - b;
+	});
+	const chartPids = new Set(displayedPids.slice(0, CHART_PID_LIMIT));
 
 	const L = HOST_COL_LABELS;
 	const D = HOST_COL_DESCS;
@@ -4954,13 +4991,13 @@ function buildHostProcessesSection(db: Database.Database, runId: number, runStar
 	const tableRows: Record<string, unknown>[] = [];
 
 	for (const pid of displayedPids) {
-		const pStatRows  = pidStatRows.filter(r => r.pid === pid);
-		const pStatmRows = pidStatmRows.filter(r => r.pid === pid);
-		const pIoRows    = pidIoRows.filter(r => r.pid === pid);
-		const pStatusRows = pidStatusRows.filter(r => r.pid === pid);
-		const pSchedRows = pidSchedstatRows.filter(r => r.pid === pid);
-		const pFdRows = pidFdRows.filter(r => r.pid === pid);
-		const pWchanRows = pidWchanRows.filter(r => r.pid === pid);
+		const pStatRows   = statByPid.get(pid)   ?? [];
+		const pStatmRows  = statmByPid.get(pid)  ?? [];
+		const pIoRows     = ioByPid.get(pid)      ?? [];
+		const pStatusRows = statusByPid.get(pid)  ?? [];
+		const pSchedRows  = schedByPid.get(pid)   ?? [];
+		const pFdRows     = fdByPid.get(pid)      ?? [];
+		const pWchanRows  = wchanByPid.get(pid)   ?? [];
 
 		// Use the first row that has cmdline; fall back to comm
 		const firstStat = pStatRows[0];
@@ -4970,65 +5007,67 @@ function buildHostProcessesSection(db: Database.Database, runId: number, runStar
 		const processName = formatPgProcessName(cmdline, comm);
 		const tag = `${processName} (${pid})`;
 
-		if (pStatRows.length > 1) {
-			const g = buildRateGroup(`pid_${pid}_cpu`, `${tag} — CPU`, `${tag} — CPU jiffies /s`,
-				pStatRows, ['utime', 'stime'], 'count', runStartMs, 1, L, D);
-			if (g) chartMetrics.push(g);
+		if (chartPids.has(pid)) {
+			if (pStatRows.length > 1) {
+				const g = buildRateGroup(`pid_${pid}_cpu`, `${tag} — CPU`, `${tag} — CPU jiffies /s`,
+					pStatRows, ['utime', 'stime'], 'count', runStartMs, 1, L, D);
+				if (g) chartMetrics.push(g);
 
-			const faults = buildRateGroup(`pid_${pid}_faults`, `${tag} — Faults`, `${tag} — Page Faults /s`,
-				pStatRows, ['minflt', 'majflt'], 'count', runStartMs, 1, L, D);
-			if (faults) chartMetrics.push(faults);
-		}
-		if (pStatusRows.length > 0) {
-			const g = buildInstantGroup(`pid_${pid}_mem`, `${tag} — Mem`, `${tag} — Memory (bytes)`,
-				pStatusRows, ['vm_rss_kb', 'rss_anon_kb', 'rss_file_kb', 'rss_shmem_kb', 'vm_size_kb', 'vm_peak_kb', 'vm_swap_kb'], 'bytes', runStartMs, 1024, L, D);
-			if (g) chartMetrics.push(g);
-		} else if (pStatmRows.length > 0) {
-			const g = buildInstantGroup(`pid_${pid}_mem`, `${tag} — Mem`, `${tag} — Memory (pages)`,
-				pStatmRows, ['size', 'resident', 'shared', 'text', 'data'], 'count', runStartMs, 1, L, D);
-			if (g) chartMetrics.push(g);
-		}
-		if (pIoRows.length > 1) {
-			const g = buildRateGroup(`pid_${pid}_io_bytes`, `${tag} — I/O Bytes`, `${tag} — I/O Bytes (KB/s)`,
-				pIoRows, ['read_bytes', 'write_bytes', 'cancelled_write_bytes'], 'bytes', runStartMs, 1 / 1024, L, D);
-			if (g) chartMetrics.push(g);
+				const faults = buildRateGroup(`pid_${pid}_faults`, `${tag} — Faults`, `${tag} — Page Faults /s`,
+					pStatRows, ['minflt', 'majflt'], 'count', runStartMs, 1, L, D);
+				if (faults) chartMetrics.push(faults);
+			}
+			if (pStatusRows.length > 0) {
+				const g = buildInstantGroup(`pid_${pid}_mem`, `${tag} — Mem`, `${tag} — Memory (bytes)`,
+					pStatusRows, ['vm_rss_kb', 'rss_anon_kb', 'rss_file_kb', 'rss_shmem_kb', 'vm_size_kb', 'vm_peak_kb', 'vm_swap_kb'], 'bytes', runStartMs, 1024, L, D);
+				if (g) chartMetrics.push(g);
+			} else if (pStatmRows.length > 0) {
+				const g = buildInstantGroup(`pid_${pid}_mem`, `${tag} — Mem`, `${tag} — Memory (pages)`,
+					pStatmRows, ['size', 'resident', 'shared', 'text', 'data'], 'count', runStartMs, 1, L, D);
+				if (g) chartMetrics.push(g);
+			}
+			if (pIoRows.length > 1) {
+				const g = buildRateGroup(`pid_${pid}_io_bytes`, `${tag} — I/O Bytes`, `${tag} — I/O Bytes (KB/s)`,
+					pIoRows, ['read_bytes', 'write_bytes', 'cancelled_write_bytes'], 'bytes', runStartMs, 1 / 1024, L, D);
+				if (g) chartMetrics.push(g);
 
-			const chars = buildRateGroup(`pid_${pid}_io_chars`, `${tag} — I/O Chars`, `${tag} — I/O Chars /s`,
-				pIoRows, ['rchar', 'wchar'], 'bytes', runStartMs, 1, L, D);
-			if (chars) chartMetrics.push(chars);
+				const chars = buildRateGroup(`pid_${pid}_io_chars`, `${tag} — I/O Chars`, `${tag} — I/O Chars /s`,
+					pIoRows, ['rchar', 'wchar'], 'bytes', runStartMs, 1, L, D);
+				if (chars) chartMetrics.push(chars);
 
-			const syscalls = buildRateGroup(`pid_${pid}_io_syscalls`, `${tag} — I/O Syscalls`, `${tag} — I/O Syscalls /s`,
-				pIoRows, ['syscr', 'syscw'], 'count', runStartMs, 1, L, D);
-			if (syscalls) chartMetrics.push(syscalls);
-		}
-		if (pSchedRows.length > 1) {
-			const g = buildRateGroup(`pid_${pid}_sched`, `${tag} — Sched`, `${tag} — Scheduler (ns/s)`,
-				pSchedRows, ['run_time_ns', 'wait_time_ns'], 'count', runStartMs, 1, L, D);
-			if (g) chartMetrics.push(g);
+				const syscalls = buildRateGroup(`pid_${pid}_io_syscalls`, `${tag} — I/O Syscalls`, `${tag} — I/O Syscalls /s`,
+					pIoRows, ['syscr', 'syscw'], 'count', runStartMs, 1, L, D);
+				if (syscalls) chartMetrics.push(syscalls);
+			}
+			if (pSchedRows.length > 1) {
+				const g = buildRateGroup(`pid_${pid}_sched`, `${tag} — Sched`, `${tag} — Scheduler (ns/s)`,
+					pSchedRows, ['run_time_ns', 'wait_time_ns'], 'count', runStartMs, 1, L, D);
+				if (g) chartMetrics.push(g);
 
-			const slices = buildRateGroup(`pid_${pid}_timeslices`, `${tag} — Timeslices`, `${tag} — Scheduler Timeslices /s`,
-				pSchedRows, ['timeslices'], 'count', runStartMs, 1, L, D);
-			if (slices) chartMetrics.push(slices);
-		}
-		if (pStatusRows.length > 1) {
-			const ctx = buildRateGroup(`pid_${pid}_ctx`, `${tag} — Ctx`, `${tag} — Context Switches /s`,
-				pStatusRows, ['vol_ctxt_sw', 'nvol_ctxt_sw'], 'count', runStartMs, 1, L, D);
-			if (ctx) chartMetrics.push(ctx);
-		}
-		if (pStatusRows.length > 0) {
-			const threads = buildInstantGroup(`pid_${pid}_threads`, `${tag} — Threads`, `${tag} — Threads`,
-				pStatusRows, ['threads'], 'count', runStartMs, 1, L, D);
-			if (threads) chartMetrics.push(threads);
-		} else if (pStatRows.length > 0) {
-			const threads = buildInstantGroup(`pid_${pid}_threads`, `${tag} — Threads`, `${tag} — Threads`,
-				pStatRows, ['num_threads'], 'count', runStartMs, 1, L, D);
-			if (threads) chartMetrics.push(threads);
-		}
-		if (pFdRows.length > 0 || pStatusRows.length > 0) {
-			const fdMetricRows = mergeRowsByCollectedAt(pFdRows, pStatusRows);
-			const fds = buildInstantGroup(`pid_${pid}_fds`, `${tag} — FDs`, `${tag} — File Descriptors`,
-				fdMetricRows, ['fd_count', 'fd_size'], 'count', runStartMs, 1, L, D);
-			if (fds) chartMetrics.push(fds);
+				const slices = buildRateGroup(`pid_${pid}_timeslices`, `${tag} — Timeslices`, `${tag} — Scheduler Timeslices /s`,
+					pSchedRows, ['timeslices'], 'count', runStartMs, 1, L, D);
+				if (slices) chartMetrics.push(slices);
+			}
+			if (pStatusRows.length > 1) {
+				const ctx = buildRateGroup(`pid_${pid}_ctx`, `${tag} — Ctx`, `${tag} — Context Switches /s`,
+					pStatusRows, ['vol_ctxt_sw', 'nvol_ctxt_sw'], 'count', runStartMs, 1, L, D);
+				if (ctx) chartMetrics.push(ctx);
+			}
+			if (pStatusRows.length > 0) {
+				const threads = buildInstantGroup(`pid_${pid}_threads`, `${tag} — Threads`, `${tag} — Threads`,
+					pStatusRows, ['threads'], 'count', runStartMs, 1, L, D);
+				if (threads) chartMetrics.push(threads);
+			} else if (pStatRows.length > 0) {
+				const threads = buildInstantGroup(`pid_${pid}_threads`, `${tag} — Threads`, `${tag} — Threads`,
+					pStatRows, ['num_threads'], 'count', runStartMs, 1, L, D);
+				if (threads) chartMetrics.push(threads);
+			}
+			if (pFdRows.length > 0 || pStatusRows.length > 0) {
+				const fdMetricRows = mergeRowsByCollectedAt(pFdRows, pStatusRows);
+				const fds = buildInstantGroup(`pid_${pid}_fds`, `${tag} — FDs`, `${tag} — File Descriptors`,
+					fdMetricRows, ['fd_count', 'fd_size'], 'count', runStartMs, 1, L, D);
+				if (fds) chartMetrics.push(fds);
+			}
 		}
 
 		// Summary: peak resident pages per process
