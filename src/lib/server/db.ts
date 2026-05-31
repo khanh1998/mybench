@@ -517,7 +517,16 @@ export function getDb(): Database.Database {
 		_db = new Database(DB_PATH);
 		_db.pragma('journal_mode = WAL');
 		_db.pragma('foreign_keys = ON');
+		_db.pragma('synchronous = NORMAL');     // skip extra fsync; safe for local use
+		_db.pragma('cache_size = -65536');      // 64MB page cache
+		_db.pragma('mmap_size = 1073741824');   // 1GB mmap — reads bypass page-copy overhead
+		_db.pragma('temp_store = MEMORY');      // temp tables/indexes in RAM
+		_db.pragma('wal_autocheckpoint = 500'); // checkpoint every ~2MB WAL
 		migrate(_db);
+		// checkpoint WAL on clean exit so next open starts with a clean WAL
+		process.once('exit', () => { try { _db?.pragma('wal_checkpoint(TRUNCATE)'); } catch {} });
+		process.once('SIGINT', () => process.exit(0));
+		process.once('SIGTERM', () => process.exit(0));
 	}
 	return _db;
 }
@@ -1225,6 +1234,40 @@ FROM snap_pg_stat_bgwriter WHERE _run_id = ? ORDER BY _collected_at DESC LIMIT 1
       pid INTEGER
     );
   `);
+
+	// Migration: indexes on snap table _run_id columns for fast per-run queries
+	if (!db.prepare(`SELECT id FROM schema_migrations WHERE id = 'snap_table_indexes_v1'`).get()) {
+		db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_snap_pg_stat_database_run ON snap_pg_stat_database(_run_id, _phase);
+      CREATE INDEX IF NOT EXISTS idx_snap_pg_stat_bgwriter_run ON snap_pg_stat_bgwriter(_run_id, _phase);
+      CREATE INDEX IF NOT EXISTS idx_snap_pg_stat_checkpointer_run ON snap_pg_stat_checkpointer(_run_id, _phase);
+      CREATE INDEX IF NOT EXISTS idx_snap_pg_stat_wal_run ON snap_pg_stat_wal(_run_id, _phase);
+      CREATE INDEX IF NOT EXISTS idx_snap_pg_stat_io_run ON snap_pg_stat_io(_run_id, _phase);
+      CREATE INDEX IF NOT EXISTS idx_snap_pg_stat_user_tables_run ON snap_pg_stat_user_tables(_run_id, _phase);
+      CREATE INDEX IF NOT EXISTS idx_snap_pg_stat_user_indexes_run ON snap_pg_stat_user_indexes(_run_id, _phase);
+      CREATE INDEX IF NOT EXISTS idx_snap_pg_statio_user_tables_run ON snap_pg_statio_user_tables(_run_id, _phase);
+      CREATE INDEX IF NOT EXISTS idx_snap_pg_statio_user_indexes_run ON snap_pg_statio_user_indexes(_run_id, _phase);
+      CREATE INDEX IF NOT EXISTS idx_snap_pg_statio_user_sequences_run ON snap_pg_statio_user_sequences(_run_id, _phase);
+      CREATE INDEX IF NOT EXISTS idx_snap_pg_stat_archiver_run ON snap_pg_stat_archiver(_run_id, _phase);
+      CREATE INDEX IF NOT EXISTS idx_host_snap_proc_loadavg_run ON host_snap_proc_loadavg(_run_id);
+      CREATE INDEX IF NOT EXISTS idx_host_snap_proc_meminfo_run ON host_snap_proc_meminfo(_run_id);
+      CREATE INDEX IF NOT EXISTS idx_host_snap_proc_stat_run ON host_snap_proc_stat(_run_id);
+      CREATE INDEX IF NOT EXISTS idx_host_snap_proc_vmstat_run ON host_snap_proc_vmstat(_run_id);
+      CREATE INDEX IF NOT EXISTS idx_host_snap_proc_diskstats_run ON host_snap_proc_diskstats(_run_id);
+      CREATE INDEX IF NOT EXISTS idx_host_snap_proc_netdev_run ON host_snap_proc_netdev(_run_id);
+      CREATE INDEX IF NOT EXISTS idx_host_snap_proc_schedstat_run ON host_snap_proc_schedstat(_run_id);
+      CREATE INDEX IF NOT EXISTS idx_host_snap_proc_psi_run ON host_snap_proc_psi(_run_id);
+      CREATE INDEX IF NOT EXISTS idx_host_snap_proc_sys_fs_file_nr_run ON host_snap_proc_sys_fs_file_nr(_run_id);
+      CREATE INDEX IF NOT EXISTS idx_host_snap_proc_pid_stat_run ON host_snap_proc_pid_stat(_run_id);
+      CREATE INDEX IF NOT EXISTS idx_host_snap_proc_pid_statm_run ON host_snap_proc_pid_statm(_run_id);
+      CREATE INDEX IF NOT EXISTS idx_host_snap_proc_pid_io_run ON host_snap_proc_pid_io(_run_id);
+      CREATE INDEX IF NOT EXISTS idx_host_snap_proc_pid_status_run ON host_snap_proc_pid_status(_run_id);
+      CREATE INDEX IF NOT EXISTS idx_host_snap_proc_pid_schedstat_run ON host_snap_proc_pid_schedstat(_run_id);
+      CREATE INDEX IF NOT EXISTS idx_host_snap_proc_pid_wchan_run ON host_snap_proc_pid_wchan(_run_id);
+      CREATE INDEX IF NOT EXISTS idx_host_snap_proc_pid_fd_count_run ON host_snap_proc_pid_fd_count(_run_id);
+    `);
+		db.prepare(`INSERT INTO schema_migrations (id) VALUES (?)`).run('snap_table_indexes_v1');
+	}
 
 	// benchmark_series table + series_id on benchmark_runs
 	db.exec(`
