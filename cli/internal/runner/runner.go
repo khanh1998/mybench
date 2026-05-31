@@ -80,7 +80,8 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 		Snapshots: make(map[string][]result.SnapshotRow),
 	}
 
-	// Start host metrics collection via SSH if configured.
+	// Prepare host metrics collector (SSH connect) but don't start ticking yet.
+	// Start() is called just before the bench step so ticks align with bench start.
 	hostCollector := NewHostMetricsCollector(opts.Plan.Server, opts.Plan.RunSettings.SnapshotIntervalSeconds)
 
 	// Sort enabled steps by position.
@@ -269,6 +270,9 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 			opts.logInfo("[pgbench] %s", step.Name)
 			benchStartTime = time.Now().UTC()
 			res.Run.BenchStartedAt = benchStartTime.Format(time.RFC3339)
+			if hostCollector != nil {
+				hostCollector.Start()
+			}
 			snapTables, pgLocksEnabled, pgLocksIntervalSecs, snapIntervalSecs := resolvePgStatConfig(opts)
 			pbRes, err := runPgbenchStep(ctx, opts, step, pool, res.Snapshots, snapIntervalSecs, snapTables, pgLocksEnabled, pgLocksIntervalSecs)
 			benchEndTime = time.Now().UTC()
@@ -307,6 +311,9 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 			opts.logInfo("[sysbench] %s", step.Name)
 			benchStartTime = time.Now().UTC()
 			res.Run.BenchStartedAt = benchStartTime.Format(time.RFC3339)
+			if hostCollector != nil {
+				hostCollector.Start()
+			}
 			snapTables, pgLocksEnabled, pgLocksIntervalSecs, snapIntervalSecs := resolvePgStatConfig(opts)
 			sbRes, err := runSysbenchStep(ctx, opts, step, pool, res.Snapshots, snapIntervalSecs, snapTables, pgLocksEnabled, pgLocksIntervalSecs)
 			benchEndTime = time.Now().UTC()

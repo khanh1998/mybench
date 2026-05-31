@@ -84,9 +84,11 @@ type HostMetricsCollector struct {
 	stopCh     chan struct{}
 	doneCh     chan struct{}
 	interval   time.Duration
+	started    bool
 }
 
-// NewHostMetricsCollector creates and starts a host metrics collector.
+// NewHostMetricsCollector creates a host metrics collector but does NOT start collection.
+// Call Start() to begin — typically just before the bench step so ticks align with bench start.
 // Returns nil if SSH is not configured or the connection fails.
 func NewHostMetricsCollector(srv plan.ServerConfig, intervalSecs int) *HostMetricsCollector {
 	if !srv.SSHEnabled || srv.SSHUser == "" || srv.SSHPrivateKey == "" {
@@ -132,14 +134,23 @@ func NewHostMetricsCollector(srv plan.ServerConfig, intervalSecs int) *HostMetri
 		doneCh:    make(chan struct{}),
 		interval:  time.Duration(intervalSecs) * time.Second,
 	}
-	go c.run()
 	return c
 }
 
+// Start begins collection immediately (t=0 snapshot) then ticks every interval.
+// Call exactly once, just before the bench step begins.
+func (c *HostMetricsCollector) Start() {
+	c.started = true
+	go c.run()
+}
+
 // Stop signals the collector to finish and returns all collected snapshots and config.
+// Safe to call even if Start() was never called (returns empty results).
 func (c *HostMetricsCollector) Stop() (map[string][]result.SnapshotRow, map[string]any) {
-	close(c.stopCh)
-	<-c.doneCh
+	if c.started {
+		close(c.stopCh)
+		<-c.doneCh
+	}
 	c.client.Close()
 	c.mu.Lock()
 	defer c.mu.Unlock()

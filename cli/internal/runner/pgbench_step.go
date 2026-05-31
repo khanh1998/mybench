@@ -375,10 +375,7 @@ func runPgbenchStep(
 		res.Transactions = summary.Transactions
 		res.FailedTransactions = summary.FailedTransactions
 	}
-	// Stop ticker and take final snapshot.
 	ticker.Stop()
-	_ = collectOnce(ctx, pool, snapTables, "bench", snapshots)
-	collectPgLocksOnce(ctx, pool, "bench", snapshots, pgLocksEnabled)
 
 	// Collect pg_stat_statements at bench end if configured.
 	if opts.Plan.PgStatStep != nil && opts.Plan.PgStatStep.CollectStatements {
