@@ -9,7 +9,7 @@ function buildConfigureCmd(
 	dbPass: string,
 	dbName: string,
 	tuneConfig: string | null,
-	statsSettings: { trackIoTiming: boolean; trackWalIoTiming: boolean; trackActivities: boolean; trackCounts: boolean; trackFunctions: boolean }
+	statsSettings: { trackIoTiming: boolean; trackWalIoTiming: boolean; trackActivities: boolean; trackCounts: boolean; trackFunctions: boolean; trackPlanning: boolean }
 ): string {
 	// Escape single quotes in password by ending quote, adding escaped quote, reopening
 	const escapedPass = dbPass.replace(/'/g, "'\\''");
@@ -84,6 +84,7 @@ sudo -u postgres psql -c "ALTER SYSTEM SET track_wal_io_timing = ${statsSettings
 sudo -u postgres psql -c "ALTER SYSTEM SET track_activities = ${statsSettings.trackActivities ? 'on' : 'off'};"
 sudo -u postgres psql -c "ALTER SYSTEM SET track_counts = ${statsSettings.trackCounts ? 'on' : 'off'};"
 sudo -u postgres psql -c "ALTER SYSTEM SET track_functions = '${statsSettings.trackFunctions ? 'all' : 'none'}';"
+sudo -u postgres psql -c "ALTER SYSTEM SET pg_stat_statements.track_planning = ${statsSettings.trackPlanning ? 'on' : 'off'};"
 sudo -u postgres psql -c "SELECT pg_reload_conf();"
 echo "Statistics settings applied."
 
@@ -125,7 +126,7 @@ echo "==> Configuration complete!"
 export const POST: RequestHandler = async ({ request }) => {
 	const body = await request.json();
 	const { host, user, private_key, db_private_ip, client_private_ip, db_user, db_pass, db_name, tune_config,
-		track_io_timing, track_wal_io_timing, track_activities, track_counts, track_functions } = body;
+		track_io_timing, track_wal_io_timing, track_activities, track_counts, track_functions, track_planning } = body;
 	if (!host) throw error(400, 'host is required');
 	if (!private_key) throw error(400, 'private_key is required');
 	if (!db_private_ip) throw error(400, 'db_private_ip is required');
@@ -138,7 +139,8 @@ export const POST: RequestHandler = async ({ request }) => {
 		trackWalIoTiming: track_wal_io_timing !== false,
 		trackActivities: track_activities !== false,
 		trackCounts: track_counts !== false,
-		trackFunctions: track_functions === true
+		trackFunctions: track_functions === true,
+		trackPlanning: track_planning === true
 	};
 	const cmd = buildConfigureCmd(db_private_ip, client_private_ip, db_user ?? 'mybench', db_pass, db_name ?? 'mybench', tune_config ?? null, statsSettings);
 

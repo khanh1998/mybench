@@ -692,6 +692,7 @@ Use {{PARAM_NAME}} in scripts and pgbench_options — values come from set_param
 				pg_stat_pg_locks_interval: z.string().optional().describe('[type=pg_stat] Collection interval for pg_locks in seconds. Supports {{PARAM}}. Empty = use pg_stat_interval_seconds. Set higher (e.g. "60") to reduce row volume. E.g. "60 or {{LOCKS_INTERVAL}}".'),
 				pg_stat_reset_stats: z.boolean().optional().describe('[type=pg_stat] Call pg_stat_reset() before bench — zeroes cumulative counters in pg_stat_database, pg_stat_user_tables, pg_statio_*, pg_stat_wal, etc. Recommended: true for clean deltas.'),
 				pg_stat_reset_statements: z.boolean().optional().describe('[type=pg_stat] Call pg_stat_statements_reset() before bench — clears query counters so only this run\'s queries appear. No-op if pg_stat_statements is not installed.'),
+				pg_stat_pss_track_planning: z.boolean().optional().describe('[type=pg_stat] Run ALTER SYSTEM SET pg_stat_statements.track_planning = on before bench — records planning time and plan calls in pg_stat_statements. Useful when query planning costs are significant.'),
 				pg_stat_collect_statements: z.boolean().optional().describe('[type=pg_stat] Collect one pg_stat_statements snapshot at bench end: total calls, mean exec time, rows, plan info per query. Requires pg_stat_statements. Equivalent to adding "pg_stat_statements" to pg_stat_tables.')
 			}
 		},
@@ -702,7 +703,7 @@ Use {{PARAM_NAME}} in scripts and pgbench_options — values come from set_param
 			perf_cgroup, perf_repeat, perf_freq, perf_call_graph, perf_mmap_pages,
 			proc_groups, proc_interval_seconds,
 			pg_stat_tables, pg_stat_interval_seconds, pg_stat_pg_locks_enabled, pg_stat_pg_locks_interval,
-			pg_stat_reset_stats, pg_stat_reset_statements, pg_stat_collect_statements }) => {
+			pg_stat_reset_stats, pg_stat_reset_statements, pg_stat_pss_track_planning, pg_stat_collect_statements }) => {
 			const db = getDb();
 			let resolvedStepId: number;
 			if (step_id) {
@@ -713,7 +714,7 @@ Use {{PARAM_NAME}} in scripts and pgbench_options — values come from set_param
 					perf_cgroup=?, perf_repeat=?, perf_freq=?, perf_call_graph=?, perf_mmap_pages=?,
 					proc_groups=?, proc_interval_seconds=?,
 					pg_stat_tables=?, pg_stat_interval_seconds=?, pg_stat_pg_locks_enabled=?, pg_stat_pg_locks_interval=?,
-					pg_stat_reset_stats=?, pg_stat_reset_statements=?, pg_stat_collect_statements=? WHERE id=?`)
+					pg_stat_reset_stats=?, pg_stat_reset_statements=?, pg_stat_pss_track_planning=?, pg_stat_collect_statements=? WHERE id=?`)
 					.run(type, name, position, enabled ? 1 : 0, script ?? '', no_transaction ? 1 : 0, pgbench_options ?? '', duration_secs ?? 0,
 						perf_stat_enabled ? 1 : 0, perf_record_enabled ? 1 : 0, perf_trace_enabled ? 1 : 0, perf_events ?? '',
 						perf_duration ?? '', perf_stat_duration ?? '', perf_record_duration ?? '', perf_trace_duration ?? '',
@@ -722,7 +723,7 @@ Use {{PARAM_NAME}} in scripts and pgbench_options — values come from set_param
 						proc_groups ?? '[]', proc_interval_seconds ?? '',
 						pg_stat_tables ?? '[]', pg_stat_interval_seconds ?? '',
 						pg_stat_pg_locks_enabled ? 1 : 0, pg_stat_pg_locks_interval ?? '',
-						pg_stat_reset_stats ? 1 : 0, pg_stat_reset_statements ? 1 : 0, pg_stat_collect_statements ? 1 : 0,
+						pg_stat_reset_stats ? 1 : 0, pg_stat_reset_statements ? 1 : 0, pg_stat_pss_track_planning ? 1 : 0, pg_stat_collect_statements ? 1 : 0,
 						step_id);
 				resolvedStepId = step_id;
 			} else {
@@ -733,8 +734,8 @@ Use {{PARAM_NAME}} in scripts and pgbench_options — values come from set_param
 					perf_cgroup, perf_repeat, perf_freq, perf_call_graph, perf_mmap_pages,
 					proc_groups, proc_interval_seconds,
 					pg_stat_tables, pg_stat_interval_seconds, pg_stat_pg_locks_enabled, pg_stat_pg_locks_interval,
-					pg_stat_reset_stats, pg_stat_reset_statements, pg_stat_collect_statements)
-					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+					pg_stat_reset_stats, pg_stat_reset_statements, pg_stat_pss_track_planning, pg_stat_collect_statements)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 					.run(design_id, type, name, position, enabled ? 1 : 0, script ?? '', no_transaction ? 1 : 0, pgbench_options ?? '', duration_secs ?? 0,
 						perf_stat_enabled ? 1 : 0, perf_record_enabled ? 1 : 0, perf_trace_enabled ? 1 : 0, perf_events ?? '',
 						perf_duration ?? '', perf_stat_duration ?? '', perf_record_duration ?? '', perf_trace_duration ?? '',
@@ -743,7 +744,7 @@ Use {{PARAM_NAME}} in scripts and pgbench_options — values come from set_param
 						proc_groups ?? '[]', proc_interval_seconds ?? '',
 						pg_stat_tables ?? '[]', pg_stat_interval_seconds ?? '',
 						pg_stat_pg_locks_enabled ? 1 : 0, pg_stat_pg_locks_interval ?? '',
-						pg_stat_reset_stats ? 1 : 0, pg_stat_reset_statements ? 1 : 0, pg_stat_collect_statements ? 1 : 0);
+						pg_stat_reset_stats ? 1 : 0, pg_stat_reset_statements ? 1 : 0, pg_stat_pss_track_planning ? 1 : 0, pg_stat_collect_statements ? 1 : 0);
 				resolvedStepId = r.lastInsertRowid as number;
 			}
 			if (type === 'pgbench' && pgbench_scripts) {

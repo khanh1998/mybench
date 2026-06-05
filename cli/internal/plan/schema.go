@@ -33,6 +33,7 @@ type PgStatStepConfig struct {
 	PgLocksIntervalSeconds  int             `json:"pg_locks_interval_seconds"` // 0 = use IntervalSeconds
 	ResetStats              bool            `json:"reset_stats"`
 	ResetStatements         bool            `json:"reset_statements"`
+	PssTrackPlanning        bool            `json:"pss_track_planning"`
 	CollectStatements       bool            `json:"collect_statements"`
 	PgStatStatementsColumns []string        `json:"pg_stat_statements_columns,omitempty"`
 }

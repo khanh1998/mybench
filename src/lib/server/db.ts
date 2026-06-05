@@ -957,6 +957,7 @@ function migrate(db: Database.Database) {
 	if (!stepCols.includes('pg_stat_reset_stats')) db.exec(`ALTER TABLE design_steps ADD COLUMN pg_stat_reset_stats INTEGER NOT NULL DEFAULT 0`);
 	if (!stepCols.includes('pg_stat_reset_statements')) db.exec(`ALTER TABLE design_steps ADD COLUMN pg_stat_reset_statements INTEGER NOT NULL DEFAULT 0`);
 	if (!stepCols.includes('pg_stat_collect_statements')) db.exec(`ALTER TABLE design_steps ADD COLUMN pg_stat_collect_statements INTEGER NOT NULL DEFAULT 0`);
+	if (!stepCols.includes('pg_stat_pss_track_planning')) db.exec(`ALTER TABLE design_steps ADD COLUMN pg_stat_pss_track_planning INTEGER NOT NULL DEFAULT 0`);
 	// proc step columns
 	if (!stepCols.includes('proc_groups')) db.exec(`ALTER TABLE design_steps ADD COLUMN proc_groups TEXT NOT NULL DEFAULT '[]'`);
 	if (!stepCols.includes('proc_interval_seconds')) db.exec(`ALTER TABLE design_steps ADD COLUMN proc_interval_seconds TEXT NOT NULL DEFAULT ''`);

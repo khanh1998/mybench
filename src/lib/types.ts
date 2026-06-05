@@ -138,6 +138,7 @@ export interface DesignStep {
 	pg_stat_pg_locks_interval: string;   // TEXT, supports {{PARAM}}, empty = use snap interval
 	pg_stat_reset_stats: number;         // 0 | 1 — fires pg_stat_reset()
 	pg_stat_reset_statements: number;    // 0 | 1 — fires pg_stat_statements_reset()
+	pg_stat_pss_track_planning: number;  // 0 | 1 — ALTER SYSTEM SET pg_stat_statements.track_planning = on
 	pg_stat_collect_statements: number;  // 0 | 1 — collect pg_stat_statements at bench end
 	// proc step fields
 	proc_groups: string;           // JSON array of group names, '' or '[]' = all groups

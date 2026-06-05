@@ -67,6 +67,7 @@
     pg_stat_reset_stats: number;
     pg_stat_reset_statements: number;
     pg_stat_collect_statements: number;
+    pg_stat_pss_track_planning: number;
     // proc step fields
     proc_groups: string;
     proc_interval_seconds: string;
@@ -634,6 +635,7 @@
       pg_stat_reset_stats: 1,
       pg_stat_reset_statements: 1,
       pg_stat_collect_statements: 1,
+      pg_stat_pss_track_planning: 0,
       proc_groups: '[]',
       proc_interval_seconds: '',
       enabled: 1,
@@ -1611,6 +1613,14 @@
                   onchange={(e) => { selectedStep!.pg_stat_reset_statements = (e.currentTarget as HTMLInputElement).checked ? 1 : 0; }}
                 />
                 pg_stat_statements_reset()
+              </label>
+              <label class="perf-enable-toggle">
+                <input
+                  type="checkbox"
+                  checked={!!selectedStep.pg_stat_pss_track_planning}
+                  onchange={(e) => { selectedStep!.pg_stat_pss_track_planning = (e.currentTarget as HTMLInputElement).checked ? 1 : 0; }}
+                />
+                pg_stat_statements.track_planning = on
               </label>
             </div>
           </div>

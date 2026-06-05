@@ -234,6 +234,15 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 						pgStatLog += msg + "\n"
 					}
 				}
+				if cfg.PssTrackPlanning {
+					if _, err := pool.Exec(ctx, "ALTER SYSTEM SET pg_stat_statements.track_planning = on"); err != nil {
+						fmt.Fprintf(os.Stderr, "warning: pg_stat_statements.track_planning: %v\n", err)
+					} else if _, err := pool.Exec(ctx, "SELECT pg_reload_conf()"); err != nil {
+						fmt.Fprintf(os.Stderr, "warning: pg_reload_conf after track_planning: %v\n", err)
+					} else {
+						pgStatLog += "pg_stat_statements.track_planning = on\n"
+					}
+				}
 			}
 			stepRes.Command = "pg_stat"
 			stepRes.Log = strings.TrimSpace(pgStatLog)

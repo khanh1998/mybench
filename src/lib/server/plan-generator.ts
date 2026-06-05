@@ -259,6 +259,7 @@ export function generatePlan(designId: number, overrides: PlanRunSettingsOverrid
 			pg_locks_interval_seconds: pgLocksIntervalSecs,
 			reset_stats: !!pgStatStep.pg_stat_reset_stats,
 			reset_statements: !!pgStatStep.pg_stat_reset_statements,
+			pss_track_planning: !!pgStatStep.pg_stat_pss_track_planning,
 			collect_statements: collectStatements,
 			pg_stat_statements_columns: pssColumns,
 		};

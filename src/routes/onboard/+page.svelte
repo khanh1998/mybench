@@ -93,6 +93,7 @@
 	let trackActivities = $state(true);
 	let trackCounts = $state(true);
 	let trackFunctions = $state(false);
+	let trackPlanningTracking = $state(false);
 
 	// Step 5
 	let clusterName = $state('DO Singapore');
@@ -323,7 +324,8 @@
 				track_wal_io_timing: trackWalIoTiming,
 				track_activities: trackActivities,
 				track_counts: trackCounts,
-				track_functions: trackFunctions
+				track_functions: trackFunctions,
+				track_planning: trackPlanningTracking
 			}, (line) => { configureOutput += line + '\n'; });
 			configureOk = ok;
 			configureDone = true;
@@ -783,6 +785,11 @@
 						<input type="checkbox" checked={trackFunctions} onchange={(e) => trackFunctions = e.currentTarget.checked} />
 						<code>track_functions</code>
 						<span class="check-desc">PL/pgSQL function call counts and timing. Enable if your design uses stored procedures.</span>
+					</label>
+					<label class="check-row">
+						<input type="checkbox" checked={trackPlanningTracking} onchange={(e) => trackPlanningTracking = e.currentTarget.checked} />
+						<code>pg_stat_statements.track_planning</code>
+						<span class="check-desc">Tracks planning time and calls in pg_stat_statements. Useful when query planning costs are significant.</span>
 					</label>
 				</div>
 			</div>
