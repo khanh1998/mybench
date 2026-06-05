@@ -24,7 +24,6 @@ export interface StartSeriesOptions {
 	ec2_server_id?: number | null;
 	server_id?: number;
 	database?: string;
-	snapshot_interval_seconds?: number;
 	use_private_ip?: boolean;
 	suite_id?: number;           // optional — set when series is part of a decision suite
 	useDecisionProfiles?: boolean; // resolve profile names from decision_param_profiles instead of design_param_profiles
@@ -136,7 +135,7 @@ export function startSeries(opts: StartSeriesOptions): number {
 
 	const seriesName = opts.name ?? `Series ${new Date().toLocaleString()}`;
 	const delaySeconds = opts.delay_seconds ?? 0;
-	const snapshot_interval_seconds = opts.snapshot_interval_seconds ?? design.snapshot_interval_seconds ?? 30;
+	const snapshot_interval_seconds = design.snapshot_interval_seconds;
 	const resolvedDatabase = opts.database ?? design.database;
 
 	const seriesResult = db.prepare(`
@@ -260,7 +259,6 @@ async function executeEc2SeriesAsync(
 		const plan = generatePlan(designId, {
 			server_id: overrideServerId,
 			database: resolvedDatabase,
-			snapshot_interval_seconds,
 			use_private_ip: usePrivateIp
 		});
 		const localPlanPath = `/tmp/mybench-series-${seriesToken}.json`;

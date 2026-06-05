@@ -14,7 +14,7 @@ export const GET: RequestHandler = ({ url }) => {
 
 export const POST: RequestHandler = async ({ request }) => {
 	const body = await request.json();
-	const { design_id, server_id, database, snapshot_interval_seconds, profile_id, profile_source, name, ec2_server_id, use_private_ip } = body;
+	const { design_id, server_id, database, profile_id, profile_source, name, ec2_server_id, use_private_ip } = body;
 	if (!design_id) throw error(400, 'Missing design_id');
 	if (!ec2_server_id) throw error(400, 'ec2_server_id is required — local runs are no longer supported');
 	try {
@@ -24,7 +24,6 @@ export const POST: RequestHandler = async ({ request }) => {
 			profile_id,
 			profile_source,
 			name,
-			snapshot_interval_seconds,
 			use_private_ip: !!use_private_ip
 		});
 		return json({ run_id: runId }, { status: 201 });

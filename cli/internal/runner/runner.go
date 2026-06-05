@@ -426,7 +426,11 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 func resolvePgStatConfig(opts RunOpts) (snapTables []plan.SnapTableSpec, pgLocksEnabled bool, pgLocksIntervalSecs int, snapIntervalSecs int) {
 	if opts.Plan.PgStatStep != nil {
 		cfg := opts.Plan.PgStatStep
-		return cfg.SnapTables, cfg.PgLocksEnabled, cfg.PgLocksIntervalSeconds, cfg.IntervalSeconds
+		intervalSecs := cfg.IntervalSeconds
+		if intervalSecs <= 0 {
+			intervalSecs = opts.Plan.RunSettings.SnapshotIntervalSeconds
+		}
+		return cfg.SnapTables, cfg.PgLocksEnabled, cfg.PgLocksIntervalSeconds, intervalSecs
 	}
 	// Backward compat: no pg_stat step → use plan-level tables, no pg_locks, default interval
 	return opts.Plan.EnabledSnapTables, false, 0, opts.Plan.RunSettings.SnapshotIntervalSeconds

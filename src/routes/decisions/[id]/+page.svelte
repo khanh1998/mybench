@@ -83,7 +83,6 @@
   let suiteServerId = $state<number|null>(null);
   let suiteEc2ServerId = $state<number|null>(null);
   let suiteDatabase = $state('');
-  let suiteSnapshotInterval = $state(30);
   let suiteUsePrivateIp = $state(false);
   let suiteDesigns = $state<SuiteDesignEntry[]>([]);
   let suiteDecisionProfileIds = $state<number[]>([]);
@@ -105,7 +104,6 @@
     suiteServerId = null;
     suiteEc2ServerId = null;
     suiteDatabase = '';
-    suiteSnapshotInterval = 30;
     suiteUsePrivateIp = false;
     showSuiteModal = true;
 
@@ -153,7 +151,6 @@
       name: suiteName || undefined,
       server_id: suiteServerId,
       database: suiteDatabase || undefined,
-      snapshot_interval_seconds: suiteSnapshotInterval,
     };
     body.ec2_server_id = suiteEc2ServerId;
     if (suiteUsePrivateIp) body.use_private_ip = true;
@@ -637,11 +634,6 @@
         <div class="form-group">
           <label for="suite-db">Database</label>
           <input id="suite-db" bind:value={suiteDatabase} placeholder="— use each design's own database —" />
-        </div>
-
-        <div class="form-group">
-          <label for="suite-snap">Snapshot interval (s)</label>
-          <input id="suite-snap" type="number" bind:value={suiteSnapshotInterval} min="5" max="300" />
         </div>
 
         <div class="form-group">

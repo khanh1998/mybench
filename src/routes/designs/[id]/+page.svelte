@@ -133,7 +133,6 @@
   // Run modal ephemeral state (editable, not persisted)
   let runServer = $state<number|null>(null);
   let runDatabase = $state('');
-  let runSnapshotInterval = $state(30);
   let runProfile = $state<string|null>(null); // 'decision:ID' | 'design:ID' | null
   let runName = $state('');
   let runEc2ServerId = $state<number|null>(null);
@@ -158,7 +157,6 @@
   let seriesEc2ServerId = $state<number|null>(null);
   let seriesServer = $state<number|null>(null);
   let seriesDatabase = $state('');
-  let seriesSnapshotInterval = $state(30);
   let seriesUsePrivateIp = $state(false);
 
   const seriesPrivateIpApplicable = $derived((() => {
@@ -295,7 +293,6 @@
     seriesEc2ServerId = null;
     seriesServer = design.server_id;
     seriesDatabase = design.database;
-    seriesSnapshotInterval = design.snapshot_interval_seconds;
     seriesUsePrivateIp = false;
     showSeriesModal = true;
   }
@@ -329,7 +326,6 @@
       name: seriesName || undefined,
       server_id: seriesServer,
       database: seriesDatabase,
-      snapshot_interval_seconds: seriesSnapshotInterval,
       ec2_server_id: seriesEc2ServerId
     };
     if (seriesUsePrivateIp) body.use_private_ip = true;
@@ -351,12 +347,12 @@
       if (weightErrors.length > 0) parts.push(`${weightErrors.length} active script weight issue(s)`);
       if (hasScriptWeightErrors) parts.push('invalid script weight expressions');
       if (hasPerfDurationErrors) parts.push('invalid perf duration expressions');
+      if (intervalErrors.length > 0) parts.push(`${intervalErrors.length} missing snapshot interval(s)`);
       msg = `Cannot run: ${parts.join(', ')}. Check validation.`;
       return;
     }
     runServer = design.server_id;
     runDatabase = design.database;
-    runSnapshotInterval = design.snapshot_interval_seconds;
     runProfile = null;
     runName = '';
     runEc2ServerId = null;
@@ -486,7 +482,15 @@
     return errors;
   }));
   const hasPerfDurationErrors = $derived(Object.keys(perfDurationErrors).length > 0 || perfStepValidationErrors.length > 0);
-  const isValid = $derived(validationErrors.length === 0 && weightErrors.length === 0 && !hasScriptWeightErrors && !hasPerfDurationErrors);
+  const intervalErrors = $derived((design?.steps ?? []).flatMap((step: Step) => {
+    if (!step.enabled) return [];
+    if (step.type === 'pg_stat' && !step.pg_stat_interval_seconds?.trim())
+      return [`"${step.name}": pg_stat snapshot interval is required`];
+    if (step.type === 'proc' && !step.proc_interval_seconds?.trim())
+      return [`"${step.name}": proc snapshot interval is required`];
+    return [];
+  }));
+  const isValid = $derived(validationErrors.length === 0 && weightErrors.length === 0 && !hasScriptWeightErrors && !hasPerfDurationErrors && intervalErrors.length === 0);
 
   function stepTypeLabel(type: DesignStepType): string {
     const found = STEP_TYPE_OPTIONS.find((option) => option.value === type);
@@ -552,7 +556,6 @@
       design_id: id,
       server_id: runServer,
       database: runDatabase,
-      snapshot_interval_seconds: runSnapshotInterval,
       profile_id: profileId,
       profile_source: profileSource,
       name: runName || undefined,
@@ -761,7 +764,7 @@
       class:warn={!isValid}
       class:active={showValidation}
       title="Validation status"
-    >{isValid ? '✓ Valid' : `⚠ ${validationErrors.length + weightErrors.length + Object.keys(scriptWeightErrors).length + Object.keys(perfDurationErrors).length + perfStepValidationErrors.length} issue(s)`}</button>
+    >{isValid ? '✓ Valid' : `⚠ ${validationErrors.length + weightErrors.length + Object.keys(scriptWeightErrors).length + Object.keys(perfDurationErrors).length + perfStepValidationErrors.length + intervalErrors.length} issue(s)`}</button>
     <button onclick={save} disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
     <button class="primary" onclick={openRunModal} disabled={startingRun}>
       {startingRun ? 'Starting…' : '▶ Run'}
@@ -800,6 +803,12 @@
         <div class="validation-item">· step #{sid}: {err}</div>
       {/each}
       {#each perfStepValidationErrors as err}
+        <div class="validation-item">· {err}</div>
+      {/each}
+    {/if}
+    {#if intervalErrors.length > 0}
+      <div class="validation-title" style={(validationErrors.length > 0 || weightErrors.length > 0 || hasScriptWeightErrors || hasPerfDurationErrors) ? 'margin-top:8px' : ''}>⚠ Missing snapshot interval:</div>
+      {#each intervalErrors as err}
         <div class="validation-item">· {err}</div>
       {/each}
     {/if}
@@ -938,11 +947,6 @@
         <label for="run-db">Database</label>
         <input id="run-db" bind:value={runDatabase} placeholder="benchmark_db" />
       </div>
-      <div class="form-group">
-        <label for="run-snap" title="How often pg_stat_* snapshots are collected">Snapshot interval (s)</label>
-        <input id="run-snap" type="number" bind:value={runSnapshotInterval} min="5" max="300" />
-      </div>
-
       <!-- bench steps summary -->
       {#if design.steps.filter(s => s.enabled && (s.type === 'pgbench' || s.type === 'sysbench')).length > 0}
         <div class="run-steps-summary">
@@ -1091,11 +1095,6 @@
         <label for="series-db">Database</label>
         <input id="series-db" bind:value={seriesDatabase} placeholder="benchmark_db" />
       </div>
-      <div class="form-group">
-        <label for="series-snap">Snapshot interval (s)</label>
-        <input id="series-snap" type="number" bind:value={seriesSnapshotInterval} min="5" max="300" />
-      </div>
-
       <div class="modal-actions">
         <button onclick={() => showSeriesModal = false}>Cancel</button>
         <button class="primary" onclick={startSeries}
@@ -1572,18 +1571,21 @@
           <div class="pg-stat-row">
             <!-- Snapshot interval -->
             <div class="perf-mode-section pg-stat-interval-box">
-              <div class="pg-stat-section-header">Snapshot interval</div>
+              <div class="pg-stat-section-header">Snapshot interval (s)</div>
               <label style="font-weight:400">
                 <input
                   bind:value={selectedStep.pg_stat_interval_seconds}
-                  placeholder="30 or {`{{INTERVAL}}`}"
+                  placeholder="e.g. 30 or {`{{INTERVAL}}`}"
                   spellcheck="false"
+                  class:input-error={!selectedStep.pg_stat_interval_seconds?.trim()}
                 />
                 {#if resolveParamPreview(selectedStep.pg_stat_interval_seconds)}
                   {@const preview = resolveParamPreview(selectedStep.pg_stat_interval_seconds)!}
                   <span class="param-preview" class:param-preview-error={preview.unresolved.length > 0}>
                     {preview.unresolved.length > 0 ? `unresolved: ${preview.unresolved.join(', ')}` : `→ ${preview.text}`}
                   </span>
+                {:else if !selectedStep.pg_stat_interval_seconds?.trim()}
+                  <span style="color:#f38ba8; font-size:11px; display:block; margin-top:2px">Required — enter a number or {`{{PARAM}}`}</span>
                 {/if}
               </label>
             </div>
@@ -1711,18 +1713,21 @@
 
           <!-- Snapshot interval -->
           <div class="perf-mode-section">
-            <div class="pg-stat-section-header">Snapshot interval</div>
+            <div class="pg-stat-section-header">Snapshot interval (s)</div>
             <label style="font-weight:400">
               <input
                 bind:value={selectedStep.proc_interval_seconds}
-                placeholder="e.g. 30 or {`{{INTERVAL}}`} — leave empty to use run default"
+                placeholder="e.g. 30 or {`{{INTERVAL}}`}"
                 spellcheck="false"
+                class:input-error={!selectedStep.proc_interval_seconds?.trim()}
               />
               {#if resolveParamPreview(selectedStep.proc_interval_seconds)}
                 {@const preview = resolveParamPreview(selectedStep.proc_interval_seconds)!}
                 <span class="param-preview" class:param-preview-error={preview.unresolved.length > 0}>
                   {preview.unresolved.length > 0 ? `unresolved: ${preview.unresolved.join(', ')}` : `→ ${preview.text}`}
                 </span>
+              {:else if !selectedStep.proc_interval_seconds?.trim()}
+                <span style="color:#f38ba8; font-size:11px; display:block; margin-top:2px">Required — enter a number or {`{{PARAM}}`}</span>
               {/if}
             </label>
           </div>
@@ -2599,7 +2604,7 @@
     text-align: center;
     flex-shrink: 0;
   }
-  .weight-input-error {
+  .weight-input-error, .input-error {
     border-color: #f38ba8 !important;
     color: #f38ba8;
   }

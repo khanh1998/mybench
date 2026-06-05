@@ -12,7 +12,6 @@ export const POST: RequestHandler = async ({ request }) => {
 		ec2_server_id,
 		server_id,
 		database,
-		snapshot_interval_seconds,
 		use_private_ip
 	} = body;
 
@@ -37,7 +36,6 @@ export const POST: RequestHandler = async ({ request }) => {
 			ec2_server_id: ec2_server_id ? Number(ec2_server_id) : null,
 			server_id: server_id ? Number(server_id) : undefined,
 			database: database || undefined,
-			snapshot_interval_seconds: snapshot_interval_seconds ? Number(snapshot_interval_seconds) : undefined,
 			use_private_ip: !!use_private_ip
 		});
 		return json({ suite_id: suiteId }, { status: 201 });

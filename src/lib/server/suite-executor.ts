@@ -96,7 +96,6 @@ export interface StartSuiteOptions {
 	ec2_server_id?: number | null;
 	server_id?: number;
 	database?: string;
-	snapshot_interval_seconds?: number;
 	use_private_ip?: boolean;
 }
 
@@ -168,7 +167,6 @@ async function executeLocalSuiteAsync(
 				name: designName,
 				server_id: opts.server_id,
 				database: opts.database,
-				snapshot_interval_seconds: opts.snapshot_interval_seconds,
 				suite_id: suiteId,
 				useDecisionProfiles: true,
 			});
@@ -229,7 +227,6 @@ async function executeEc2SuiteAsync(
 		designName: string;
 		designToken: string;
 		seriesId: number;
-		snapshot_interval_seconds: number;
 		runs: SuiteRunEntry[];
 	}
 	const designEntries: DesignEntry[] = [];
@@ -252,7 +249,7 @@ async function executeEc2SuiteAsync(
 
 		const designName = design.name;
 		const designToken = randomUUID();
-		const snapshot_interval_seconds = opts.snapshot_interval_seconds ?? design.snapshot_interval_seconds;
+		const snapshot_interval_seconds = design.snapshot_interval_seconds;
 
 		const seriesResult = db.prepare(`
 			INSERT INTO benchmark_series (design_id, name, delay_seconds, status, created_at, suite_id, ec2_run_token)
@@ -299,7 +296,7 @@ async function executeEc2SuiteAsync(
 			runs.push({ runId, token: runToken, profileName, cliProfileName, seriesId, designId: dc.design_id, designToken });
 		}
 
-		designEntries.push({ designId: dc.design_id, designName, designToken, seriesId, snapshot_interval_seconds, runs });
+		designEntries.push({ designId: dc.design_id, designName, designToken, seriesId, runs });
 	}
 
 	// Flat list matching the series command's run_index order
@@ -337,7 +334,6 @@ async function executeEc2SuiteAsync(
 		for (const de of designEntries) {
 			const plan = generatePlan(de.designId, {
 				server_id: opts.server_id,
-				snapshot_interval_seconds: de.snapshot_interval_seconds,
 				use_private_ip: !!opts.use_private_ip,
 				suiteMode: true
 			});

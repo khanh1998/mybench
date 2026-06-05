@@ -7,7 +7,6 @@ const EXCLUDED_SNAP_COLS = new Set(['_id', '_run_id', '_collected_at', '_phase',
 export interface PlanRunSettingsOverride {
 	server_id?: number;
 	database?: string;
-	snapshot_interval_seconds?: number;
 	use_private_ip?: boolean;
 	suiteMode?: boolean;
 }
@@ -23,7 +22,7 @@ function mergeParams(
 
 /**
  * Generates the plan JSON for a design, suitable for passing to mybench-runner.
- * Optionally override run_settings fields (e.g. snapshot_interval_seconds).
+ * Optionally override server, database, or network settings.
  */
 export function generatePlan(designId: number, overrides: PlanRunSettingsOverride = {}): object {
 	const db = getDb();
@@ -245,8 +244,9 @@ export function generatePlan(designId: number, overrides: PlanRunSettingsOverrid
 			resolvedSnapTables.push({ pg_view_name: pgViewName, snap_table_name: snapTableName, columns: getSnapColumns(snapTableName) });
 		}
 
-		// 4. Resolve {{PARAM}} in interval fields
-		const intervalSecs = Math.max(5, parseInt(resolveParamExpr(pgStatStep.pg_stat_interval_seconds || '30'), 10) || 30);
+		// 4. Resolve {{PARAM}} in interval fields; 0 = use run-level snapshot_interval_seconds (same as proc)
+		const rawIntervalSecs = parseInt(resolveParamExpr(pgStatStep.pg_stat_interval_seconds || ''), 10) || 0;
+		const intervalSecs = rawIntervalSecs > 0 ? Math.max(5, rawIntervalSecs) : 0;
 		const pgLocksIntervalSecs = parseInt(resolveParamExpr(pgStatStep.pg_stat_pg_locks_interval || ''), 10) || 0;
 
 		// 5. pg_stat_statements columns (only needed when collecting at bench end)
@@ -287,7 +287,7 @@ export function generatePlan(designId: number, overrides: PlanRunSettingsOverrid
 		design_name: design.name,
 		server: serverInfo,
 		run_settings: {
-			snapshot_interval_seconds: overrides.snapshot_interval_seconds ?? design.snapshot_interval_seconds,
+			snapshot_interval_seconds: design.snapshot_interval_seconds,
 			pre_collect_secs: design.pre_collect_secs,
 			post_collect_secs: design.post_collect_secs
 		},

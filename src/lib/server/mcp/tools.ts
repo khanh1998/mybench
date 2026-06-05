@@ -115,7 +115,7 @@ and the recommended workflow for creating and running a benchmark plan.`
 								'Recommended minimal set: ["loadavg","meminfo","stat","diskstats","pid_stat","pid_io"]',
 								'Placeholder example: \'["loadavg","meminfo","stat","diskstats","pid_stat","pid_io"]\''
 							],
-							proc_interval_seconds: 'Collection interval in seconds. Supports {{PARAM}}. Empty = use the design\'s snapshot_interval_seconds (default 30). Use "1" for high-resolution CPU/disk sampling; "5"–"10" for lighter overhead. Placeholder example: "30 or {{INTERVAL}} — leave empty to use run default"',
+							proc_interval_seconds: 'Collection interval in seconds. Supports {{PARAM}}. Empty = falls back to the design\'s snapshot_interval_seconds (configure_design, default 30). Use "1" for high-resolution CPU/disk sampling; "5"–"10" for lighter overhead. Placeholder example: "{{INTERVAL}}"',
 							enabled: 'boolean'
 						},
 						note: 'Requires ssh_enabled=true and SSH credentials on the PostgreSQL server record (Settings → PG Servers). Results stored in host_snap_* tables (one per group) queryable via query_run_data.'
@@ -186,7 +186,7 @@ and the recommended workflow for creating and running a benchmark plan.`
 								'  "pg_stat_statements"       — SPECIAL: collected once at bench end, not on interval. Include here or set pg_stat_collect_statements=true.',
 								'Tip: for focused benchmarks use a subset, e.g. ["pg_stat_database","pg_stat_user_tables","pg_stat_wal","pg_stat_io"]'
 							],
-							pg_stat_interval_seconds: 'How often to take snapshots during the bench, in seconds. Supports {{PARAM}}. Empty = use the design\'s snapshot_interval_seconds (default 30). Shorter intervals (e.g. 5) give finer time-series resolution but add more rows. Placeholder example: "30 or {{INTERVAL}}"',
+							pg_stat_interval_seconds: 'How often to take snapshots during the bench, in seconds. Supports {{PARAM}}. Empty = falls back to the design\'s snapshot_interval_seconds (configure_design, default 30). Shorter intervals (e.g. 5) give finer time-series resolution but add more rows. Placeholder example: "{{INTERVAL}}"',
 							pg_stat_pg_locks_enabled: 'boolean — whether to also collect pg_locks on each interval. pg_locks captures active locks and waiting queries — useful for contention analysis but can be noisy under high concurrency. Defaults to false.',
 							pg_stat_pg_locks_interval: 'Collection interval for pg_locks in seconds. Supports {{PARAM}}. Empty = use pg_stat_interval_seconds. Set higher (e.g. "60") to sample locks less frequently. Placeholder example: "60 or {{LOCKS_INTERVAL}}"',
 							pg_stat_reset_stats: 'boolean — call pg_stat_reset() before the benchmark starts. Zeroes all cumulative counters in pg_stat_database, pg_stat_user_tables, pg_statio_*, pg_stat_wal, etc. Recommended: true — gives clean deltas for what the benchmark caused.',
@@ -225,7 +225,7 @@ and the recommended workflow for creating and running a benchmark plan.`
 					}
 				},
 				param_syntax: 'Write {{PARAM_NAME}} in any step script or pgbench_options (also used for sysbench flags). Set the value with set_params. Example: "INSERT INTO users SELECT generate_series(1, {{NUM_USERS}})"',
-				design_server_assignment: 'When creating a design, you can set server_id, database, and snapshot settings with configure_design. You can also override server_id, database, snapshot_interval_seconds, and ec2_server_id at run time with run_design.',
+				design_server_assignment: 'When creating a design, you can set server_id, database, and snapshot settings with configure_design (including snapshot_interval_seconds as the fallback interval). Snapshot intervals are configured per-step: pg_stat_interval_seconds on pg_stat steps, proc_interval_seconds on proc steps. You can override server_id and database at run time with run_design.',
 				recommended_workflow: [
 					'1. get_context (this tool) — understand conventions and see available servers',
 					'2. list_decisions — find existing decisions, or create_decision for a new one',
@@ -238,7 +238,7 @@ and the recommended workflow for creating and running a benchmark plan.`
 					'8a. upsert_decision_profile(decision_id, name, values) — optional: create decision-level profiles (e.g. "small"/"large") for suite runs. Use list_decision_profiles / delete_decision_profile to manage them.',
 					'8b. upsert_profile(design_id, name, values) — optional: create design-level profiles for single/series runs.',
 					'9. validate_design(design_id) — check for issues (undefined params, missing server, no bench step) before running',
-					'10. run_design(design_id, {profile_id?, profile_source?, name?, server_id?, database?, snapshot_interval_seconds?, ec2_server_id?}) — start a test run and get run_id. Pass profile_source="decision" to use a decision-level profile.',
+					'10. run_design(design_id, {profile_id?, profile_source?, name?, server_id?, database?, ec2_server_id?}) — start a test run and get run_id. Pass profile_source="decision" to use a decision-level profile.',
 					'11. get_run(run_id) — wait ~(bench duration + collect durations) before first poll, then every ~30s',
 					'12. export_plan(design_id) — get plan.json for production mybench-runner CLI',
 					'--- Analysis (after runs complete) ---',
@@ -685,9 +685,9 @@ Use {{PARAM_NAME}} in scripts and pgbench_options — values come from set_param
 				perf_call_graph: z.string().optional().describe('[type=perf] Stack unwinding for flame graphs: "dwarf" (default, broad compat), "fp" (low overhead, needs -fno-omit-frame-pointer), "lbr" (Intel only, zero overhead).'),
 				perf_mmap_pages: z.string().optional().describe('[type=perf] Ring buffer size for perf record/trace in pages (must be power of 2). Supports {{PARAM}}. Default "4096" (16 MB). Increase if you see lost samples or dropped events. E.g. "4096 or {{MMAP_PAGES}}"'),
 				proc_groups: z.string().optional().describe('[type=proc] JSON array of /proc group keys to collect. Empty array or omit = all groups. System groups: "loadavg" (/proc/loadavg), "meminfo" (/proc/meminfo), "stat" (/proc/stat — per-CPU ticks), "vmstat" (/proc/vmstat), "diskstats" (/proc/diskstats), "net_dev" (/proc/net/dev), "schedstat" (/proc/schedstat), "pressure" (/proc/pressure/), "file_nr" (/proc/sys/fs/file-nr). Per-process groups (postgres PID): "pid_stat","pid_statm","pid_io","pid_schedstat","pid_wchan","pid_fd","pid_status". Recommended minimal set: \'["loadavg","meminfo","stat","diskstats","pid_stat","pid_io"]\''),
-				proc_interval_seconds: z.string().optional().describe('[type=proc] Collection interval in seconds. Supports {{PARAM}}. Empty = use design snapshot_interval_seconds. Use "1" for high-resolution sampling; "5"–"10" for lighter overhead. E.g. "30 or {{INTERVAL}} — leave empty to use run default".'),
+				proc_interval_seconds: z.string().optional().describe('[type=proc] Collection interval in seconds. Supports {{PARAM}}. Empty = falls back to the design\'s snapshot_interval_seconds (configure_design, default 30). Use "1" for high-resolution sampling; "5"–"10" for lighter overhead. E.g. "{{INTERVAL}}".'),
 				pg_stat_tables: z.string().optional().describe('[type=pg_stat] JSON array of PG view names to snapshot on each interval. Empty array = all supported tables (recommended). Available: "pg_stat_database","pg_stat_bgwriter","pg_stat_checkpointer","pg_stat_user_tables","pg_stat_user_indexes","pg_statio_user_tables","pg_statio_user_indexes","pg_statio_user_sequences","pg_stat_database_conflicts","pg_stat_archiver","pg_stat_slru","pg_stat_user_functions","pg_stat_wal","pg_stat_replication_slots","pg_stat_io","pg_stat_activity","pg_stat_replication","pg_stat_subscription","pg_stat_subscription_stats". Add "pg_stat_statements" to collect it once at bench end. Focused example: \'["pg_stat_database","pg_stat_user_tables","pg_stat_wal","pg_stat_io"]\''),
-				pg_stat_interval_seconds: z.string().optional().describe('[type=pg_stat] Snapshot interval in seconds. Supports {{PARAM}}. Empty = use design snapshot_interval_seconds (default 30). Lower values give finer resolution. E.g. "30 or {{INTERVAL}}".'),
+				pg_stat_interval_seconds: z.string().optional().describe('[type=pg_stat] Snapshot interval in seconds. Supports {{PARAM}}. Empty = falls back to the design\'s snapshot_interval_seconds (configure_design, default 30). Lower values give finer resolution. E.g. "{{INTERVAL}}".'),
 				pg_stat_pg_locks_enabled: z.boolean().optional().describe('[type=pg_stat] Enable pg_locks collection on each interval. Captures active locks and waiting queries — useful for contention analysis but noisy under high concurrency. Defaults to false.'),
 				pg_stat_pg_locks_interval: z.string().optional().describe('[type=pg_stat] Collection interval for pg_locks in seconds. Supports {{PARAM}}. Empty = use pg_stat_interval_seconds. Set higher (e.g. "60") to reduce row volume. E.g. "60 or {{LOCKS_INTERVAL}}".'),
 				pg_stat_reset_stats: z.boolean().optional().describe('[type=pg_stat] Call pg_stat_reset() before bench — zeroes cumulative counters in pg_stat_database, pg_stat_user_tables, pg_statio_*, pg_stat_wal, etc. Recommended: true for clean deltas.'),
@@ -1087,6 +1087,14 @@ Call this before run_design or export_plan to catch problems early.`,
 						issues.push({ severity: 'warning', code: 'COLLECT_ZERO_DURATION', message: `wait step "${step.name}" has duration_secs = 0. It will use the design-level pre/post collect settings.` });
 					}
 
+					if (step.type === 'pg_stat' && !step.pg_stat_interval_seconds?.trim()) {
+						issues.push({ severity: 'error', code: 'PG_STAT_INTERVAL_REQUIRED', message: `pg_stat step "${step.name}": pg_stat_interval_seconds is required. Set it to a number (e.g. 30) or a {{PARAM}}.` });
+					}
+
+					if (step.type === 'proc' && !step.proc_interval_seconds?.trim()) {
+						issues.push({ severity: 'error', code: 'PROC_INTERVAL_REQUIRED', message: `proc step "${step.name}": proc_interval_seconds is required. Set it to a number (e.g. 30) or a {{PARAM}}.` });
+					}
+
 					if (step.type === 'perf') {
 						// Helper: a perf duration/delay/count field must be empty, a plain integer, or a single {{PARAM}}
 						const isValidPerfField = (v: string) => v.trim() === '' || /^\d+$/.test(v.trim()) || /^\{\{[\w]+\}\}$/.test(v.trim());
@@ -1201,9 +1209,8 @@ Call this before run_design or export_plan to catch problems early.`,
 			description: `Starts a benchmark run for a design. Returns run_id immediately — poll get_run(run_id) until status is "completed" or "failed".
 Executes all enabled steps in order: sql setup → wait → pgbench → wait → sql teardown.
 Optional query-level steps can be inserted anywhere: pg_stat_statements_reset and pg_stat_statements_collect.
-By default this runs locally. If ec2_server_id is provided, it launches the run on that EC2 runner instead.
-You can override server_id, database, and snapshot_interval_seconds for either run location.
-This is a validation/test run. For production benchmarking, use export_plan + mybench-runner on EC2.
+ec2_server_id is required — local runs are no longer supported.
+You can override server_id and database at run time. Snapshot intervals are configured per-step (pg_stat_interval_seconds on pg_stat steps, proc_interval_seconds on proc steps) and fall back to the design's snapshot_interval_seconds (configure_design) when empty.
 
 Polling strategy: before polling, estimate total run duration from the design steps:
 - For each pgbench step: parse the -T <seconds> flag from pgbench_options (e.g. "-T 60" → 60s)
@@ -1215,17 +1222,16 @@ Example: pgbench -T 120 + two 15s wait steps → wait ~150s before first poll.`,
 				design_id: z.number().int(),
 				server_id: z.number().int().optional().describe('Optional run-time PostgreSQL server override'),
 				database: z.string().optional().describe('Optional run-time database override'),
-				snapshot_interval_seconds: z.number().int().optional().describe('Optional run-time pg_stat_* snapshot interval override'),
 				profile_id: z.number().int().optional().describe('Optional profile ID to apply param overrides'),
 				name: z.string().optional().describe('Optional run name; defaults to profile name if a profile is used'),
 				ec2_server_id: z.number().int().describe('EC2 runner ID from get_context ec2_servers. Required — use list_ec2_servers to find available runners.')
 			}
 		},
-		async ({ design_id, server_id, database, snapshot_interval_seconds, profile_id, name, ec2_server_id }) => {
+		async ({ design_id, server_id, database, profile_id, name, ec2_server_id }) => {
 			if (!ec2_server_id) {
 				return text({ error: 'ec2_server_id is required. Local runs are no longer supported. Use list_ec2_servers to find an available runner.' });
 			}
-			const runId = startEc2Run(design_id, ec2_server_id, { server_id, database, snapshot_interval_seconds, profile_id, name });
+			const runId = startEc2Run(design_id, ec2_server_id, { server_id, database, profile_id, name });
 			return text({ run_id: runId, message: 'Run started. Poll get_run(run_id) for status.' });
 		}
 	);

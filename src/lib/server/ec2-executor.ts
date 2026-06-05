@@ -21,7 +21,6 @@ export interface StartEc2RunOptions {
 	profile_id?: number;
 	profile_source?: 'decision' | 'design';
 	name?: string;
-	snapshot_interval_seconds?: number;
 	use_private_ip?: boolean;
 }
 
@@ -86,7 +85,7 @@ export function startEc2Run(
 	const db = getDb();
 
 	const design = db.prepare('SELECT * FROM designs WHERE id = ?').get(Number(designId)) as
-		| { id: number; name: string; database: string; server_id: number | null; pre_collect_secs: number; post_collect_secs: number }
+		| { id: number; name: string; database: string; server_id: number | null; pre_collect_secs: number; post_collect_secs: number; snapshot_interval_seconds: number }
 		| undefined;
 	if (!design) throw new Error(`Design ${designId} not found`);
 	const resolvedDatabase = opts.database ?? design.database;
@@ -128,7 +127,7 @@ export function startEc2Run(
 			design.id,
 			resolvedDatabase,
 			now,
-			opts.snapshot_interval_seconds ?? 30,
+			design.snapshot_interval_seconds,
 			design.pre_collect_secs,
 			design.post_collect_secs,
 			runName,
@@ -444,7 +443,6 @@ async function executeEc2RunAsync(
 		const plan = generatePlan(designId, {
 			server_id: opts.server_id,
 			database: opts.database,
-			snapshot_interval_seconds: opts.snapshot_interval_seconds,
 			use_private_ip: opts.use_private_ip
 		});
 		writeFileSync(localPlanPath, JSON.stringify(plan));
