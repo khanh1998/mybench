@@ -79,13 +79,47 @@ and the recommended workflow for creating and running a benchmark plan.`
 				data_model: {
 					decisions: 'Top-level question you are answering (e.g. "Which table design is faster?"). Contains one or more designs. Can define shared decision-level params and profiles.',
 					designs: 'One candidate design to benchmark (e.g. "plain table" vs "partitioned table"). Each design is linked to a database server and has steps + params. Inherits all decision-level params and profiles.',
-					steps: 'Ordered list of actions: sql setup → wait for pre-stats → optional pg_stat_statements reset → pgbench or sysbench load test → optional pg_stat_statements collect → wait for post-stats → sql teardown.',
-					params: 'Named values (e.g. NUM_USERS=1000) substituted as {{NAME}} in all step scripts. Two levels: (1) decision-level params shared across all designs (managed via the Parameters tab on the decision screen); (2) design-level params local to one design (managed with set_params). Design overrides win on same name. {{PARAM}} is valid in a step if the param exists at either level.',
+					steps: 'Ordered list of actions: sql setup → pgbench or sysbench load test → sql teardown. Optionally add a pg_stat step (snapshot config, position irrelevant — see step_types.pg_stat) and a proc step (host metrics config, same). Add a proc step for OS host metrics.',
+					params: 'Named values (e.g. NUM_USERS=1000) substituted as {{NAME}} in step scripts and pgbench_options. Two levels — choose based on scope: DECISION-LEVEL (set_decision_params): use for any value that is the same across multiple designs, or that you may want to change in one place and have it affect all designs at once (e.g. NUM_CLIENTS, DURATION_SECS, NUM_ROWS, SNAPSHOT_INTERVAL, TRANSFER_WEIGHT). This is the default choice for most params. DESIGN-LEVEL (set_params): use only for values that intentionally differ between designs (e.g. a design-specific index hint or a table name that varies per candidate). Rule of thumb: if you find yourself setting the same param name to the same value in multiple designs, move it to the decision level.',
 					profiles: 'Named sets of param overrides (e.g. "small"=NUM_USERS:100, "large"=NUM_USERS:10000) for running the same design at different scales. Two levels: (1) decision-level profiles managed on the decision screen — used exclusively in suite runs; (2) design-level profiles managed with upsert_profile/list_profiles/delete_profile — used in single and series runs. Both levels are available in the profile picker for single/series runs (design wins).',
-					param_inheritance: 'Effective params for a design = decision params + design overrides (design wins on same name). For suite runs, only decision-level params and profiles are used (design overrides are ignored). For single/series runs, both levels are merged and either level\'s profiles are available.',
+					param_inheritance: 'Effective params for a design = decision params merged with design params (design wins on the same name). Practical implication: put shared config at the decision level so changing one value propagates to every design automatically — you never have to visit each design individually. Only put a param at the design level when that design genuinely needs a different value from the others. Suite runs use ONLY decision-level params and profiles (design-level params are ignored); single/series runs merge both levels.',
 					suite_vs_single: 'Suite run (POST /api/suites): uses ONLY decision-level params and decision-level profiles — pass decision_profile_ids per design. Single run (run_design / POST /api/runs): uses merged params; profile_id refers to a design-level profile by default, pass profile_source="decision" to use a decision-level profile.'
 				},
 				step_types: {
+					proc: {
+						description: 'Collects Linux /proc host metrics from the database server via SSH during the benchmark. Configuration-only step — actual collection starts when the pgbench/sysbench step begins. Not supported for managed databases (RDS, Cloud SQL).',
+						fields: {
+							type: '"proc"',
+							name: 'string',
+							position: 'integer (does not affect execution order — collection always wraps the bench step)',
+							proc_groups: [
+								'JSON array of /proc group keys to collect. Empty array = all groups. Pass a subset to reduce noise.',
+								'System-level groups (reads from the paths shown):',
+								'  "loadavg"    — /proc/loadavg          — 1/5/15-min load averages, running and total thread counts',
+								'  "meminfo"    — /proc/meminfo          — MemFree, MemAvailable, Cached, Dirty, SwapUsed, HugePages',
+								'  "stat"       — /proc/stat             — per-CPU user/sys/iowait/steal ticks, context switches, interrupts',
+								'  "vmstat"     — /proc/vmstat           — page faults, pgpgin/pgpgout, swap in/out, dirty pages, writeback',
+								'  "diskstats"  — /proc/diskstats        — read/write IOPS, sectors, and queue time per block device',
+								'  "net_dev"    — /proc/net/dev          — rx/tx bytes, packets, errors, and drops per network interface',
+								'  "schedstat"  — /proc/schedstat        — per-CPU run time, wait time, and timeslices (scheduler stats)',
+								'  "pressure"   — /proc/pressure/        — PSI some/full avg10/avg60/avg300 for CPU, memory, and I/O',
+								'  "file_nr"    — /proc/sys/fs/file-nr   — system-wide allocated and maximum file descriptor count',
+								'Per-process groups (scoped to the postgres process PID):',
+								'  "pid_stat"       — /proc/[pid]/stat      — state, utime, stime, minflt, majflt, vsize, rss, num_threads',
+								'  "pid_statm"      — /proc/[pid]/statm     — size, resident, shared, text, data pages',
+								'  "pid_io"         — /proc/[pid]/io        — rchar, wchar, read_bytes, write_bytes, cancelled_write_bytes',
+								'  "pid_schedstat"  — /proc/[pid]/schedstat — run_time_ns, wait_time_ns, timeslices',
+								'  "pid_wchan"      — /proc/[pid]/wchan     — kernel function the process is sleeping in',
+								'  "pid_fd"         — /proc/[pid]/fd        — open file descriptor count',
+								'  "pid_status"     — /proc/[pid]/status    — VmPeak, VmRSS, VmSwap, Threads, voluntary/involuntary context switches',
+								'Recommended minimal set: ["loadavg","meminfo","stat","diskstats","pid_stat","pid_io"]',
+								'Placeholder example: \'["loadavg","meminfo","stat","diskstats","pid_stat","pid_io"]\''
+							],
+							proc_interval_seconds: 'Collection interval in seconds. Supports {{PARAM}}. Empty = use the design\'s snapshot_interval_seconds (default 30). Use "1" for high-resolution CPU/disk sampling; "5"–"10" for lighter overhead. Placeholder example: "30 or {{INTERVAL}} — leave empty to use run default"',
+							enabled: 'boolean'
+						},
+						note: 'Requires ssh_enabled=true and SSH credentials on the PostgreSQL server record (Settings → PG Servers). Results stored in host_snap_* tables (one per group) queryable via query_run_data.'
+					},
 					sql: {
 						description: 'Runs a SQL script via psql. Use for CREATE TABLE, INSERT seed data, DROP TABLE, etc.',
 						fields: {
@@ -104,7 +138,7 @@ and the recommended workflow for creating and running a benchmark plan.`
 							name: 'string',
 							position: 'integer',
 							pgbench_options: 'e.g. "-c {{NUM_CLIENTS}} -j 2 -T 60 --no-vacuum --protocol=prepared"',
-							pgbench_scripts: 'array of {name, weight, script} — pgbench custom script language (\\set, BEGIN, SQL, END)',
+							pgbench_scripts: 'array of {name, weight, weight_expr?, script} — pgbench custom script language (\\set, BEGIN, SQL, END). weight is a fixed integer controlling transaction mix (e.g. weight=30 out of total=100 → ~30% of transactions; all weights must sum to ≤ 100). weight_expr is a string that supports {{PARAM}} substitution (e.g. "{{TRANSFER_WEIGHT}}") — it overrides weight when set, and is resolved at run time from decision-level or design-level params. Use weight_expr when you want to control the transaction mix ratio via a shared decision param across multiple designs.',
 							enabled: 'boolean'
 						},
 						note: 'Supports {{PARAM}} substitution in pgbench_options and in each pgbench script.'
@@ -121,35 +155,73 @@ and the recommended workflow for creating and running a benchmark plan.`
 						},
 						note: 'Supports {{PARAM}} substitution in script and pgbench_options. pg_stat_* snapshots wrap the run identically to pgbench.'
 					},
-					collect: {
-						description: 'Waits for duration_secs seconds while taking periodic pg_stat_* snapshots. Place before pgbench/sysbench for a baseline window or after for a post-run window.',
+					pg_stat: {
+						description: 'CONFIGURATION-ONLY step — tells mybench which PostgreSQL statistics to collect and how often. It does NOT execute in sequence with other steps. The runner automatically takes snapshots BEFORE, DURING (on pg_stat_interval_seconds), and AFTER the pgbench/sysbench step, regardless of where this step appears in the list. DO NOT place it after pgbench hoping to "collect after the bench" — position is completely irrelevant to when collection happens. One pg_stat step per design is sufficient. NOTE: this step is unrelated to the pg_stat_statements PostgreSQL extension — to capture per-query stats, set pg_stat_collect_statements=true or add "pg_stat_statements" to pg_stat_tables.',
 						fields: {
-							type: '"collect"',
+							type: '"pg_stat"',
 							name: 'string',
-							position: 'integer',
-							duration_secs: 'integer — seconds to wait while collecting snapshots',
-							enabled: 'boolean'
-						}
-					},
-					pg_stat_statements_reset: {
-						description: 'Resets pg_stat_statements before a benchmark. Use right before pgbench when you want query-level stats to start from zero.',
-						fields: {
-							type: '"pg_stat_statements_reset"',
-							name: 'string',
-							position: 'integer',
+							position: 'integer — has NO effect on execution order. Collection always wraps the bench step automatically. Any position value works; convention is to place it before the bench step for readability only.',
+							pg_stat_tables: [
+								'JSON array of PostgreSQL view names to snapshot on every interval. Empty array = all supported tables (recommended unless you need to reduce noise).',
+								'Available view names:',
+								'  "pg_stat_database"         — per-database transactions, cache hit rate, conflicts, deadlocks, temp files',
+								'  "pg_stat_bgwriter"         — background writer buffers written, checkpoints requested',
+								'  "pg_stat_checkpointer"     — checkpoint timing and buffers written (PG16+)',
+								'  "pg_stat_user_tables"      — per-table seq/index scans, rows inserted/updated/deleted, live/dead tuples, autovacuum',
+								'  "pg_stat_user_indexes"     — per-index scans and tuples fetched',
+								'  "pg_statio_user_tables"    — per-table heap/index/toast block hits and reads (buffer pool vs disk)',
+								'  "pg_statio_user_indexes"   — per-index block hits and reads',
+								'  "pg_statio_user_sequences" — sequence block hits and reads',
+								'  "pg_stat_database_conflicts" — recovery conflicts per database',
+								'  "pg_stat_archiver"         — WAL archiving activity and failures',
+								'  "pg_stat_slru"             — SLRU cache (commit log, subtransaction, notify) hits and reads',
+								'  "pg_stat_user_functions"   — per-function call count and total/self time',
+								'  "pg_stat_wal"              — WAL bytes written, WAL sync time, full-page writes',
+								'  "pg_stat_replication_slots" — replication slot activity',
+								'  "pg_stat_io"               — I/O by backend type and I/O object (PG16+)',
+								'  "pg_stat_activity"         — active queries, wait events, client info (snapshot of live state)',
+								'  "pg_stat_replication"      — streaming replication lag and state',
+								'  "pg_stat_subscription"     — subscription apply stats',
+								'  "pg_stat_subscription_stats" — per-subscription error and conflict counts',
+								'  "pg_stat_statements"       — SPECIAL: collected once at bench end, not on interval. Include here or set pg_stat_collect_statements=true.',
+								'Tip: for focused benchmarks use a subset, e.g. ["pg_stat_database","pg_stat_user_tables","pg_stat_wal","pg_stat_io"]'
+							],
+							pg_stat_interval_seconds: 'How often to take snapshots during the bench, in seconds. Supports {{PARAM}}. Empty = use the design\'s snapshot_interval_seconds (default 30). Shorter intervals (e.g. 5) give finer time-series resolution but add more rows. Placeholder example: "30 or {{INTERVAL}}"',
+							pg_stat_pg_locks_enabled: 'boolean — whether to also collect pg_locks on each interval. pg_locks captures active locks and waiting queries — useful for contention analysis but can be noisy under high concurrency. Defaults to false.',
+							pg_stat_pg_locks_interval: 'Collection interval for pg_locks in seconds. Supports {{PARAM}}. Empty = use pg_stat_interval_seconds. Set higher (e.g. "60") to sample locks less frequently. Placeholder example: "60 or {{LOCKS_INTERVAL}}"',
+							pg_stat_reset_stats: 'boolean — call pg_stat_reset() before the benchmark starts. Zeroes all cumulative counters in pg_stat_database, pg_stat_user_tables, pg_statio_*, pg_stat_wal, etc. Recommended: true — gives clean deltas for what the benchmark caused.',
+							pg_stat_reset_statements: 'boolean — call pg_stat_statements_reset() before the benchmark. Clears query-level counters so pg_stat_statements only shows queries from this run. No-op if pg_stat_statements is not installed.',
+							pg_stat_collect_statements: 'boolean — collect one pg_stat_statements snapshot at bench end: total calls, mean exec time, rows, plan info per query. Requires pg_stat_statements to be installed. Equivalent to adding "pg_stat_statements" to pg_stat_tables.',
 							enabled: 'boolean'
 						},
-						note: 'If pg_stat_statements is unavailable or cannot be reset, mybench logs a warning and continues.'
+						note: 'Snapshots are tagged with _phase ("pre"/"bench"/"post") — use MAX(col)-MIN(col) WHERE _phase=\'bench\' to compute deltas for cumulative counters.'
 					},
-					pg_stat_statements_collect: {
-						description: 'Captures a single pg_stat_statements snapshot for the current benchmark database. Place after pgbench.',
+					perf: {
+						description: 'Linux perf profiling step. Runs perf alongside the benchmark to collect CPU performance counters (perf stat), CPU flame graphs (perf record), or system-call traces (perf trace). Enable one or more sub-modes independently. Requires perf to be installed on the VPS and adequate permissions (perf_event_paranoid ≤ 1 or CAP_PERFMON).',
 						fields: {
-							type: '"pg_stat_statements_collect"',
+							type: '"perf"',
 							name: 'string',
-							position: 'integer',
+							position: 'integer (does not affect execution — perf always runs concurrently with the bench step)',
+							perf_stat_enabled: 'boolean — enable `perf stat`: collects hardware and software performance counter summaries (cycles, instructions, cache-misses, branch-misses, task-clock, context-switches). Low overhead. Results in the run log.',
+							perf_record_enabled: 'boolean — enable `perf record`: CPU sampling for flame graph generation. Higher overhead. Produces a perf.data file that is converted to a flamegraph SVG.',
+							perf_trace_enabled: 'boolean — enable `perf trace`: system-call tracing. Shows which syscalls the process makes and their latency. Can be very verbose under I/O-heavy workloads.',
+							perf_events: 'Comma-separated hardware/software event list for perf stat and perf record. Supports {{PARAM}}. Examples: "cycles,instructions,cache-misses,branch-misses" or "cycles:u,instructions:u" (user-space only). Empty = perf default (task-clock). Hardware events require hardware PMU support on the host. Placeholder example: "task-clock,context-switches,page-faults or {{EVENTS}}"',
+							perf_duration: 'How long to run perf in seconds. Supports {{PARAM}} (e.g. "{{DURATION_SECS}}"). Empty = run for the full duration of the bench step. Use a shorter value to sample only the steady-state portion. Placeholder example: "{{DURATION}} or 30"',
+							perf_stat_duration: 'Duration override for perf stat only, in seconds. Supports {{PARAM}}. Empty = use perf_duration. Placeholder example: "{{DURATION}} or 30"',
+							perf_record_duration: 'Duration override for perf record only, in seconds. Supports {{PARAM}}. Empty = use perf_duration. Placeholder example: "{{DURATION}} or 30"',
+							perf_trace_duration: 'Duration override for perf trace only, in seconds. Supports {{PARAM}}. Empty = use perf_duration. Placeholder example: "{{DURATION}} or 15"',
+							perf_delay: 'Seconds to wait after the bench step starts before beginning perf collection. Supports {{PARAM}}. Useful to skip the warm-up phase and profile only steady-state load. Placeholder example: "0 or {{WARMUP_SECS}}"',
+							perf_stat_delay: 'Delay override for perf stat only, in seconds. Supports {{PARAM}}. Empty = use perf_delay. Placeholder example: "0 or {{WARMUP_SECS}}"',
+							perf_record_delay: 'Delay override for perf record only, in seconds. Supports {{PARAM}}. Empty = use perf_delay. Placeholder example: "0 or {{WARMUP_SECS}}"',
+							perf_trace_delay: 'Delay override for perf trace only, in seconds. Supports {{PARAM}}. Empty = use perf_delay. Placeholder example: "0 or {{WARMUP_SECS}}"',
+							perf_cgroup: 'cgroup path to scope perf collection to the PostgreSQL process group. Empty = system-wide. Cgroup scoping requires perf_scope="postgres_cgroup" on the server record. Placeholder example: "system.slice/postgresql.service or {{CGROUP}}"',
+							perf_repeat: 'Number of times to repeat the perf stat collection cycle within the bench. Supports {{PARAM}}. "1" = once. "3" = three times with equal spacing to average out variance. Placeholder example: "optional or {{REPEAT}}"',
+							perf_freq: 'Sampling frequency for perf record, in Hz. Supports {{PARAM}}. Default "99" (avoids lockstep with 100Hz timers). Use "999" for higher resolution. Higher = more data = more overhead. Placeholder example: "99 or {{FREQ}}"',
+							perf_call_graph: 'Stack unwinding method for perf record flame graphs: "dwarf" (default — uses DWARF debug info, broad compat), "fp" (frame pointer — very low overhead, needs -fno-omit-frame-pointer), "lbr" (Intel hardware only, zero overhead).',
+							perf_mmap_pages: 'Ring buffer size for perf record/trace in pages (must be power of 2). Default "4096" (16 MB). Increase if you see "lost samples" or "dropped events" under high event rates. Supports {{PARAM}}. Placeholder example: "4096 or {{MMAP_PAGES}}"',
 							enabled: 'boolean'
 						},
-						note: 'This is a one-time snapshot, not a duration-based time series collect step.'
+						note: 'Requires perf installed on the VPS runner. perf record output is converted to flamegraph SVG and stored with the run. Results are viewable in the run detail page.'
 					}
 				},
 				param_syntax: 'Write {{PARAM_NAME}} in any step script or pgbench_options (also used for sysbench flags). Set the value with set_params. Example: "INSERT INTO users SELECT generate_series(1, {{NUM_USERS}})"',
@@ -160,9 +232,11 @@ and the recommended workflow for creating and running a benchmark plan.`
 					'3. create_design(decision_id, name) — create a design candidate (repeat for each candidate)',
 					'4. configure_design(design_id, {server_id, database}) — assign a server from the database_servers list',
 					'5. get_db_schema(design_id) — see real table/column names from the live DB',
-					'6. set_params(design_id, [{name, value}]) — define design-level {{PARAM}} values. TIP: for params shared across all designs in a decision (e.g. NUM_CLIENTS, DURATION_SECS), set them at the decision level via the Parameters tab in the UI instead — every design will inherit them and suite runs use only decision-level params/profiles.',
-					'7. upsert_step (repeat) — add sql setup, wait, optional pg_stat_statements reset, pgbench or sysbench load test, optional pg_stat_statements collect, wait, sql teardown steps',
-					'8. upsert_profile(design_id, name, values) — optional: create "small"/"large" profiles for different scales. For suite runs, create profiles at the decision level via the UI Parameters tab.',
+					'6a. set_decision_params(decision_id, [{name, value}]) — PREFERRED: set all params that are the same across designs here. One change propagates to every design. Use for NUM_CLIENTS, DURATION_SECS, NUM_ROWS, NUM_USERS, pgbench script weights (weight_expr), SNAPSHOT_INTERVAL, etc. Suite runs use ONLY decision-level params, so anything used in a suite MUST be here.',
+					'6b. set_params(design_id, [{name, value}]) — ONLY for values that intentionally differ per design (e.g. a table variant name or index type). Avoid duplicating decision-level params here.',
+					'7. upsert_step (repeat) — add sql setup steps, one pg_stat config step (opt-in snapshot collection), pgbench or sysbench load step, and sql teardown steps. Optionally add a proc step for OS host metrics.',
+					'8a. upsert_decision_profile(decision_id, name, values) — optional: create decision-level profiles (e.g. "small"/"large") for suite runs. Use list_decision_profiles / delete_decision_profile to manage them.',
+					'8b. upsert_profile(design_id, name, values) — optional: create design-level profiles for single/series runs.',
 					'9. validate_design(design_id) — check for issues (undefined params, missing server, no bench step) before running',
 					'10. run_design(design_id, {profile_id?, profile_source?, name?, server_id?, database?, snapshot_interval_seconds?, ec2_server_id?}) — start a test run and get run_id. Pass profile_source="decision" to use a decision-level profile.',
 					'11. get_run(run_id) — wait ~(bench duration + collect durations) before first poll, then every ~30s',
@@ -172,7 +246,7 @@ and the recommended workflow for creating and running a benchmark plan.`
 					'14. query_run_data(sql, params) — write SELECT queries against snap_* tables to compute deltas, compare runs, and find root causes'
 				],
 				recommended_step_structure: {
-					description: 'Always follow this 10-step order when building a benchmark design. Each step has a specific purpose — do not skip or merge steps.',
+					description: 'Always follow this 9-step order when building a benchmark design. Each step has a specific purpose — do not skip or merge steps.',
 					steps: [
 						{
 							position: 0, type: 'sql',
@@ -209,9 +283,17 @@ and the recommended workflow for creating and running a benchmark plan.`
 							example: "SELECT relname,\n       pg_size_pretty(pg_total_relation_size(oid)) AS total,\n       pg_size_pretty(pg_relation_size(oid)) AS heap,\n       pg_size_pretty(pg_indexes_size(oid)) AS indexes\nFROM pg_class\nWHERE relname IN ('orders','users')\nORDER BY relname;"
 						},
 						{
-							position: 5, type: 'collect', duration_secs: 15,
-							name: '6 — Wait before benchmark',
-							purpose: 'Wait while taking pg_stat_* baseline snapshots before load. The delta (post − pre) reveals cache hit rate, index usage, I/O, and WAL volume caused by the benchmark. Can be disabled if not needed.'
+							position: 5, type: 'pg_stat',
+							name: '6 — pg_stat collection config',
+							purpose: 'CONFIGURATION ONLY — declares which PostgreSQL stats to collect and at what interval. This step does not execute in sequence. The runner automatically takes snapshots before/during/after the bench step no matter where this step appears in the list. Placing it after pgbench has no effect — do not do that.',
+							tip: 'Set pg_stat_reset_stats: true to zero cumulative counters before the benchmark so deltas are clean. Set pg_stat_collect_statements: true (or add "pg_stat_statements" to pg_stat_tables) to capture per-query stats at bench end — this is separate from the pg_stat step itself.',
+							example_fields: {
+								pg_stat_tables: '[]',
+								pg_stat_interval_seconds: '{{SNAPSHOT_INTERVAL}}',
+								pg_stat_reset_stats: true,
+								pg_stat_reset_statements: true,
+								pg_stat_collect_statements: true
+							}
 						},
 						{
 							position: 6, type: 'pgbench',
@@ -225,19 +307,14 @@ and the recommended workflow for creating and running a benchmark plan.`
 							]
 						},
 						{
-							position: 7, type: 'collect', duration_secs: 15,
-							name: '8 — Wait after benchmark',
-							purpose: 'Wait while taking pg_stat_* snapshots after load. Compare with the pre-run wait step to see the impact of the benchmark on cache, I/O, WAL, and index usage.'
-						},
-						{
-							position: 8, type: 'sql',
-							name: '9 — Table sizes after benchmark',
+							position: 7, type: 'sql',
+							name: '8 — Table sizes after benchmark',
 							purpose: 'Re-run the same size query from step 5. Compare before/after to measure index bloat, heap growth, and TOAST expansion caused by writes.',
 							example: "SELECT relname,\n       pg_size_pretty(pg_total_relation_size(oid)) AS total,\n       pg_size_pretty(pg_relation_size(oid)) AS heap,\n       pg_size_pretty(pg_indexes_size(oid)) AS indexes\nFROM pg_class\nWHERE relname IN ('orders','users')\nORDER BY relname;"
 						},
 						{
-							position: 9, type: 'sql',
-							name: '10 — Teardown',
+							position: 8, type: 'sql',
+							name: '9 — Teardown',
 							purpose: 'Drop all tables created in step 1. Use CASCADE to handle foreign keys. Leave the database clean for the next run.',
 							example: 'DROP TABLE IF EXISTS orders CASCADE;\nDROP TABLE IF EXISTS users CASCADE;'
 						}
@@ -248,16 +325,20 @@ and the recommended workflow for creating and running a benchmark plan.`
 						type: 'sql', name: 'Setup', position: 0, enabled: true,
 						script: 'DROP TABLE IF EXISTS payments;\nCREATE TABLE payments (id BIGSERIAL PRIMARY KEY, user_id INT, amount INT);\nINSERT INTO payments (user_id, amount)\n  SELECT (random()*{{NUM_USERS}})::int, (random()*1000)::int\n  FROM generate_series(1, {{NUM_ROWS}});'
 					},
-					collect_pre: { type: 'collect', name: 'wait before benchmark', position: 1, duration_secs: 15, enabled: true },
-					pg_stat_statements_reset: { type: 'pg_stat_statements_reset', name: 'reset pg_stat_statements', position: 2, enabled: true },
+					pg_stat: {
+						type: 'pg_stat', name: 'pg_stat collection', position: 1, enabled: true,
+						pg_stat_tables: '[]',
+						pg_stat_interval_seconds: '30',
+						pg_stat_reset_stats: true,
+						pg_stat_reset_statements: true,
+						pg_stat_collect_statements: true
+					},
 					pgbench: {
-						type: 'pgbench', name: 'Benchmark', position: 3, enabled: true,
+						type: 'pgbench', name: 'Benchmark', position: 2, enabled: true,
 						pgbench_options: '-c {{NUM_CLIENTS}} -j 2 -T 60 --no-vacuum',
 						pgbench_scripts: [{ name: 'main', weight: 1, script: '\\set uid random(1, {{NUM_USERS}})\nBEGIN;\nUPDATE payments SET amount = amount - 10 WHERE user_id = :uid;\nEND;' }]
 					},
-					pg_stat_statements_collect: { type: 'pg_stat_statements_collect', name: 'collect pg_stat_statements', position: 4, enabled: true },
-					collect_post: { type: 'collect', name: 'wait after benchmark', position: 5, duration_secs: 15, enabled: true },
-					sql_teardown: { type: 'sql', name: 'Teardown', position: 6, script: 'DROP TABLE IF EXISTS payments;', enabled: true }
+					sql_teardown: { type: 'sql', name: 'Teardown', position: 3, script: 'DROP TABLE IF EXISTS payments;', enabled: true }
 				}
 			};
 			return text(guide);
@@ -565,15 +646,14 @@ Step types:
   "sql"      — provide script (SQL text, supports {{PARAM}})
   "pgbench"  — provide pgbench_options and pgbench_scripts [{name, weight, script}]
   "sysbench" — provide pgbench_options as "testname command [flags]" (e.g. "oltp_read_write run --tables=10 --threads=4 --time=60") or script (custom Lua content).
-  "collect"  — provide duration_secs (seconds to wait while collecting pg_stat_* snapshots)
-  "pg_stat_statements_reset"   — no extra fields; resets pg_stat_statements and logs a warning if unavailable
-  "pg_stat_statements_collect" — no extra fields; captures one pg_stat_statements snapshot for the current database
-  "perf"     — Linux perf profiling step. Key fields: perf_stat_enabled, perf_record_enabled, perf_trace_enabled (booleans); perf_events (comma-separated event list); perf_duration / perf_stat_duration / perf_record_duration / perf_trace_duration (seconds, supports {{PARAM}}); perf_delay / perf_stat_delay / perf_record_delay / perf_trace_delay (seconds); perf_cgroup (cgroup path override); perf_repeat (integer); perf_freq (sampling frequency); perf_call_graph (default "dwarf"); perf_mmap_pages (ring buffer pages, default 16384 for record mode).
+  "pg_stat"  — CONFIGURATION-ONLY step. Does NOT run in sequence. The runner automatically snapshots PostgreSQL stats before/during/after the bench regardless of this step's position — do NOT place it after pgbench to "collect after". One per design. Key fields: pg_stat_tables (JSON array of PG view names; empty = all), pg_stat_interval_seconds, pg_stat_reset_stats, pg_stat_reset_statements, pg_stat_collect_statements (set true to capture pg_stat_statements query data at bench end). Not the same as the pg_stat_statements extension — to collect query-level data use pg_stat_collect_statements=true.
+  "perf"     — Linux perf profiling alongside the bench. Enable sub-modes independently: perf_stat_enabled (counter summary), perf_record_enabled (flame graph), perf_trace_enabled (syscall trace). Duration/delay fields all support {{PARAM}}. See step_types.perf in get_context for full field docs.
+  "proc"     — Linux /proc host metrics via SSH to the database server. Configuration-only; collection starts at bench time. proc_groups selects which /proc files to read; proc_interval_seconds supports {{PARAM}}. Requires SSH on the PG server record. See step_types.proc in get_context for group key descriptions.
 Use {{PARAM_NAME}} in scripts and pgbench_options — values come from set_params.`,
 			inputSchema: {
 				design_id: z.number().int(),
 				step_id: z.number().int().optional().describe('Omit to insert a new step'),
-				type: z.enum(['sql', 'pgbench', 'sysbench', 'collect', 'pg_stat_statements_reset', 'pg_stat_statements_collect', 'perf']),
+				type: z.enum(['sql', 'pgbench', 'sysbench', 'pg_stat', 'perf', 'proc']),
 				name: z.string(),
 				position: z.number().int().describe('Execution order, 0-based. Lower = runs earlier.'),
 				enabled: z.boolean().default(true),
@@ -582,34 +662,47 @@ Use {{PARAM_NAME}} in scripts and pgbench_options — values come from set_param
 				pgbench_options: z.string().optional().describe('pgbench CLI flags for type=pgbench (e.g. "-c {{NUM_CLIENTS}} -j 2 -T 60 --no-vacuum"); for type=sysbench: "testname command [flags]" (e.g. "oltp_read_write run --tables=10 --threads=4 --time=60")'),
 				pgbench_scripts: z.array(z.object({
 					name: z.string(),
-					weight: z.number().int().default(1),
+					weight: z.number().int().default(1).describe('Fixed integer transaction mix weight. pgbench selects this script proportionally — weight 30 out of total 100 means ~30% of transactions. All weights must sum to ≤ 100. Ignored when weight_expr is set.'),
+					weight_expr: z.string().optional().describe('Parameterized weight expression — use {{PARAM_NAME}} here to drive the weight from a decision-level or design-level param (e.g. "{{TRANSFER_WEIGHT}}"). Overrides the weight field when set. This is the recommended approach when you want to control the transaction mix ratio from a single decision param shared across multiple designs. The expression is substituted at run time and must resolve to a non-negative integer.'),
 					script: z.string().describe('pgbench custom script: use \\set, BEGIN, SQL, END. Supports {{PARAM}}.')
 				})).optional().describe('Custom scripts for type=pgbench only'),
 				duration_secs: z.number().int().optional().describe('Snapshot collection duration for type=collect'),
-				perf_stat_enabled: z.boolean().optional().describe('Enable perf stat collection (type=perf)'),
-				perf_record_enabled: z.boolean().optional().describe('Enable perf record/flamegraph collection (type=perf)'),
-				perf_trace_enabled: z.boolean().optional().describe('Enable perf trace collection (type=perf)'),
-				perf_events: z.string().optional().describe('Comma-separated perf event list (type=perf), e.g. "task-clock,page-faults"'),
-				perf_duration: z.string().optional().describe('Total perf duration in seconds, supports {{PARAM}} (type=perf)'),
-				perf_stat_duration: z.string().optional().describe('perf stat duration override (type=perf)'),
-				perf_record_duration: z.string().optional().describe('perf record duration override (type=perf)'),
-				perf_trace_duration: z.string().optional().describe('perf trace duration override (type=perf)'),
-				perf_delay: z.string().optional().describe('Delay before perf starts in seconds (type=perf)'),
-				perf_stat_delay: z.string().optional().describe('perf stat delay override (type=perf)'),
-				perf_record_delay: z.string().optional().describe('perf record delay override (type=perf)'),
-				perf_trace_delay: z.string().optional().describe('perf trace delay override (type=perf)'),
-				perf_cgroup: z.string().optional().describe('cgroup path override for perf (type=perf)'),
-				perf_repeat: z.string().optional().describe('Number of times to repeat perf collection (type=perf)'),
-				perf_freq: z.string().optional().describe('Sampling frequency for perf record (type=perf)'),
-				perf_call_graph: z.string().optional().describe('Call graph method: "dwarf" (default), "fp", or "lbr" (type=perf)'),
-				perf_mmap_pages: z.string().optional().describe('Ring buffer size in pages for perf record, default 16384 (type=perf)')
+				perf_stat_enabled: z.boolean().optional().describe('[type=perf] Enable perf stat: hardware/software counter summaries (cycles, instructions, cache-misses, branch-misses). Low overhead.'),
+				perf_record_enabled: z.boolean().optional().describe('[type=perf] Enable perf record: CPU sampling for flame graph generation. Produces a perf.data file converted to SVG. Higher overhead than perf stat.'),
+				perf_trace_enabled: z.boolean().optional().describe('[type=perf] Enable perf trace: system-call tracing — shows which syscalls fire and their latency. Can be very verbose on I/O-heavy workloads.'),
+				perf_events: z.string().optional().describe('[type=perf] Comma-separated perf event list for perf stat/record. Supports {{PARAM}}. Empty = default (task-clock). E.g. "task-clock,context-switches,page-faults or {{EVENTS}}" or hardware events "cycles,instructions,cache-misses,branch-misses".'),
+				perf_duration: z.string().optional().describe('[type=perf] How long to run perf in seconds. Supports {{PARAM}}. Empty = full bench duration. E.g. "{{DURATION}} or 30". Use shorter value to profile steady-state only.'),
+				perf_stat_duration: z.string().optional().describe('[type=perf] Duration override for perf stat only, in seconds. Supports {{PARAM}}. Empty = use perf_duration. E.g. "{{DURATION}} or 30".'),
+				perf_record_duration: z.string().optional().describe('[type=perf] Duration override for perf record only, in seconds. Supports {{PARAM}}. Empty = use perf_duration. E.g. "{{DURATION}} or 30".'),
+				perf_trace_duration: z.string().optional().describe('[type=perf] Duration override for perf trace only, in seconds. Supports {{PARAM}}. Empty = use perf_duration. E.g. "{{DURATION}} or 15".'),
+				perf_delay: z.string().optional().describe('[type=perf] Seconds to wait after bench starts before perf begins. Supports {{PARAM}}. Skip warm-up; profile steady-state only. E.g. "0 or {{WARMUP_SECS}}".'),
+				perf_stat_delay: z.string().optional().describe('[type=perf] Delay for perf stat only, in seconds. Supports {{PARAM}}. Empty = use perf_delay. E.g. "0 or {{WARMUP_SECS}}".'),
+				perf_record_delay: z.string().optional().describe('[type=perf] Delay for perf record only, in seconds. Supports {{PARAM}}. Empty = use perf_delay. E.g. "0 or {{WARMUP_SECS}}".'),
+				perf_trace_delay: z.string().optional().describe('[type=perf] Delay for perf trace only, in seconds. Supports {{PARAM}}. Empty = use perf_delay. E.g. "0 or {{WARMUP_SECS}}".'),
+				perf_cgroup: z.string().optional().describe('[type=perf] cgroup path to scope collection to the PostgreSQL process group. Empty = system-wide. E.g. "system.slice/postgresql.service or {{CGROUP}}".'),
+				perf_repeat: z.string().optional().describe('[type=perf] Times to repeat the perf stat collection cycle. Supports {{PARAM}}. Averages out variance. E.g. "optional or {{REPEAT}}".'),
+				perf_freq: z.string().optional().describe('[type=perf] Sampling frequency for perf record in Hz. Supports {{PARAM}}. Default "99" (avoids lockstep with 100Hz timers). E.g. "99 or {{FREQ}}".'),
+				perf_call_graph: z.string().optional().describe('[type=perf] Stack unwinding for flame graphs: "dwarf" (default, broad compat), "fp" (low overhead, needs -fno-omit-frame-pointer), "lbr" (Intel only, zero overhead).'),
+				perf_mmap_pages: z.string().optional().describe('[type=perf] Ring buffer size for perf record/trace in pages (must be power of 2). Supports {{PARAM}}. Default "4096" (16 MB). Increase if you see lost samples or dropped events. E.g. "4096 or {{MMAP_PAGES}}"'),
+				proc_groups: z.string().optional().describe('[type=proc] JSON array of /proc group keys to collect. Empty array or omit = all groups. System groups: "loadavg" (/proc/loadavg), "meminfo" (/proc/meminfo), "stat" (/proc/stat — per-CPU ticks), "vmstat" (/proc/vmstat), "diskstats" (/proc/diskstats), "net_dev" (/proc/net/dev), "schedstat" (/proc/schedstat), "pressure" (/proc/pressure/), "file_nr" (/proc/sys/fs/file-nr). Per-process groups (postgres PID): "pid_stat","pid_statm","pid_io","pid_schedstat","pid_wchan","pid_fd","pid_status". Recommended minimal set: \'["loadavg","meminfo","stat","diskstats","pid_stat","pid_io"]\''),
+				proc_interval_seconds: z.string().optional().describe('[type=proc] Collection interval in seconds. Supports {{PARAM}}. Empty = use design snapshot_interval_seconds. Use "1" for high-resolution sampling; "5"–"10" for lighter overhead. E.g. "30 or {{INTERVAL}} — leave empty to use run default".'),
+				pg_stat_tables: z.string().optional().describe('[type=pg_stat] JSON array of PG view names to snapshot on each interval. Empty array = all supported tables (recommended). Available: "pg_stat_database","pg_stat_bgwriter","pg_stat_checkpointer","pg_stat_user_tables","pg_stat_user_indexes","pg_statio_user_tables","pg_statio_user_indexes","pg_statio_user_sequences","pg_stat_database_conflicts","pg_stat_archiver","pg_stat_slru","pg_stat_user_functions","pg_stat_wal","pg_stat_replication_slots","pg_stat_io","pg_stat_activity","pg_stat_replication","pg_stat_subscription","pg_stat_subscription_stats". Add "pg_stat_statements" to collect it once at bench end. Focused example: \'["pg_stat_database","pg_stat_user_tables","pg_stat_wal","pg_stat_io"]\''),
+				pg_stat_interval_seconds: z.string().optional().describe('[type=pg_stat] Snapshot interval in seconds. Supports {{PARAM}}. Empty = use design snapshot_interval_seconds (default 30). Lower values give finer resolution. E.g. "30 or {{INTERVAL}}".'),
+				pg_stat_pg_locks_enabled: z.boolean().optional().describe('[type=pg_stat] Enable pg_locks collection on each interval. Captures active locks and waiting queries — useful for contention analysis but noisy under high concurrency. Defaults to false.'),
+				pg_stat_pg_locks_interval: z.string().optional().describe('[type=pg_stat] Collection interval for pg_locks in seconds. Supports {{PARAM}}. Empty = use pg_stat_interval_seconds. Set higher (e.g. "60") to reduce row volume. E.g. "60 or {{LOCKS_INTERVAL}}".'),
+				pg_stat_reset_stats: z.boolean().optional().describe('[type=pg_stat] Call pg_stat_reset() before bench — zeroes cumulative counters in pg_stat_database, pg_stat_user_tables, pg_statio_*, pg_stat_wal, etc. Recommended: true for clean deltas.'),
+				pg_stat_reset_statements: z.boolean().optional().describe('[type=pg_stat] Call pg_stat_statements_reset() before bench — clears query counters so only this run\'s queries appear. No-op if pg_stat_statements is not installed.'),
+				pg_stat_collect_statements: z.boolean().optional().describe('[type=pg_stat] Collect one pg_stat_statements snapshot at bench end: total calls, mean exec time, rows, plan info per query. Requires pg_stat_statements. Equivalent to adding "pg_stat_statements" to pg_stat_tables.')
 			}
 		},
 		async ({ design_id, step_id, type, name, position, enabled, script, no_transaction, pgbench_options, pgbench_scripts, duration_secs,
 			perf_stat_enabled, perf_record_enabled, perf_trace_enabled, perf_events, perf_duration,
 			perf_stat_duration, perf_record_duration, perf_trace_duration,
 			perf_delay, perf_stat_delay, perf_record_delay, perf_trace_delay,
-			perf_cgroup, perf_repeat, perf_freq, perf_call_graph, perf_mmap_pages }) => {
+			perf_cgroup, perf_repeat, perf_freq, perf_call_graph, perf_mmap_pages,
+			proc_groups, proc_interval_seconds,
+			pg_stat_tables, pg_stat_interval_seconds, pg_stat_pg_locks_enabled, pg_stat_pg_locks_interval,
+			pg_stat_reset_stats, pg_stat_reset_statements, pg_stat_collect_statements }) => {
 			const db = getDb();
 			let resolvedStepId: number;
 			if (step_id) {
@@ -617,12 +710,19 @@ Use {{PARAM_NAME}} in scripts and pgbench_options — values come from set_param
 					perf_stat_enabled=?, perf_record_enabled=?, perf_trace_enabled=?, perf_events=?,
 					perf_duration=?, perf_stat_duration=?, perf_record_duration=?, perf_trace_duration=?,
 					perf_delay=?, perf_stat_delay=?, perf_record_delay=?, perf_trace_delay=?,
-					perf_cgroup=?, perf_repeat=?, perf_freq=?, perf_call_graph=?, perf_mmap_pages=? WHERE id=?`)
+					perf_cgroup=?, perf_repeat=?, perf_freq=?, perf_call_graph=?, perf_mmap_pages=?,
+					proc_groups=?, proc_interval_seconds=?,
+					pg_stat_tables=?, pg_stat_interval_seconds=?, pg_stat_pg_locks_enabled=?, pg_stat_pg_locks_interval=?,
+					pg_stat_reset_stats=?, pg_stat_reset_statements=?, pg_stat_collect_statements=? WHERE id=?`)
 					.run(type, name, position, enabled ? 1 : 0, script ?? '', no_transaction ? 1 : 0, pgbench_options ?? '', duration_secs ?? 0,
 						perf_stat_enabled ? 1 : 0, perf_record_enabled ? 1 : 0, perf_trace_enabled ? 1 : 0, perf_events ?? '',
 						perf_duration ?? '', perf_stat_duration ?? '', perf_record_duration ?? '', perf_trace_duration ?? '',
 						perf_delay ?? '', perf_stat_delay ?? '', perf_record_delay ?? '', perf_trace_delay ?? '',
 						perf_cgroup ?? '', perf_repeat ?? '', perf_freq ?? '', perf_call_graph ?? 'dwarf', perf_mmap_pages ?? '',
+						proc_groups ?? '[]', proc_interval_seconds ?? '',
+						pg_stat_tables ?? '[]', pg_stat_interval_seconds ?? '',
+						pg_stat_pg_locks_enabled ? 1 : 0, pg_stat_pg_locks_interval ?? '',
+						pg_stat_reset_stats ? 1 : 0, pg_stat_reset_statements ? 1 : 0, pg_stat_collect_statements ? 1 : 0,
 						step_id);
 				resolvedStepId = step_id;
 			} else {
@@ -630,19 +730,26 @@ Use {{PARAM_NAME}} in scripts and pgbench_options — values come from set_param
 					perf_stat_enabled, perf_record_enabled, perf_trace_enabled, perf_events,
 					perf_duration, perf_stat_duration, perf_record_duration, perf_trace_duration,
 					perf_delay, perf_stat_delay, perf_record_delay, perf_trace_delay,
-					perf_cgroup, perf_repeat, perf_freq, perf_call_graph, perf_mmap_pages)
-					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+					perf_cgroup, perf_repeat, perf_freq, perf_call_graph, perf_mmap_pages,
+					proc_groups, proc_interval_seconds,
+					pg_stat_tables, pg_stat_interval_seconds, pg_stat_pg_locks_enabled, pg_stat_pg_locks_interval,
+					pg_stat_reset_stats, pg_stat_reset_statements, pg_stat_collect_statements)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 					.run(design_id, type, name, position, enabled ? 1 : 0, script ?? '', no_transaction ? 1 : 0, pgbench_options ?? '', duration_secs ?? 0,
 						perf_stat_enabled ? 1 : 0, perf_record_enabled ? 1 : 0, perf_trace_enabled ? 1 : 0, perf_events ?? '',
 						perf_duration ?? '', perf_stat_duration ?? '', perf_record_duration ?? '', perf_trace_duration ?? '',
 						perf_delay ?? '', perf_stat_delay ?? '', perf_record_delay ?? '', perf_trace_delay ?? '',
-						perf_cgroup ?? '', perf_repeat ?? '', perf_freq ?? '', perf_call_graph ?? 'dwarf', perf_mmap_pages ?? '');
+						perf_cgroup ?? '', perf_repeat ?? '', perf_freq ?? '', perf_call_graph ?? 'dwarf', perf_mmap_pages ?? '',
+						proc_groups ?? '[]', proc_interval_seconds ?? '',
+						pg_stat_tables ?? '[]', pg_stat_interval_seconds ?? '',
+						pg_stat_pg_locks_enabled ? 1 : 0, pg_stat_pg_locks_interval ?? '',
+						pg_stat_reset_stats ? 1 : 0, pg_stat_reset_statements ? 1 : 0, pg_stat_collect_statements ? 1 : 0);
 				resolvedStepId = r.lastInsertRowid as number;
 			}
 			if (type === 'pgbench' && pgbench_scripts) {
 				db.prepare('DELETE FROM pgbench_scripts WHERE step_id = ?').run(resolvedStepId);
 				const ins = db.prepare('INSERT INTO pgbench_scripts (step_id, position, name, weight, weight_expr, script) VALUES (?, ?, ?, ?, ?, ?)');
-				pgbench_scripts.forEach((ps, i) => ins.run(resolvedStepId, i, ps.name, ps.weight, null, ps.script));
+				pgbench_scripts.forEach((ps, i) => ins.run(resolvedStepId, i, ps.name, ps.weight, ps.weight_expr ?? null, ps.script));
 			}
 			return text({ step_id: resolvedStepId, action: step_id ? 'updated' : 'created' });
 		}
@@ -671,9 +778,9 @@ Use {{PARAM_NAME}} in scripts and pgbench_options — values come from set_param
 	server.registerTool(
 		'set_params',
 		{
-			description: `Replaces all parameters for a design. Parameters are substituted as {{NAME}} in step scripts and pgbench_options.
+			description: `Replaces all parameters for a SINGLE design. Parameters are substituted as {{NAME}} in step scripts and pgbench_options.
 Pass the complete list — this replaces existing params, not merges.
-Tip: use descriptive names like NUM_USERS, NUM_ROWS, NUM_CLIENTS, DURATION_SECS.`,
+IMPORTANT: only use this for values that intentionally differ between designs (e.g. a table name or index strategy specific to this candidate). For any value that is the same across multiple designs — or that you might want to change globally — use set_decision_params instead. Decision-level params propagate to all designs automatically; design-level params require visiting each design individually when you want to change them.`,
 			inputSchema: {
 				design_id: z.number().int(),
 				params: z.array(z.object({
@@ -690,6 +797,120 @@ Tip: use descriptive names like NUM_USERS, NUM_ROWS, NUM_CLIENTS, DURATION_SECS.
 				params.forEach((p, i) => ins.run(design_id, i, p.name, p.value));
 			})();
 			return text({ set: params.length, design_id });
+		}
+	);
+
+	// ─────────────────────────────────────────────────────────────────────────
+	// set_decision_params
+	// ─────────────────────────────────────────────────────────────────────────
+	server.registerTool(
+		'set_decision_params',
+		{
+			description: `Replaces all decision-level parameters. These are the PRIMARY place to store params — inherited by every design under this decision automatically.
+The key mental model: put a param here whenever you want one place to change and have it affect all designs. Examples: NUM_CLIENTS, DURATION_SECS, NUM_ROWS, NUM_USERS, SNAPSHOT_INTERVAL, TRANSFER_WEIGHT (pgbench script weight via weight_expr). If requirements change and you need to adjust a value, updating it here propagates to every design at once — no need to visit each design individually.
+Pass the complete list — this replaces existing params, not merges.
+Use set_params (design-level) only for values that intentionally differ between designs. Suite runs use ONLY decision-level params.`,
+			inputSchema: {
+				decision_id: z.number().int(),
+				params: z.array(z.object({
+					name: z.string().describe('Used as {{NAME}} in all designs that inherit this decision'),
+					value: z.string().describe('Default value; can be overridden per design or per profile')
+				}))
+			}
+		},
+		async ({ decision_id, params }) => {
+			const db = getDb();
+			const decision = db.prepare('SELECT id FROM decisions WHERE id = ?').get(decision_id);
+			if (!decision) return text({ error: `Decision ${decision_id} not found` });
+			db.transaction(() => {
+				db.prepare('DELETE FROM decision_params WHERE decision_id = ?').run(decision_id);
+				const ins = db.prepare('INSERT INTO decision_params (decision_id, position, name, value) VALUES (?, ?, ?, ?)');
+				params.forEach((p, i) => ins.run(decision_id, i, p.name, p.value));
+			})();
+			return text({ set: params.length, decision_id });
+		}
+	);
+
+	// ─────────────────────────────────────────────────────────────────────────
+	// upsert_decision_profile
+	// ─────────────────────────────────────────────────────────────────────────
+	server.registerTool(
+		'upsert_decision_profile',
+		{
+			description: 'Creates or updates a named parameter profile at the decision level. Decision profiles are used exclusively in suite runs (each profile produces one series per design). Omit profile_id to create; provide it to update.',
+			inputSchema: {
+				decision_id: z.number().int(),
+				profile_id: z.number().int().optional().describe('Omit to create a new profile'),
+				name: z.string().describe('Profile name, e.g. "small", "medium", "large"'),
+				values: z.array(z.object({
+					param_name: z.string().describe('Param name (must match a decision param)'),
+					value: z.string().describe('Override value for this profile')
+				})).describe('Only include params you want to override from their defaults')
+			}
+		},
+		async ({ decision_id, profile_id, name, values }) => {
+			const db = getDb();
+			const decision = db.prepare('SELECT id FROM decisions WHERE id = ?').get(decision_id);
+			if (!decision) return text({ error: `Decision ${decision_id} not found` });
+			if (profile_id) {
+				const profile = db.prepare('SELECT id FROM decision_param_profiles WHERE id = ? AND decision_id = ?').get(profile_id, decision_id);
+				if (!profile) return text({ error: `Profile ${profile_id} not found for decision ${decision_id}` });
+				db.transaction(() => {
+					db.prepare('UPDATE decision_param_profiles SET name = ? WHERE id = ?').run(name, profile_id);
+					db.prepare('DELETE FROM decision_param_profile_values WHERE profile_id = ?').run(profile_id);
+					const ins = db.prepare('INSERT INTO decision_param_profile_values (profile_id, param_name, value) VALUES (?, ?, ?)');
+					for (const v of values) ins.run(profile_id, v.param_name, v.value);
+				})();
+				return text({ updated: true, profile_id });
+			} else {
+				const r = db.transaction(() => {
+					const res = db.prepare('INSERT INTO decision_param_profiles (decision_id, name) VALUES (?, ?)').run(decision_id, name);
+					const newId = res.lastInsertRowid as number;
+					const ins = db.prepare('INSERT INTO decision_param_profile_values (profile_id, param_name, value) VALUES (?, ?, ?)');
+					for (const v of values) ins.run(newId, v.param_name, v.value);
+					return newId;
+				})();
+				return text({ created: true, profile_id: r });
+			}
+		}
+	);
+
+	// ─────────────────────────────────────────────────────────────────────────
+	// list_decision_profiles
+	// ─────────────────────────────────────────────────────────────────────────
+	server.registerTool(
+		'list_decision_profiles',
+		{
+			description: 'Lists all parameter profiles for a decision, including their value overrides. Decision profiles are used in suite runs.',
+			inputSchema: { decision_id: z.number().int() }
+		},
+		async ({ decision_id }) => {
+			const db = getDb();
+			const profiles = db.prepare('SELECT * FROM decision_param_profiles WHERE decision_id = ? ORDER BY id').all(decision_id) as { id: number; decision_id: number; name: string }[];
+			const values = db.prepare('SELECT * FROM decision_param_profile_values WHERE profile_id IN (SELECT id FROM decision_param_profiles WHERE decision_id = ?) ORDER BY profile_id, id').all(decision_id) as { profile_id: number; param_name: string; value: string }[];
+			const byProfile = new Map<number, { param_name: string; value: string }[]>();
+			for (const v of values) {
+				const arr = byProfile.get(v.profile_id) ?? [];
+				arr.push({ param_name: v.param_name, value: v.value });
+				byProfile.set(v.profile_id, arr);
+			}
+			return text(profiles.map(p => ({ ...p, values: byProfile.get(p.id) ?? [] })));
+		}
+	);
+
+	// ─────────────────────────────────────────────────────────────────────────
+	// delete_decision_profile
+	// ─────────────────────────────────────────────────────────────────────────
+	server.registerTool(
+		'delete_decision_profile',
+		{
+			description: 'Deletes a decision-level parameter profile by ID.',
+			inputSchema: { profile_id: z.number().int() }
+		},
+		async ({ profile_id }) => {
+			const db = getDb();
+			db.prepare('DELETE FROM decision_param_profiles WHERE id = ?').run(profile_id);
+			return text({ deleted: true, profile_id });
 		}
 	);
 
@@ -788,6 +1009,9 @@ Checks performed:
   - No enabled bench step (pgbench or sysbench) — nothing to benchmark
   - pgbench step with no scripts defined
   - wait step with duration_secs = 0
+  - perf step with no modes enabled (stat/record/trace)
+  - perf step with a mode enabled but no duration set (perf_stat/record/trace_duration or shared perf_duration)
+  - perf duration/delay/repeat/freq fields with invalid values (must be integer or {{PARAM}})
   - {{PARAM}} placeholders used in scripts/options but not defined in design params or inherited decision params
   - Defined params with empty values
 Call this before run_design or export_plan to catch problems early.`,
@@ -861,6 +1085,51 @@ Call this before run_design or export_plan to catch problems early.`,
 					}
 					if (step.type === 'collect' && (!step.duration_secs || step.duration_secs <= 0)) {
 						issues.push({ severity: 'warning', code: 'COLLECT_ZERO_DURATION', message: `wait step "${step.name}" has duration_secs = 0. It will use the design-level pre/post collect settings.` });
+					}
+
+					if (step.type === 'perf') {
+						// Helper: a perf duration/delay/count field must be empty, a plain integer, or a single {{PARAM}}
+						const isValidPerfField = (v: string) => v.trim() === '' || /^\d+$/.test(v.trim()) || /^\{\{[\w]+\}\}$/.test(v.trim());
+
+						const noModesEnabled = !step.perf_stat_enabled && !step.perf_record_enabled && !step.perf_trace_enabled;
+						if (noModesEnabled) {
+							issues.push({ severity: 'warning', code: 'PERF_NO_MODES', message: `perf step "${step.name}" has no modes enabled (stat/record/trace). Enable at least one mode or remove the step.` });
+						}
+
+						for (const [mode, modeEnabled, modeSpecific, modeLabel] of [
+							['stat',   step.perf_stat_enabled,   step.perf_stat_duration,   'stat duration'],
+							['record', step.perf_record_enabled, step.perf_record_duration, 'record duration'],
+							['trace',  step.perf_trace_enabled,  step.perf_trace_duration,  'trace duration'],
+						] as [string, number | undefined, string | undefined, string][]) {
+							const effective = modeSpecific || step.perf_duration || '';
+							if (modeEnabled) {
+								if (effective.trim() === '') {
+									issues.push({ severity: 'error', code: 'PERF_DURATION_REQUIRED', message: `perf step "${step.name}": ${modeLabel} is required when ${mode} mode is enabled. Set perf_${mode}_duration or the shared perf_duration field.` });
+								} else if (!isValidPerfField(effective)) {
+									issues.push({ severity: 'error', code: 'PERF_DURATION_INVALID', message: `perf step "${step.name}": ${modeLabel} "${effective}" is not valid — must be a plain integer or {{PARAM_NAME}}.` });
+								}
+							} else if (!isValidPerfField(effective)) {
+								issues.push({ severity: 'error', code: 'PERF_DURATION_INVALID', message: `perf step "${step.name}": ${modeLabel} "${effective}" is not valid — must be a plain integer or {{PARAM_NAME}}.` });
+							}
+						}
+
+						for (const [mode, modeSpecific] of [
+							['stat',   step.perf_stat_delay],
+							['record', step.perf_record_delay],
+							['trace',  step.perf_trace_delay],
+						] as [string, string | undefined][]) {
+							const effective = modeSpecific || step.perf_delay || '';
+							if (!isValidPerfField(effective)) {
+								issues.push({ severity: 'error', code: 'PERF_DELAY_INVALID', message: `perf step "${step.name}": ${mode} delay "${effective}" is not valid — must be a plain integer or {{PARAM_NAME}}.` });
+							}
+						}
+
+						if (step.perf_repeat && !isValidPerfField(step.perf_repeat)) {
+							issues.push({ severity: 'error', code: 'PERF_REPEAT_INVALID', message: `perf step "${step.name}": repeat "${step.perf_repeat}" is not valid — must be a plain integer or {{PARAM_NAME}}.` });
+						}
+						if (step.perf_freq && !isValidPerfField(step.perf_freq)) {
+							issues.push({ severity: 'error', code: 'PERF_FREQ_INVALID', message: `perf step "${step.name}": frequency "${step.perf_freq}" is not valid — must be a plain integer or {{PARAM_NAME}}.` });
+						}
 					}
 				}
 			}
