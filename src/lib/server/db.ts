@@ -957,6 +957,9 @@ function migrate(db: Database.Database) {
 	if (!stepCols.includes('pg_stat_reset_stats')) db.exec(`ALTER TABLE design_steps ADD COLUMN pg_stat_reset_stats INTEGER NOT NULL DEFAULT 0`);
 	if (!stepCols.includes('pg_stat_reset_statements')) db.exec(`ALTER TABLE design_steps ADD COLUMN pg_stat_reset_statements INTEGER NOT NULL DEFAULT 0`);
 	if (!stepCols.includes('pg_stat_collect_statements')) db.exec(`ALTER TABLE design_steps ADD COLUMN pg_stat_collect_statements INTEGER NOT NULL DEFAULT 0`);
+	// proc step columns
+	if (!stepCols.includes('proc_groups')) db.exec(`ALTER TABLE design_steps ADD COLUMN proc_groups TEXT NOT NULL DEFAULT '[]'`);
+	if (!stepCols.includes('proc_interval_seconds')) db.exec(`ALTER TABLE design_steps ADD COLUMN proc_interval_seconds TEXT NOT NULL DEFAULT ''`);
 	const perfModeToggleMigrated = db.prepare(`SELECT id FROM schema_migrations WHERE id = 'perf_mode_toggles_v1'`).get();
 	if (!perfModeToggleMigrated) {
 		db.exec(`

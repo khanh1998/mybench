@@ -67,6 +67,9 @@
     pg_stat_reset_stats: number;
     pg_stat_reset_statements: number;
     pg_stat_collect_statements: number;
+    // proc step fields
+    proc_groups: string;
+    proc_interval_seconds: string;
   }
   interface Design {
     id: number; decision_id: number; name: string; description: string;
@@ -112,6 +115,7 @@
     { value: 'sysbench', label: 'sysbench' },
     { value: 'perf', label: 'perf' },
     { value: 'pg_stat', label: 'pg_stat' },
+    { value: 'proc', label: 'proc' },
   ];
   // Labels for legacy step types that may still exist in saved designs
   const LEGACY_STEP_LABELS: Partial<Record<DesignStepType, string>> = {
@@ -627,6 +631,8 @@
       pg_stat_reset_stats: 1,
       pg_stat_reset_statements: 1,
       pg_stat_collect_statements: 1,
+      proc_groups: '[]',
+      proc_interval_seconds: '',
       enabled: 1,
       pgbench_scripts: []
     };
@@ -1636,6 +1642,89 @@
                 {/if}
               </label>
             {/if}
+          </div>
+
+        </div>
+      {:else if selectedStep.type === 'proc'}
+        {@const PROC_GROUPS: { key: string; label: string; description: string }[] = [
+          { key: 'loadavg',   label: '/proc/loadavg',          description: '1/5/15-min load averages, running and total thread counts' },
+          { key: 'meminfo',   label: '/proc/meminfo',          description: 'MemFree, MemAvailable, Cached, Dirty, SwapUsed, HugePages, etc.' },
+          { key: 'stat',      label: '/proc/stat',             description: 'Aggregate CPU ticks (user/system/idle/iowait/irq), context switches, processes' },
+          { key: 'vmstat',    label: '/proc/vmstat',           description: 'Page faults, pgpgin/pgpgout, swap in/out, dirty pages, writeback, etc.' },
+          { key: 'diskstats', label: '/proc/diskstats',        description: 'Read/write IOPS, sectors, and queue time per block device' },
+          { key: 'net_dev',   label: '/proc/net/dev',          description: 'rx/tx bytes, packets, errors, and drops per network interface' },
+          { key: 'schedstat', label: '/proc/schedstat',        description: 'Scheduler run time, wait time, and timeslices per CPU core' },
+          { key: 'pressure',  label: '/proc/pressure',         description: 'PSI some/full avg10/avg60/avg300 for CPU, memory, and IO' },
+          { key: 'file_nr',   label: '/proc/sys/fs/file-nr',   description: 'System-wide allocated and maximum file descriptor count' },
+          { key: 'pid_stat',     label: '/proc/[pid]/stat',    description: 'Per-postgres-PID: state, utime, stime, minflt, majflt, vsize, rss, num_threads' },
+          { key: 'pid_statm',    label: '/proc/[pid]/statm',   description: 'Per-postgres-PID: size, resident, shared, text, data pages (in pages)' },
+          { key: 'pid_io',       label: '/proc/[pid]/io',      description: 'Per-postgres-PID: rchar, wchar, read_bytes, write_bytes, cancelled_write_bytes' },
+          { key: 'pid_schedstat',label: '/proc/[pid]/schedstat',description: 'Per-postgres-PID: run_time_ns, wait_time_ns, timeslices' },
+          { key: 'pid_wchan',    label: '/proc/[pid]/wchan',   description: 'Per-postgres-PID: kernel function the process is sleeping in' },
+          { key: 'pid_fd',       label: '/proc/[pid]/fd',      description: 'Per-postgres-PID: open file descriptor count' },
+          { key: 'pid_status',   label: '/proc/[pid]/status',  description: 'Per-postgres-PID: VmPeak, VmRSS, VmSwap, Threads, context switches' },
+        ]}
+        {@const selectedGroups = (() => { try { return JSON.parse(selectedStep.proc_groups || '[]') as string[]; } catch { return [] as string[]; } })()}
+        <div class="perf-step-panel">
+
+          <!-- SSH requirement note -->
+          <p class="pg-stat-table-hint" style="margin-bottom:10px">
+            SSH to database server required · not supported for RDS/Cloud SQL · collection starts at bench step
+          </p>
+
+          <!-- Metric groups -->
+          <div class="perf-mode-section">
+            <div class="pg-stat-section-header">
+              Files to collect
+              <span class="pg-stat-section-hint">sampled at each snapshot interval · hover for field details</span>
+            </div>
+            <div class="snap-table-grid">
+              {#each PROC_GROUPS as group}
+                <label class="snap-table-item" title={group.description}>
+                  <input
+                    type="checkbox"
+                    checked={selectedGroups.length === 0 || selectedGroups.includes(group.key)}
+                    onchange={(e) => {
+                      const checked = (e.currentTarget as HTMLInputElement).checked;
+                      let current: string[] = [];
+                      try { current = JSON.parse(selectedStep!.proc_groups || '[]'); } catch { /* empty */ }
+                      const allKeys = PROC_GROUPS.map(g => g.key);
+                      if (current.length === 0) {
+                        current = checked ? allKeys : allKeys.filter(k => k !== group.key);
+                      } else {
+                        current = checked ? [...current, group.key] : current.filter(k => k !== group.key);
+                        if (current.length === allKeys.length) current = [];
+                      }
+                      selectedStep!.proc_groups = JSON.stringify(current);
+                    }}
+                  />
+                  {group.label}
+                </label>
+              {/each}
+            </div>
+            <p class="pg-stat-table-hint">
+              {selectedGroups.length === 0
+                ? '✓ all files'
+                : `${selectedGroups.length} of ${PROC_GROUPS.length} selected`}
+            </p>
+          </div>
+
+          <!-- Snapshot interval -->
+          <div class="perf-mode-section">
+            <div class="pg-stat-section-header">Snapshot interval</div>
+            <label style="font-weight:400">
+              <input
+                bind:value={selectedStep.proc_interval_seconds}
+                placeholder="e.g. 30 or {`{{INTERVAL}}`} — leave empty to use run default"
+                spellcheck="false"
+              />
+              {#if resolveParamPreview(selectedStep.proc_interval_seconds)}
+                {@const preview = resolveParamPreview(selectedStep.proc_interval_seconds)!}
+                <span class="param-preview" class:param-preview-error={preview.unresolved.length > 0}>
+                  {preview.unresolved.length > 0 ? `unresolved: ${preview.unresolved.join(', ')}` : `→ ${preview.text}`}
+                </span>
+              {/if}
+            </label>
           </div>
 
         </div>

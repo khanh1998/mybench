@@ -1159,6 +1159,8 @@
   let waitsPage     = $state(0);
   let waitsView     = $state<'detail' | 'broad'>('detail');
   let waitsSort     = $state<'count' | 'aas'>('count');
+  let waitsLineMode  = $state<'common' | 'all'>('common');
+  let waitsLineValue = $state<'count' | 'aas'>('count');
   let aasGranularity = $state<'detail' | 'broad'>('detail');
 
   function pagedSql(runId: number): SqlRow[] {
@@ -1200,6 +1202,44 @@
     return activeWaits(runId).slice(waitsPage * PER_PAGE, (waitsPage + 1) * PER_PAGE);
   }
   function waitsPageCount(runId: number) { return Math.ceil(activeWaits(runId).length / PER_PAGE); }
+
+  let hiddenWaitEventLabels = $state<string[]>([]);
+
+  function buildWaitEventBarGroups() {
+    const eventsByRun = new Map<number, Set<string>>();
+    const allEvents = new Set<string>();
+    for (const run of runs) {
+      const rows = waitsData[run.id] ?? [];
+      const events = new Set<string>();
+      for (const row of rows) {
+        const key = `${row.wait_event_type}||${row.wait_event}`;
+        events.add(key);
+        allEvents.add(key);
+      }
+      eventsByRun.set(run.id, events);
+    }
+    const targetEvents = waitsLineMode === 'common'
+      ? new Set([...allEvents].filter(k => runs.every(r => (eventsByRun.get(r.id) ?? new Set()).has(k))))
+      : allEvents;
+
+    return runs.map(run => {
+      const rows = waitsData[run.id] ?? [];
+      const segments = rows
+        .filter(row => targetEvents.has(`${row.wait_event_type}||${row.wait_event}`))
+        .map(row => {
+          const value = waitsLineValue === 'aas'
+            ? (Number(row.snapshot_count) > 0 ? Number(row.occurrences) / Number(row.snapshot_count) : 0)
+            : Number(row.occurrences);
+          return {
+            label: `${row.wait_event_type} · ${row.wait_event}`,
+            color: getWaitColor(row.wait_event_type, row.wait_event),
+            value
+          };
+        })
+        .sort((a, b) => b.value - a.value);
+      return { label: run.label, segments };
+    });
+  }
 
   // ── Flamegraph ─────────────────────────────────────────────────────────────
   interface FlameItem { wtype: string; wevent: string; seconds: number; color: string; }
@@ -1567,6 +1607,36 @@
       </div>
     {/each}
   </div>
+  {#if runs.some(r => (waitsData[r.id] ?? []).length > 0)}
+    {@const waitBarGroups = buildWaitEventBarGroups()}
+    <div style="margin-top:16px">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap">
+        <span style="font-size:13px;color:#555;font-weight:500">Events by run</span>
+        <div class="mode-toggle">
+          <button class:active={waitsLineMode === 'common'} onclick={() => waitsLineMode = 'common'}>Common</button>
+          <button class:active={waitsLineMode === 'all'} onclick={() => waitsLineMode = 'all'}>All</button>
+        </div>
+        <div class="mode-toggle">
+          <button class:active={waitsLineValue === 'count'} onclick={() => waitsLineValue = 'count'}>Count</button>
+          <button class:active={waitsLineValue === 'aas'} onclick={() => waitsLineValue = 'aas'}>AAS</button>
+        </div>
+      </div>
+      {#if waitBarGroups.every(g => g.segments.length === 0)}
+        <div class="empty" style="font-size:12px">No {waitsLineMode === 'common' ? 'common ' : ''}wait events to plot</div>
+      {:else}
+        <StackedBarChart
+          groups={waitBarGroups}
+          title={waitsLineValue === 'aas' ? 'AAS' : 'Count'}
+          hiddenLabels={hiddenWaitEventLabels}
+          onToggleLabel={(label) => {
+            hiddenWaitEventLabels = hiddenWaitEventLabels.includes(label)
+              ? hiddenWaitEventLabels.filter(l => l !== label)
+              : [...hiddenWaitEventLabels, label];
+          }}
+        />
+      {/if}
+    </div>
+  {/if}
 </div>
 
 <!-- ── Section 4: Top SQL ────────────────────────────────────────────────── -->

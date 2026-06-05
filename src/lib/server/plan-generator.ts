@@ -264,6 +264,22 @@ export function generatePlan(designId: number, overrides: PlanRunSettingsOverrid
 		};
 	}
 
+	// Build proc_step config from the proc step (opt-in host metrics collection)
+	const procStep = steps.find(s => s.type === 'proc');
+	let procStepConfig: object | null = null;
+
+	if (procStep) {
+		let groups: string[] = [];
+		try { groups = JSON.parse(procStep.proc_groups || '[]'); } catch { /* keep empty */ }
+
+		const intervalSecs = parseInt(resolveParamExpr(procStep.proc_interval_seconds || ''), 10) || 0;
+
+		procStepConfig = {
+			groups,          // empty = all groups
+			interval_seconds: intervalSecs, // 0 = use snapshot interval
+		};
+	}
+
 	return {
 		version: 1,
 		exported_at: new Date().toISOString(),
@@ -280,5 +296,6 @@ export function generatePlan(designId: number, overrides: PlanRunSettingsOverrid
 		steps: stepsWithScripts,
 		enabled_snap_tables: resolvedSnapTables,  // backward compat — same data as pg_stat_step.snap_tables
 		pg_stat_step: pgStatStepConfig,           // null = no collection
+		proc_step: procStepConfig,                // null = no host metrics collection
 	};
 }

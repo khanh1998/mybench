@@ -80,9 +80,16 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 		Snapshots: make(map[string][]result.SnapshotRow),
 	}
 
-	// Prepare host metrics collector (SSH connect) but don't start ticking yet.
+	// Prepare host metrics collector only when a proc step is present in the plan.
 	// Start() is called just before the bench step so ticks align with bench start.
-	hostCollector := NewHostMetricsCollector(opts.Plan.Server, opts.Plan.RunSettings.SnapshotIntervalSeconds)
+	var hostCollector *HostMetricsCollector
+	if opts.Plan.ProcStep != nil {
+		intervalSecs := opts.Plan.ProcStep.IntervalSeconds
+		if intervalSecs <= 0 {
+			intervalSecs = opts.Plan.RunSettings.SnapshotIntervalSeconds
+		}
+		hostCollector = NewHostMetricsCollector(opts.Plan.Server, intervalSecs, opts.Plan.ProcStep.Groups)
+	}
 
 	// Sort enabled steps by position.
 	steps := make([]plan.Step, 0, len(opts.Plan.Steps))

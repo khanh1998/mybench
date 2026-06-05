@@ -14,6 +14,14 @@ type Plan struct {
 	Steps             []Step             `json:"steps"`
 	EnabledSnapTables []SnapTableSpec    `json:"enabled_snap_tables"` // backward compat
 	PgStatStep        *PgStatStepConfig  `json:"pg_stat_step,omitempty"`
+	ProcStep          *ProcStepConfig    `json:"proc_step,omitempty"`
+}
+
+// ProcStepConfig holds resolved proc (host metrics) collection config from the proc step.
+// Nil means no host metrics collection for this run.
+type ProcStepConfig struct {
+	Groups          []string `json:"groups"`           // empty = all groups
+	IntervalSeconds int      `json:"interval_seconds"` // 0 = use snapshot interval
 }
 
 // PgStatStepConfig holds resolved pg_stat collection config from the pg_stat step.

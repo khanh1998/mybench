@@ -85,13 +85,16 @@ type HostMetricsCollector struct {
 	doneCh     chan struct{}
 	interval   time.Duration
 	started    bool
+	groups     map[string]bool // nil = all groups
 }
 
 // NewHostMetricsCollector creates a host metrics collector but does NOT start collection.
 // Call Start() to begin — typically just before the bench step so ticks align with bench start.
+// groups is the list of metric groups to collect; nil or empty means all groups.
 // Returns nil if SSH is not configured or the connection fails.
-func NewHostMetricsCollector(srv plan.ServerConfig, intervalSecs int) *HostMetricsCollector {
+func NewHostMetricsCollector(srv plan.ServerConfig, intervalSecs int, groups []string) *HostMetricsCollector {
 	if !srv.SSHEnabled || srv.SSHUser == "" || srv.SSHPrivateKey == "" {
+		fmt.Printf("warning: proc step: SSH not configured on database server — host metrics will not be collected\n")
 		return nil
 	}
 	if intervalSecs <= 0 {
@@ -127,12 +130,21 @@ func NewHostMetricsCollector(srv plan.ServerConfig, intervalSecs int) *HostMetri
 		return nil
 	}
 
+	var groupsMap map[string]bool
+	if len(groups) > 0 {
+		groupsMap = make(map[string]bool, len(groups))
+		for _, g := range groups {
+			groupsMap[g] = true
+		}
+	}
+
 	c := &HostMetricsCollector{
 		snapshots: make(map[string][]result.SnapshotRow),
 		client:    client,
 		stopCh:    make(chan struct{}),
 		doneCh:    make(chan struct{}),
 		interval:  time.Duration(intervalSecs) * time.Second,
+		groups:    groupsMap,
 	}
 	return c
 }
@@ -216,6 +228,15 @@ func (c *HostMetricsCollector) collectConfig() map[string]any {
 	return cfg
 }
 
+// shouldCollect returns true if the given group should be collected.
+// When c.groups is nil (all groups), always returns true.
+func (c *HostMetricsCollector) shouldCollect(group string) bool {
+	if c.groups == nil {
+		return true
+	}
+	return c.groups[group]
+}
+
 func (c *HostMetricsCollector) collectOnce() {
 	ts := time.Now().UTC().Format(time.RFC3339Nano)
 	out, err := c.runCommand(collectionScript)
@@ -247,108 +268,148 @@ func (c *HostMetricsCollector) collectOnce() {
 		}
 	}
 
-	if text, ok := sections["loadavg"]; ok {
-		if row := parseLoadavg(text); row != nil {
-			addRow("host_snap_proc_loadavg", row)
+	if c.shouldCollect("loadavg") {
+		if text, ok := sections["loadavg"]; ok {
+			if row := parseLoadavg(text); row != nil {
+				addRow("host_snap_proc_loadavg", row)
+			}
 		}
 	}
-	if text, ok := sections["meminfo"]; ok {
-		if row := parseMeminfo(text); row != nil {
-			addRow("host_snap_proc_meminfo", row)
+	if c.shouldCollect("meminfo") {
+		if text, ok := sections["meminfo"]; ok {
+			if row := parseMeminfo(text); row != nil {
+				addRow("host_snap_proc_meminfo", row)
+			}
 		}
 	}
-	if text, ok := sections["stat"]; ok {
-		if row := parseProcStat(text); row != nil {
-			addRow("host_snap_proc_stat", row)
+	if c.shouldCollect("stat") {
+		if text, ok := sections["stat"]; ok {
+			if row := parseProcStat(text); row != nil {
+				addRow("host_snap_proc_stat", row)
+			}
 		}
 	}
-	if text, ok := sections["proc_vmstat"]; ok {
-		if row := parseProcVmstat(text); row != nil {
-			addRow("host_snap_proc_vmstat", row)
+	if c.shouldCollect("vmstat") {
+		if text, ok := sections["proc_vmstat"]; ok {
+			if row := parseProcVmstat(text); row != nil {
+				addRow("host_snap_proc_vmstat", row)
+			}
 		}
 	}
-	if text, ok := sections["diskstats"]; ok {
-		addRows("host_snap_proc_diskstats", parseDiskstats(text))
+	if c.shouldCollect("diskstats") {
+		if text, ok := sections["diskstats"]; ok {
+			addRows("host_snap_proc_diskstats", parseDiskstats(text))
+		}
 	}
-	if text, ok := sections["netdev"]; ok {
-		addRows("host_snap_proc_netdev", parseNetdev(text))
+	if c.shouldCollect("net_dev") {
+		if text, ok := sections["netdev"]; ok {
+			addRows("host_snap_proc_netdev", parseNetdev(text))
+		}
 	}
-	if text, ok := sections["schedstat"]; ok {
-		addRows("host_snap_proc_schedstat", parseSchedstat(text))
+	if c.shouldCollect("schedstat") {
+		if text, ok := sections["schedstat"]; ok {
+			addRows("host_snap_proc_schedstat", parseSchedstat(text))
+		}
+	}
+	if c.shouldCollect("pressure") {
+		cpuText := sections["psi_cpu"]
+		memText := sections["psi_memory"]
+		ioText := sections["psi_io"]
+		if cpuText != "" || memText != "" || ioText != "" {
+			if row := parsePsi(cpuText, memText, ioText); row != nil {
+				addRow("host_snap_proc_psi", row)
+			}
+		}
+	}
+	if c.shouldCollect("file_nr") {
+		if text, ok := sections["file_nr"]; ok {
+			if row := parseFileNr(text); row != nil {
+				addRow("host_snap_proc_sys_fs_file_nr", row)
+			}
+		}
 	}
 
-	cpuText := sections["psi_cpu"]
-	memText := sections["psi_memory"]
-	ioText := sections["psi_io"]
-	if cpuText != "" || memText != "" || ioText != "" {
-		if row := parsePsi(cpuText, memText, ioText); row != nil {
-			addRow("host_snap_proc_psi", row)
-		}
-	}
+	// Per-PID collection: build cmdline map once if any pid_* group is enabled.
+	collectPidStat := c.shouldCollect("pid_stat")
+	collectPidStatm := c.shouldCollect("pid_statm")
+	collectPidIO := c.shouldCollect("pid_io")
+	collectPidSchedstat := c.shouldCollect("pid_schedstat")
+	collectPidWchan := c.shouldCollect("pid_wchan")
+	collectPidFd := c.shouldCollect("pid_fd")
+	collectPidStatus := c.shouldCollect("pid_status")
 
-	if text, ok := sections["file_nr"]; ok {
-		if row := parseFileNr(text); row != nil {
-			addRow("host_snap_proc_sys_fs_file_nr", row)
-		}
-	}
-
-	// Build cmdline map first so pid_stat rows can include it.
-	cmdlineMap := make(map[int]string)
-	for key, text := range sections {
-		if strings.HasPrefix(key, "pid_cmdline:") {
-			pidStr := key[len("pid_cmdline:"):]
-			if pid, err := strconv.Atoi(pidStr); err == nil {
-				if cl := parsePidCmdline(text); cl != "" {
-					cmdlineMap[pid] = cl
+	if collectPidStat || collectPidStatm || collectPidIO || collectPidSchedstat || collectPidWchan || collectPidFd || collectPidStatus {
+		// Build cmdline map first so pid_stat rows can include it.
+		cmdlineMap := make(map[int]string)
+		for key, text := range sections {
+			if strings.HasPrefix(key, "pid_cmdline:") {
+				pidStr := key[len("pid_cmdline:"):]
+				if pid, err := strconv.Atoi(pidStr); err == nil {
+					if cl := parsePidCmdline(text); cl != "" {
+						cmdlineMap[pid] = cl
+					}
 				}
 			}
 		}
-	}
 
-	// Per-PID sections: keys are "pid_stat:<pid>", "pid_statm:<pid>", etc.
-	for key, text := range sections {
-		for _, prefix := range []string{"pid_stat:", "pid_statm:", "pid_io:", "pid_schedstat:", "pid_wchan:", "pid_fd_count:", "pid_status:"} {
-			if !strings.HasPrefix(key, prefix) {
-				continue
-			}
-			pidStr := key[len(prefix):]
-			pid, err := strconv.Atoi(pidStr)
-			if err != nil {
+		for key, text := range sections {
+			for _, prefix := range []string{"pid_stat:", "pid_statm:", "pid_io:", "pid_schedstat:", "pid_wchan:", "pid_fd_count:", "pid_status:"} {
+				if !strings.HasPrefix(key, prefix) {
+					continue
+				}
+				pidStr := key[len(prefix):]
+				pid, err := strconv.Atoi(pidStr)
+				if err != nil {
+					break
+				}
+				sectionType := strings.TrimSuffix(prefix, ":")
+				switch sectionType {
+				case "pid_stat":
+					if collectPidStat {
+						if row := parsePidStat(text, pid); row != nil {
+							row["cmdline"] = cmdlineMap[pid]
+							addRow("host_snap_proc_pid_stat", row)
+						}
+					}
+				case "pid_statm":
+					if collectPidStatm {
+						if row := parsePidStatm(text, pid); row != nil {
+							addRow("host_snap_proc_pid_statm", row)
+						}
+					}
+				case "pid_io":
+					if collectPidIO {
+						if row := parsePidIO(text, pid); row != nil {
+							addRow("host_snap_proc_pid_io", row)
+						}
+					}
+				case "pid_schedstat":
+					if collectPidSchedstat {
+						if row := parsePidSchedstat(text, pid); row != nil {
+							addRow("host_snap_proc_pid_schedstat", row)
+						}
+					}
+				case "pid_wchan":
+					if collectPidWchan {
+						if row := parsePidWchan(text, pid); row != nil {
+							addRow("host_snap_proc_pid_wchan", row)
+						}
+					}
+				case "pid_fd_count":
+					if collectPidFd {
+						if row := parsePidFdCount(text, pid); row != nil {
+							addRow("host_snap_proc_pid_fd_count", row)
+						}
+					}
+				case "pid_status":
+					if collectPidStatus {
+						if row := parsePidStatus(text, pid); row != nil {
+							addRow("host_snap_proc_pid_status", row)
+						}
+					}
+				}
 				break
 			}
-			sectionType := strings.TrimSuffix(prefix, ":")
-			switch sectionType {
-			case "pid_stat":
-				if row := parsePidStat(text, pid); row != nil {
-					row["cmdline"] = cmdlineMap[pid]
-					addRow("host_snap_proc_pid_stat", row)
-				}
-			case "pid_statm":
-				if row := parsePidStatm(text, pid); row != nil {
-					addRow("host_snap_proc_pid_statm", row)
-				}
-			case "pid_io":
-				if row := parsePidIO(text, pid); row != nil {
-					addRow("host_snap_proc_pid_io", row)
-				}
-			case "pid_schedstat":
-				if row := parsePidSchedstat(text, pid); row != nil {
-					addRow("host_snap_proc_pid_schedstat", row)
-				}
-			case "pid_wchan":
-				if row := parsePidWchan(text, pid); row != nil {
-					addRow("host_snap_proc_pid_wchan", row)
-				}
-			case "pid_fd_count":
-				if row := parsePidFdCount(text, pid); row != nil {
-					addRow("host_snap_proc_pid_fd_count", row)
-				}
-			case "pid_status":
-				if row := parsePidStatus(text, pid); row != nil {
-					addRow("host_snap_proc_pid_status", row)
-				}
-			}
-			break
 		}
 	}
 }

@@ -6,7 +6,8 @@ export type DesignStepType =
 	| 'pg_stat_statements_reset'
 	| 'pg_stat_statements_collect'
 	| 'perf'
-	| 'pg_stat';
+	| 'pg_stat'
+	| 'proc';
 
 export interface PgServer {
 	id: number;
@@ -138,6 +139,9 @@ export interface DesignStep {
 	pg_stat_reset_stats: number;         // 0 | 1 — fires pg_stat_reset()
 	pg_stat_reset_statements: number;    // 0 | 1 — fires pg_stat_statements_reset()
 	pg_stat_collect_statements: number;  // 0 | 1 — collect pg_stat_statements at bench end
+	// proc step fields
+	proc_groups: string;           // JSON array of group names, '' or '[]' = all groups
+	proc_interval_seconds: string; // TEXT, supports {{PARAM}}, empty = use snapshot interval
 }
 
 export type RunStatus = 'running' | 'completed' | 'failed' | 'stopped' | 'pending';
