@@ -25,11 +25,39 @@
   // queryid stored as CAST(queryid AS TEXT) to avoid JS float64 precision loss on large int64 values
   interface SqlRow {
     queryid: string; query_short: string; query_full: string;
-    delta_calls: number; delta_exec_time: number; delta_rows: number;
-    cache_hit_pct: number | null; delta_blks_read: number;
-    delta_plan_time: number; mean_plan_time: number;
-    mean_exec_time: number; max_exec_time: number; stddev_exec_time: number;
-    total_plan_time: number; delta_temp_blks_read: number; delta_wal_bytes: number;
+    // Execution Time
+    delta_exec_time: number; min_exec_time: number; mean_exec_time: number;
+    max_exec_time: number; stddev_exec_time: number;
+    // Calls & Rows
+    delta_calls: number; delta_plans: number; delta_rows: number;
+    // Planning Time
+    delta_plan_time: number; min_plan_time: number; mean_plan_time: number;
+    max_plan_time: number; stddev_plan_time: number;
+    total_plan_time: number;
+    // Shared Buffers
+    cache_hit_pct: number | null;
+    delta_shared_blks_hit: number; delta_blks_read: number;
+    delta_shared_blks_dirtied: number; delta_shared_blks_written: number;
+    // Local Buffers
+    delta_local_blks_hit: number; delta_local_blks_read: number;
+    delta_local_blks_dirtied: number; delta_local_blks_written: number;
+    // Temp Buffers
+    delta_temp_blks_read: number; delta_temp_blks_written: number;
+    // Block I/O Time
+    delta_shared_blk_read_time: number; delta_shared_blk_write_time: number;
+    delta_local_blk_read_time: number; delta_local_blk_write_time: number;
+    delta_temp_blk_read_time: number; delta_temp_blk_write_time: number;
+    // WAL
+    delta_wal_records: number; delta_wal_fpi: number;
+    delta_wal_bytes: number; delta_wal_buffers_full: number;
+    // JIT
+    delta_jit_functions: number; delta_jit_generation_time: number;
+    delta_jit_inlining_count: number; delta_jit_inlining_time: number;
+    delta_jit_optimization_count: number; delta_jit_optimization_time: number;
+    delta_jit_emission_count: number; delta_jit_emission_time: number;
+    delta_jit_deform_count: number; delta_jit_deform_time: number;
+    // Parallel
+    delta_parallel_workers_to_launch: number; delta_parallel_workers_launched: number;
     snapshot_count: number; bench_secs: number;
   }
   type StatementMetricFormat = 'integer' | 'decimal' | 'ms' | 'bytes' | 'bool' | 'text';
@@ -40,6 +68,12 @@
     firstCollectedAt: string | null;
     lastCollectedAt: string | null;
     values: Record<string, number | string | null>;
+  }
+  interface CrossRunMetric { key: keyof SqlRow; label: string; format: StatementMetricFormat; }
+  interface CrossRunMetricGroup { title: string; metrics: CrossRunMetric[]; isWait?: true; }
+  interface CrossRow {
+    queryid: string; query_short: string; query_full: string;
+    byRun: Record<number, SqlRow | undefined>;
   }
   interface ActiveLockNode { node: LockNode; runLabel: string; }
   interface ContentionRow {
@@ -268,6 +302,76 @@
     }
   ];
 
+  const CROSS_RUN_METRIC_GROUPS: CrossRunMetricGroup[] = [
+    { title: 'Execution Time', metrics: [
+      { key: 'delta_exec_time',  label: 'Total',  format: 'ms' },
+      { key: 'min_exec_time',    label: 'Min',    format: 'ms' },
+      { key: 'mean_exec_time',   label: 'Avg',    format: 'ms' },
+      { key: 'max_exec_time',    label: 'Max',    format: 'ms' },
+      { key: 'stddev_exec_time', label: 'Stddev', format: 'ms' },
+    ]},
+    { title: 'Calls & Rows', metrics: [
+      { key: 'delta_calls', label: 'Calls', format: 'integer' },
+      { key: 'delta_plans', label: 'Plans', format: 'integer' },
+      { key: 'delta_rows',  label: 'Rows',  format: 'integer' },
+    ]},
+    { title: 'Planning Time', metrics: [
+      { key: 'delta_plan_time',  label: 'Total',  format: 'ms' },
+      { key: 'min_plan_time',    label: 'Min',    format: 'ms' },
+      { key: 'mean_plan_time',   label: 'Avg',    format: 'ms' },
+      { key: 'max_plan_time',    label: 'Max',    format: 'ms' },
+      { key: 'stddev_plan_time', label: 'Stddev', format: 'ms' },
+    ]},
+    { title: 'Shared Buffers', metrics: [
+      { key: 'cache_hit_pct',            label: 'Cache Hit %', format: 'decimal' },
+      { key: 'delta_shared_blks_hit',    label: 'Hits',        format: 'integer' },
+      { key: 'delta_blks_read',          label: 'Reads',       format: 'integer' },
+      { key: 'delta_shared_blks_dirtied',label: 'Dirtied',     format: 'integer' },
+      { key: 'delta_shared_blks_written',label: 'Written',     format: 'integer' },
+    ]},
+    { title: 'Local Buffers', metrics: [
+      { key: 'delta_local_blks_hit',     label: 'Hits',    format: 'integer' },
+      { key: 'delta_local_blks_read',    label: 'Reads',   format: 'integer' },
+      { key: 'delta_local_blks_dirtied', label: 'Dirtied', format: 'integer' },
+      { key: 'delta_local_blks_written', label: 'Written', format: 'integer' },
+    ]},
+    { title: 'Temp Buffers', metrics: [
+      { key: 'delta_temp_blks_read',    label: 'Reads',  format: 'integer' },
+      { key: 'delta_temp_blks_written', label: 'Writes', format: 'integer' },
+    ]},
+    { title: 'Block I/O Time', metrics: [
+      { key: 'delta_shared_blk_read_time',  label: 'Shared Read',  format: 'ms' },
+      { key: 'delta_shared_blk_write_time', label: 'Shared Write', format: 'ms' },
+      { key: 'delta_local_blk_read_time',   label: 'Local Read',   format: 'ms' },
+      { key: 'delta_local_blk_write_time',  label: 'Local Write',  format: 'ms' },
+      { key: 'delta_temp_blk_read_time',    label: 'Temp Read',    format: 'ms' },
+      { key: 'delta_temp_blk_write_time',   label: 'Temp Write',   format: 'ms' },
+    ]},
+    { title: 'WAL', metrics: [
+      { key: 'delta_wal_records',      label: 'Records',      format: 'integer' },
+      { key: 'delta_wal_fpi',          label: 'Full Page Img',format: 'integer' },
+      { key: 'delta_wal_bytes',        label: 'Bytes',        format: 'bytes'   },
+      { key: 'delta_wal_buffers_full', label: 'Buffers Full', format: 'integer' },
+    ]},
+    { title: 'JIT', metrics: [
+      { key: 'delta_jit_functions',        label: 'Functions',    format: 'integer' },
+      { key: 'delta_jit_generation_time',  label: 'Gen Time',     format: 'ms'      },
+      { key: 'delta_jit_inlining_count',   label: 'Inline Count', format: 'integer' },
+      { key: 'delta_jit_inlining_time',    label: 'Inline Time',  format: 'ms'      },
+      { key: 'delta_jit_optimization_count',label: 'Opt Count',   format: 'integer' },
+      { key: 'delta_jit_optimization_time', label: 'Opt Time',    format: 'ms'      },
+      { key: 'delta_jit_emission_count',   label: 'Emit Count',   format: 'integer' },
+      { key: 'delta_jit_emission_time',    label: 'Emit Time',    format: 'ms'      },
+      { key: 'delta_jit_deform_count',     label: 'Deform Count', format: 'integer' },
+      { key: 'delta_jit_deform_time',      label: 'Deform Time',  format: 'ms'      },
+    ]},
+    { title: 'Parallel', metrics: [
+      { key: 'delta_parallel_workers_to_launch', label: 'To Launch', format: 'integer' },
+      { key: 'delta_parallel_workers_launched',  label: 'Launched',  format: 'integer' },
+    ]},
+    { title: 'Wait', metrics: [], isWait: true },
+  ];
+
   // ── State ──────────────────────────────────────────────────────────────────
   let localPhases = $state<string[]>([]);
   let loading = $state(false);
@@ -284,6 +388,11 @@
   let sqlSort      = $state<{ col: keyof SqlRow; asc: boolean }>({ col: 'delta_exec_time', asc: false });
   let sqlMode      = $state<'total' | 'persec'>('total');
   let showPlanCols = $state(false);
+  let showPerRunSqlTables = $state(false);
+  let sqlCrossGroup  = $state('Execution Time');
+  let sqlCrossMetric = $state<keyof SqlRow>('delta_exec_time');
+  let sqlCrossPage   = $state(0);
+  // cross-run table is always sorted by total calls desc, then queryid — no user-controlled sort
   let expandedLockNodes       = $state<Set<string>>(new Set());
   let activeLockNode          = $state<ActiveLockNode | null>(null);
   let lockSort                = $state<'times_seen' | 'pid'>('times_seen');
@@ -579,17 +688,50 @@
            SELECT CAST(queryid AS TEXT) as queryid,
                   query,
                   CAST(calls AS REAL) as calls,
+                  CAST(COALESCE(plans,0) AS REAL) as plans,
                   CAST(total_exec_time AS REAL) as total_exec_time,
                   CAST(rows AS REAL) as rows,
                   CAST(shared_blks_hit AS REAL) as blks_hit,
                   CAST(shared_blks_read AS REAL) as blks_read,
+                  CAST(COALESCE(shared_blks_dirtied,0) AS REAL) as shared_blks_dirtied,
+                  CAST(COALESCE(shared_blks_written,0) AS REAL) as shared_blks_written,
+                  CAST(COALESCE(local_blks_hit,0) AS REAL) as local_blks_hit,
+                  CAST(COALESCE(local_blks_read,0) AS REAL) as local_blks_read,
+                  CAST(COALESCE(local_blks_dirtied,0) AS REAL) as local_blks_dirtied,
+                  CAST(COALESCE(local_blks_written,0) AS REAL) as local_blks_written,
+                  CAST(COALESCE(temp_blks_read,0) AS REAL) as temp_blks_read,
+                  CAST(COALESCE(temp_blks_written,0) AS REAL) as temp_blks_written,
+                  CAST(COALESCE(shared_blk_read_time,0) AS REAL) as shared_blk_read_time,
+                  CAST(COALESCE(shared_blk_write_time,0) AS REAL) as shared_blk_write_time,
+                  CAST(COALESCE(local_blk_read_time,0) AS REAL) as local_blk_read_time,
+                  CAST(COALESCE(local_blk_write_time,0) AS REAL) as local_blk_write_time,
+                  CAST(COALESCE(temp_blk_read_time,0) AS REAL) as temp_blk_read_time,
+                  CAST(COALESCE(temp_blk_write_time,0) AS REAL) as temp_blk_write_time,
+                  CAST(COALESCE(wal_records,0) AS REAL) as wal_records,
+                  CAST(COALESCE(wal_fpi,0) AS REAL) as wal_fpi,
+                  CAST(COALESCE(wal_bytes,0) AS REAL) as wal_bytes,
+                  CAST(COALESCE(wal_buffers_full,0) AS REAL) as wal_buffers_full,
+                  CAST(COALESCE(jit_functions,0) AS REAL) as jit_functions,
+                  CAST(COALESCE(jit_generation_time,0) AS REAL) as jit_generation_time,
+                  CAST(COALESCE(jit_inlining_count,0) AS REAL) as jit_inlining_count,
+                  CAST(COALESCE(jit_inlining_time,0) AS REAL) as jit_inlining_time,
+                  CAST(COALESCE(jit_optimization_count,0) AS REAL) as jit_optimization_count,
+                  CAST(COALESCE(jit_optimization_time,0) AS REAL) as jit_optimization_time,
+                  CAST(COALESCE(jit_emission_count,0) AS REAL) as jit_emission_count,
+                  CAST(COALESCE(jit_emission_time,0) AS REAL) as jit_emission_time,
+                  CAST(COALESCE(jit_deform_count,0) AS REAL) as jit_deform_count,
+                  CAST(COALESCE(jit_deform_time,0) AS REAL) as jit_deform_time,
+                  CAST(COALESCE(parallel_workers_to_launch,0) AS REAL) as parallel_workers_to_launch,
+                  CAST(COALESCE(parallel_workers_launched,0) AS REAL) as parallel_workers_launched,
                   CAST(mean_exec_time AS REAL) as mean_exec_time,
                   CAST(max_exec_time AS REAL) as max_exec_time,
+                  CAST(min_exec_time AS REAL) as min_exec_time,
                   CAST(stddev_exec_time AS REAL) as stddev_exec_time,
                   CAST(COALESCE(total_plan_time,0) AS REAL) as total_plan_time,
                   CAST(COALESCE(mean_plan_time,0) AS REAL) as mean_plan_time,
-                  CAST(COALESCE(temp_blks_read,0) AS REAL) as temp_blks_read,
-                  CAST(COALESCE(wal_bytes,0) AS REAL) as wal_bytes,
+                  CAST(COALESCE(min_plan_time,0) AS REAL) as min_plan_time,
+                  CAST(COALESCE(max_plan_time,0) AS REAL) as max_plan_time,
+                  CAST(COALESCE(stddev_plan_time,0) AS REAL) as stddev_plan_time,
                   _collected_at
            FROM snap_pg_stat_statements WHERE _run_id = ?
          ),
@@ -597,20 +739,54 @@
            SELECT queryid,
                   MAX(query) as query_full,
                   CASE WHEN COUNT(*) > 1 THEN MAX(calls)-MIN(calls) ELSE MAX(calls) END as delta_calls,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(plans)-MIN(plans) ELSE MAX(plans) END as delta_plans,
                   CASE WHEN COUNT(*) > 1 THEN MAX(total_exec_time)-MIN(total_exec_time) ELSE MAX(total_exec_time) END as delta_exec_time,
                   CASE WHEN COUNT(*) > 1 THEN MAX(rows)-MIN(rows) ELSE MAX(rows) END as delta_rows,
                   CASE WHEN (CASE WHEN COUNT(*) > 1 THEN MAX(blks_hit+blks_read)-MIN(blks_hit+blks_read) ELSE MAX(blks_hit+blks_read) END) > 0
                     THEN ROUND(1.0*(CASE WHEN COUNT(*) > 1 THEN MAX(blks_hit)-MIN(blks_hit) ELSE MAX(blks_hit) END)/
                       (CASE WHEN COUNT(*) > 1 THEN MAX(blks_hit+blks_read)-MIN(blks_hit+blks_read) ELSE MAX(blks_hit+blks_read) END)*100,1)
                     ELSE NULL END as cache_hit_pct,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(blks_hit)-MIN(blks_hit) ELSE MAX(blks_hit) END as delta_shared_blks_hit,
                   CASE WHEN COUNT(*) > 1 THEN MAX(blks_read)-MIN(blks_read) ELSE MAX(blks_read) END as delta_blks_read,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(shared_blks_dirtied)-MIN(shared_blks_dirtied) ELSE MAX(shared_blks_dirtied) END as delta_shared_blks_dirtied,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(shared_blks_written)-MIN(shared_blks_written) ELSE MAX(shared_blks_written) END as delta_shared_blks_written,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(local_blks_hit)-MIN(local_blks_hit) ELSE MAX(local_blks_hit) END as delta_local_blks_hit,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(local_blks_read)-MIN(local_blks_read) ELSE MAX(local_blks_read) END as delta_local_blks_read,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(local_blks_dirtied)-MIN(local_blks_dirtied) ELSE MAX(local_blks_dirtied) END as delta_local_blks_dirtied,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(local_blks_written)-MIN(local_blks_written) ELSE MAX(local_blks_written) END as delta_local_blks_written,
                   CASE WHEN COUNT(*) > 1 THEN MAX(temp_blks_read)-MIN(temp_blks_read) ELSE MAX(temp_blks_read) END as delta_temp_blks_read,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(temp_blks_written)-MIN(temp_blks_written) ELSE MAX(temp_blks_written) END as delta_temp_blks_written,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(shared_blk_read_time)-MIN(shared_blk_read_time) ELSE MAX(shared_blk_read_time) END as delta_shared_blk_read_time,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(shared_blk_write_time)-MIN(shared_blk_write_time) ELSE MAX(shared_blk_write_time) END as delta_shared_blk_write_time,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(local_blk_read_time)-MIN(local_blk_read_time) ELSE MAX(local_blk_read_time) END as delta_local_blk_read_time,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(local_blk_write_time)-MIN(local_blk_write_time) ELSE MAX(local_blk_write_time) END as delta_local_blk_write_time,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(temp_blk_read_time)-MIN(temp_blk_read_time) ELSE MAX(temp_blk_read_time) END as delta_temp_blk_read_time,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(temp_blk_write_time)-MIN(temp_blk_write_time) ELSE MAX(temp_blk_write_time) END as delta_temp_blk_write_time,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(wal_records)-MIN(wal_records) ELSE MAX(wal_records) END as delta_wal_records,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(wal_fpi)-MIN(wal_fpi) ELSE MAX(wal_fpi) END as delta_wal_fpi,
                   CASE WHEN COUNT(*) > 1 THEN MAX(wal_bytes)-MIN(wal_bytes) ELSE MAX(wal_bytes) END as delta_wal_bytes,
-                  CASE WHEN COUNT(*) > 1 THEN MAX(total_plan_time)-MIN(total_plan_time) ELSE MAX(total_plan_time) END as delta_plan_time,
-                  MAX(mean_plan_time) as mean_plan_time,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(wal_buffers_full)-MIN(wal_buffers_full) ELSE MAX(wal_buffers_full) END as delta_wal_buffers_full,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(jit_functions)-MIN(jit_functions) ELSE MAX(jit_functions) END as delta_jit_functions,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(jit_generation_time)-MIN(jit_generation_time) ELSE MAX(jit_generation_time) END as delta_jit_generation_time,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(jit_inlining_count)-MIN(jit_inlining_count) ELSE MAX(jit_inlining_count) END as delta_jit_inlining_count,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(jit_inlining_time)-MIN(jit_inlining_time) ELSE MAX(jit_inlining_time) END as delta_jit_inlining_time,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(jit_optimization_count)-MIN(jit_optimization_count) ELSE MAX(jit_optimization_count) END as delta_jit_optimization_count,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(jit_optimization_time)-MIN(jit_optimization_time) ELSE MAX(jit_optimization_time) END as delta_jit_optimization_time,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(jit_emission_count)-MIN(jit_emission_count) ELSE MAX(jit_emission_count) END as delta_jit_emission_count,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(jit_emission_time)-MIN(jit_emission_time) ELSE MAX(jit_emission_time) END as delta_jit_emission_time,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(jit_deform_count)-MIN(jit_deform_count) ELSE MAX(jit_deform_count) END as delta_jit_deform_count,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(jit_deform_time)-MIN(jit_deform_time) ELSE MAX(jit_deform_time) END as delta_jit_deform_time,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(parallel_workers_to_launch)-MIN(parallel_workers_to_launch) ELSE MAX(parallel_workers_to_launch) END as delta_parallel_workers_to_launch,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(parallel_workers_launched)-MIN(parallel_workers_launched) ELSE MAX(parallel_workers_launched) END as delta_parallel_workers_launched,
                   MAX(mean_exec_time) as mean_exec_time,
+                  MIN(min_exec_time) as min_exec_time,
                   MAX(max_exec_time) as max_exec_time,
                   MAX(stddev_exec_time) as stddev_exec_time,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(total_plan_time)-MIN(total_plan_time) ELSE MAX(total_plan_time) END as delta_plan_time,
+                  MAX(mean_plan_time) as mean_plan_time,
+                  MIN(min_plan_time) as min_plan_time,
+                  MAX(max_plan_time) as max_plan_time,
+                  MAX(stddev_plan_time) as stddev_plan_time,
                   MAX(total_plan_time) as total_plan_time,
                   COUNT(*) as snapshot_count,
                   CAST((julianday(MAX(_collected_at))-julianday(MIN(_collected_at)))*86400 AS REAL) as bench_secs
@@ -618,11 +794,25 @@
          )
          SELECT queryid, query_full,
                 SUBSTR(query_full,1,300) as query_short,
-                delta_calls, delta_exec_time, delta_rows,
-                cache_hit_pct, delta_blks_read, delta_temp_blks_read, delta_wal_bytes,
-                delta_plan_time, mean_plan_time,
-                mean_exec_time, max_exec_time, stddev_exec_time, total_plan_time,
-                snapshot_count, bench_secs
+                delta_calls, delta_plans, delta_exec_time, delta_rows,
+                cache_hit_pct, delta_shared_blks_hit, delta_blks_read,
+                delta_shared_blks_dirtied, delta_shared_blks_written,
+                delta_local_blks_hit, delta_local_blks_read,
+                delta_local_blks_dirtied, delta_local_blks_written,
+                delta_temp_blks_read, delta_temp_blks_written,
+                delta_shared_blk_read_time, delta_shared_blk_write_time,
+                delta_local_blk_read_time, delta_local_blk_write_time,
+                delta_temp_blk_read_time, delta_temp_blk_write_time,
+                delta_wal_records, delta_wal_fpi, delta_wal_bytes, delta_wal_buffers_full,
+                delta_jit_functions, delta_jit_generation_time,
+                delta_jit_inlining_count, delta_jit_inlining_time,
+                delta_jit_optimization_count, delta_jit_optimization_time,
+                delta_jit_emission_count, delta_jit_emission_time,
+                delta_jit_deform_count, delta_jit_deform_time,
+                delta_parallel_workers_to_launch, delta_parallel_workers_launched,
+                mean_exec_time, min_exec_time, max_exec_time, stddev_exec_time,
+                delta_plan_time, mean_plan_time, min_plan_time, max_plan_time, stddev_plan_time,
+                total_plan_time, snapshot_count, bench_secs
          FROM agg WHERE delta_exec_time > 0
          ORDER BY delta_exec_time DESC LIMIT 50`,
         [rid]
@@ -1159,6 +1349,70 @@
 
   const anySql   = $derived(runs.some(r => hasSql[r.id]));
 
+  // ── Cross-run pivot ────────────────────────────────────────────────────────
+  const allCrossQueryIds = $derived.by(() => {
+    const seen = new Set<string>();
+    for (const run of runs)
+      for (const row of sqlData[run.id] ?? []) seen.add(row.queryid);
+    return [...seen];
+  });
+
+  const crossRunRows = $derived.by((): CrossRow[] =>
+    allCrossQueryIds.map(queryid => {
+      const byRun: Record<number, SqlRow | undefined> = {};
+      let query_short = '', query_full = '';
+      for (const run of runs) {
+        const row = (sqlData[run.id] ?? []).find(r => r.queryid === queryid);
+        if (row) { byRun[run.id] = row; query_short ||= row.query_short; query_full ||= row.query_full; }
+      }
+      return { queryid, query_short, query_full, byRun };
+    })
+  );
+
+  const sortedCrossRows = $derived.by(() => {
+    const rows = crossRunRows.filter(r => runs.some(run => r.byRun[run.id] != null));
+    return [...rows].sort((a, b) => {
+      const calls = (r: CrossRow) => runs.reduce((s, run) => s + Number(r.byRun[run.id]?.delta_calls ?? 0), 0);
+      return calls(b) - calls(a) || a.queryid.localeCompare(b.queryid);
+    });
+  });
+
+  const CROSS_PER_PAGE = 10;
+  const crossPageRows   = $derived(sortedCrossRows.slice(sqlCrossPage * CROSS_PER_PAGE, (sqlCrossPage + 1) * CROSS_PER_PAGE));
+  const crossTotalPages = $derived(Math.ceil(sortedCrossRows.length / CROSS_PER_PAGE));
+
+  const activeCrossGroup = $derived(CROSS_RUN_METRIC_GROUPS.find(g => g.title === sqlCrossGroup) ?? CROSS_RUN_METRIC_GROUPS[0]);
+
+  function setCrossGroup(title: string) {
+    sqlCrossGroup = title;
+    const grp = CROSS_RUN_METRIC_GROUPS.find(g => g.title === title);
+    sqlCrossMetric = grp && !grp.isWait && grp.metrics.length > 0 ? grp.metrics[0].key : 'delta_exec_time';
+    sqlCrossPage = 0;
+  }
+
+  function setCrossMetric(key: keyof SqlRow) {
+    sqlCrossMetric = key;
+    sqlCrossPage = 0;
+  }
+
+  function fmtCrossMetric(row: SqlRow | undefined, key: keyof SqlRow, format: StatementMetricFormat): string {
+    if (!row) return '—';
+    const val = row[key];
+    if (val == null) return '—';
+    const n = Number(val);
+    if (!Number.isFinite(n)) return '—';
+    if (format === 'ms') return fmtMs(n);
+    if (format === 'bytes') return fmtBytes(n);
+    if (format === 'decimal') return n === 0 ? '—' : fmtExact(n, 1) + '%';
+    return fmtNum(n);
+  }
+
+function openFlameForCrossRow(row: CrossRow) {
+    const run = runs.find(r => row.byRun[r.id] != null);
+    const sqlRow = run ? row.byRun[run.id] : undefined;
+    if (run && sqlRow) openFlame(run, sqlRow);
+  }
+
   // ── Paging ─────────────────────────────────────────────────────────────────
   const PER_PAGE = 10;
   let sqlPage       = $state(0);
@@ -1645,14 +1899,21 @@
   {/if}
 </div>
 
-<!-- ── Section 4: Top SQL ────────────────────────────────────────────────── -->
+<!-- ── Section 4: Top SQL ────────────────────────────���───────────────────── -->
 <div class="section">
   <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px;flex-wrap:wrap">
     <h4 class="section-title" style="margin:0">Top SQL</h4>
-    <label class="plan-cols-toggle">
-      <input type="checkbox" bind:checked={showPlanCols} />
-      Show planning time
-    </label>
+    {#if !isCompare}
+      <label class="plan-cols-toggle">
+        <input type="checkbox" bind:checked={showPlanCols} />
+        Show planning time
+      </label>
+    {/if}
+    {#if isCompare && anySql}
+      <button class="per-run-toggle-btn" onclick={() => showPerRunSqlTables = !showPerRunSqlTables}>
+        {showPerRunSqlTables ? 'Show aggregated table' : 'Show per-run tables'}
+      </button>
+    {/if}
   </div>
   {#if !anySql}
     <div class="empty">pg_stat_statements not available — add a <code>pg_stat</code> step and select <code>pg_stat_statements</code> in the table list to collect query stats.</div>
@@ -1664,96 +1925,187 @@
       {:else}
         Delta from first to last pg_stat_statements snapshot.
       {/if}
-      Click a column header to sort. Click a query to see statement detail. Click a wait bar for wait breakdown.
+      {#if isCompare}
+        Click a query to see statement detail. Click a wait bar for wait breakdown.
+      {:else}
+        Click a column header to sort. Click a query to see statement detail. Click a wait bar for wait breakdown.
+      {/if}
     </p>
-    <div class="sql-panels">
-      {#each runs as run}
-        {#if hasSql[run.id]}
-          {@const allRows = sortedSql(run.id)}
-          {@const pageRows = pagedSql(run.id)}
-          {@const totalTime = totalExecTime(sqlData[run.id] ?? [])}
-          {@const totalPages = sqlPageCount(run.id)}
-          {@const runSecs = runBenchSecs(run)}
-          <div class="sql-panel">
-            {#if isCompare}<div class="run-label" style="color:{run.color}">{run.label}</div>{/if}
-            <table class="data-table sql-table">
-              <thead>
-                <tr>
-                  <th>Query</th>
-                  <th class="sortable" style="width:65px" onclick={() => setSqlSort('delta_calls')}>
-                    Calls {sqlSort.col === 'delta_calls' ? (sqlSort.asc ? '▲' : '▼') : ''}
-                  </th>
-                  <th class="sortable" style="width:90px" onclick={() => setSqlSort('delta_exec_time')}>
-                    Exec Time {sqlSort.col === 'delta_exec_time' ? (sqlSort.asc ? '▲' : '▼') : ''}
-                  </th>
-                  {#if showPlanCols}
-                  <th class="sortable" style="width:90px" title="Total planning time across all calls" onclick={() => setSqlSort('delta_plan_time')}>
-                    Plan Time {sqlSort.col === 'delta_plan_time' ? (sqlSort.asc ? '▲' : '▼') : ''}
-                  </th>
-                  {/if}
-                  <th class="sortable" style="width:70px" title="Share of total DB execution time" onclick={() => setSqlSort('delta_exec_time')}>
-                    % Total {sqlSort.col === 'delta_exec_time' ? (sqlSort.asc ? '▲' : '▼') : ''}
-                  </th>
-                  <th class="sortable" style="width:90px" title="Avg execution time per call" onclick={() => setSqlSort('mean_exec_time')}>
-                    Avg Exec Time {sqlSort.col === 'mean_exec_time' ? (sqlSort.asc ? '▲' : '▼') : ''}
-                  </th>
-                  {#if showPlanCols}
-                  <th class="sortable" style="width:90px" title="Avg planning time per call" onclick={() => setSqlSort('mean_plan_time')}>
-                    Avg Plan Time {sqlSort.col === 'mean_plan_time' ? (sqlSort.asc ? '▲' : '▼') : ''}
-                  </th>
-                  {/if}
-                  <th style="width:135px" title="Wait profile — click for detail">Wait</th>
-                </tr>
-              </thead>
-              <tbody>
-                {#each pageRows as row}
-                  {@const execTime = Number(row.delta_exec_time ?? 0)}
-                  {@const pct = totalTime > 0 ? (execTime / totalTime * 100).toFixed(1) : '0'}
-                  {@const wItems = waitProfiles[run.id]?.[row.queryid] ?? []}
-                  {@const wTotal = wItems.reduce((s, i) => s + i.seconds, 0)}
-                  <tr>
-                    <td>
-                      <div class="query-cell-btn" role="button" tabindex="0" title={row.query_full || row.query_short} onclick={() => openFlame(run, row)} onkeydown={(e) => { if (e.key === 'Enter') openFlame(run, row); }}>{row.query_short}</div>
-                    </td>
-                    <td style="text-align:right;width:65px">{sqlColVal(row, 'delta_calls', runSecs)}</td>
-                    <td style="text-align:right;width:90px">{fmtMs(Number(row.delta_exec_time))}</td>
-                    {#if showPlanCols}
-                    <td style="text-align:right;width:90px;color:#888">{row.delta_plan_time > 0 ? fmtMs(Number(row.delta_plan_time)) : '—'}</td>
-                    {/if}
-                    <td style="text-align:right;width:70px;color:#888">{pct}%</td>
-                    <td style="text-align:right;width:90px;font-variant-numeric:tabular-nums">{fmtMs(Number(row.mean_exec_time ?? 0))}</td>
-                    {#if showPlanCols}
-                    <td style="text-align:right;width:90px;color:#888;font-variant-numeric:tabular-nums">{row.mean_plan_time > 0 ? fmtMs(Number(row.mean_plan_time)) : '—'}</td>
-                    {/if}
-                    <td style="width:135px">
-                      {#if wItems.length > 0}
-                        <div class="wait-bar-inline" role="button" tabindex="0"
-                             onclick={(e) => { e.stopPropagation(); activeWaitOverlay = { items: wItems, x: e.clientX, y: e.clientY, queryShort: row.query_short }; }}
-                             onkeydown={(e) => { if (e.key === 'Enter') activeWaitOverlay = { items: wItems, x: 0, y: 0, queryShort: row.query_short }; }}>
-                          {#each wItems as item}
-                            {@const w = wTotal > 0 ? (item.seconds / wTotal * 100).toFixed(2) : '0'}
-                            <div class="wait-bar-seg" style="width:{w}%;background:{item.color}" title="{item.wtype}:{item.wevent}"></div>
-                          {/each}
-                        </div>
-                      {:else}
-                        <span class="wait-bar-empty">—</span>
-                      {/if}
-                    </td>
-                  </tr>
-                {/each}
-              </tbody>
-            </table>
-            {#if totalPages > 1}
-              <div class="pager">
-                <button disabled={sqlPage === 0} onclick={() => sqlPage--}>‹ Prev</button>
-                <span>Page {sqlPage + 1} of {totalPages} &nbsp;·&nbsp; {allRows.length} queries</span>
-                <button disabled={sqlPage >= totalPages - 1} onclick={() => sqlPage++}>Next ›</button>
-              </div>
-            {/if}
+
+    {#if isCompare && !showPerRunSqlTables}
+      <!-- ── Cross-run comparison table ── -->
+      <div class="cross-run-section">
+        <!-- Metric group tabs -->
+        <div class="chart-group-tabs">
+          {#each CROSS_RUN_METRIC_GROUPS as grp}
+            <button type="button" class="chart-group-tab" class:active={sqlCrossGroup === grp.title}
+              onclick={() => setCrossGroup(grp.title)}>{grp.title}</button>
+          {/each}
+        </div>
+
+        <!-- Metric sub-picker (not shown for Wait tab) -->
+        {#if !activeCrossGroup.isWait && activeCrossGroup.metrics.length > 1}
+          <div class="cross-metric-picker">
+            {#each activeCrossGroup.metrics as m}
+              <button type="button" class="mode-toggle-btn" class:active={sqlCrossMetric === m.key}
+                onclick={() => setCrossMetric(m.key)}>{m.label}</button>
+            {/each}
           </div>
         {/if}
-      {/each}
-    </div>
+
+        <!-- Pivot table -->
+        <div class="cross-run-table-wrap">
+          <table class="data-table cross-run-table">
+            <thead>
+              <tr>
+                <th class="cross-query-col">Query</th>
+                {#each runs as run}
+                  <th class="cross-run-col" style="color:{run.color}" title={run.label}>
+                    {run.label}
+                  </th>
+                {/each}
+              </tr>
+            </thead>
+            <tbody>
+              {#each crossPageRows as row}
+                <tr>
+                  <td class="cross-query-col">
+                    <div class="query-cell-btn" role="button" tabindex="0"
+                      title={row.query_full || row.query_short}
+                      onclick={() => openFlameForCrossRow(row)}
+                      onkeydown={(e) => { if (e.key === 'Enter') openFlameForCrossRow(row); }}>
+                      {row.query_short}
+                    </div>
+                  </td>
+                  {#each runs as run}
+                    <td class="cross-run-col">
+                      {#if activeCrossGroup.isWait}
+                        {@const wItems = waitProfiles[run.id]?.[row.queryid] ?? []}
+                        {@const wTotal = wItems.reduce((s, i) => s + i.seconds, 0)}
+                        {#if wItems.length > 0}
+                          <div class="wait-bar-inline" role="button" tabindex="0"
+                            onclick={(e) => { e.stopPropagation(); activeWaitOverlay = { items: wItems, x: e.clientX, y: e.clientY, queryShort: row.query_short }; }}
+                            onkeydown={(e) => { if (e.key === 'Enter') activeWaitOverlay = { items: wItems, x: 0, y: 0, queryShort: row.query_short }; }}>
+                            {#each wItems as item}
+                              {@const w = wTotal > 0 ? (item.seconds / wTotal * 100).toFixed(2) : '0'}
+                              <div class="wait-bar-seg" style="width:{w}%;background:{item.color}" title="{item.wtype}:{item.wevent}"></div>
+                            {/each}
+                          </div>
+                        {:else}
+                          <span class="wait-bar-empty">—</span>
+                        {/if}
+                      {:else}
+                        {@const m = activeCrossGroup.metrics.find(m => m.key === sqlCrossMetric)}
+                        {m ? fmtCrossMetric(row.byRun[run.id], m.key, m.format) : '—'}
+                      {/if}
+                    </td>
+                  {/each}
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+        {#if crossTotalPages > 1}
+          <div class="pager">
+            <button disabled={sqlCrossPage === 0} onclick={() => sqlCrossPage--}>‹ Prev</button>
+            <span>Page {sqlCrossPage + 1} of {crossTotalPages} &nbsp;·&nbsp; {sortedCrossRows.length} queries</span>
+            <button disabled={sqlCrossPage >= crossTotalPages - 1} onclick={() => sqlCrossPage++}>Next ›</button>
+          </div>
+        {/if}
+      </div>
+    {/if}
+
+    <!-- ── Per-run tables (always shown in single-run, toggle in compare) ── -->
+    {#if !isCompare || showPerRunSqlTables}
+      <div class="sql-panels" style={isCompare ? 'margin-top:20px' : ''}>
+        {#each runs as run}
+          {#if hasSql[run.id]}
+            {@const allRows = sortedSql(run.id)}
+            {@const pageRows = pagedSql(run.id)}
+            {@const totalTime = totalExecTime(sqlData[run.id] ?? [])}
+            {@const totalPages = sqlPageCount(run.id)}
+            {@const runSecs = runBenchSecs(run)}
+            <div class="sql-panel">
+              {#if isCompare}<div class="run-label" style="color:{run.color}">{run.label}</div>{/if}
+              <table class="data-table sql-table">
+                <thead>
+                  <tr>
+                    <th>Query</th>
+                    <th class="sortable" style="width:65px" onclick={() => setSqlSort('delta_calls')}>
+                      Calls {sqlSort.col === 'delta_calls' ? (sqlSort.asc ? '▲' : '▼') : ''}
+                    </th>
+                    <th class="sortable" style="width:90px" onclick={() => setSqlSort('delta_exec_time')}>
+                      Exec Time {sqlSort.col === 'delta_exec_time' ? (sqlSort.asc ? '▲' : '▼') : ''}
+                    </th>
+                    {#if showPlanCols}
+                    <th class="sortable" style="width:90px" title="Total planning time across all calls" onclick={() => setSqlSort('delta_plan_time')}>
+                      Plan Time {sqlSort.col === 'delta_plan_time' ? (sqlSort.asc ? '▲' : '▼') : ''}
+                    </th>
+                    {/if}
+                    <th class="sortable" style="width:70px" title="Share of total DB execution time" onclick={() => setSqlSort('delta_exec_time')}>
+                      % Total {sqlSort.col === 'delta_exec_time' ? (sqlSort.asc ? '▲' : '▼') : ''}
+                    </th>
+                    <th class="sortable" style="width:90px" title="Avg execution time per call" onclick={() => setSqlSort('mean_exec_time')}>
+                      Avg Exec Time {sqlSort.col === 'mean_exec_time' ? (sqlSort.asc ? '▲' : '▼') : ''}
+                    </th>
+                    {#if showPlanCols}
+                    <th class="sortable" style="width:90px" title="Avg planning time per call" onclick={() => setSqlSort('mean_plan_time')}>
+                      Avg Plan Time {sqlSort.col === 'mean_plan_time' ? (sqlSort.asc ? '▲' : '▼') : ''}
+                    </th>
+                    {/if}
+                    <th style="width:135px" title="Wait profile — click for detail">Wait</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each pageRows as row}
+                    {@const execTime = Number(row.delta_exec_time ?? 0)}
+                    {@const pct = totalTime > 0 ? (execTime / totalTime * 100).toFixed(1) : '0'}
+                    {@const wItems = waitProfiles[run.id]?.[row.queryid] ?? []}
+                    {@const wTotal = wItems.reduce((s, i) => s + i.seconds, 0)}
+                    <tr>
+                      <td>
+                        <div class="query-cell-btn" role="button" tabindex="0" title={row.query_full || row.query_short} onclick={() => openFlame(run, row)} onkeydown={(e) => { if (e.key === 'Enter') openFlame(run, row); }}>{row.query_short}</div>
+                      </td>
+                      <td style="text-align:right;width:65px">{sqlColVal(row, 'delta_calls', runSecs)}</td>
+                      <td style="text-align:right;width:90px">{fmtMs(Number(row.delta_exec_time))}</td>
+                      {#if showPlanCols}
+                      <td style="text-align:right;width:90px;color:#888">{row.delta_plan_time > 0 ? fmtMs(Number(row.delta_plan_time)) : '—'}</td>
+                      {/if}
+                      <td style="text-align:right;width:70px;color:#888">{pct}%</td>
+                      <td style="text-align:right;width:90px;font-variant-numeric:tabular-nums">{fmtMs(Number(row.mean_exec_time ?? 0))}</td>
+                      {#if showPlanCols}
+                      <td style="text-align:right;width:90px;color:#888;font-variant-numeric:tabular-nums">{row.mean_plan_time > 0 ? fmtMs(Number(row.mean_plan_time)) : '—'}</td>
+                      {/if}
+                      <td style="width:135px">
+                        {#if wItems.length > 0}
+                          <div class="wait-bar-inline" role="button" tabindex="0"
+                               onclick={(e) => { e.stopPropagation(); activeWaitOverlay = { items: wItems, x: e.clientX, y: e.clientY, queryShort: row.query_short }; }}
+                               onkeydown={(e) => { if (e.key === 'Enter') activeWaitOverlay = { items: wItems, x: 0, y: 0, queryShort: row.query_short }; }}>
+                            {#each wItems as item}
+                              {@const w = wTotal > 0 ? (item.seconds / wTotal * 100).toFixed(2) : '0'}
+                              <div class="wait-bar-seg" style="width:{w}%;background:{item.color}" title="{item.wtype}:{item.wevent}"></div>
+                            {/each}
+                          </div>
+                        {:else}
+                          <span class="wait-bar-empty">—</span>
+                        {/if}
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+              {#if totalPages > 1}
+                <div class="pager">
+                  <button disabled={sqlPage === 0} onclick={() => sqlPage--}>‹ Prev</button>
+                  <span>Page {sqlPage + 1} of {totalPages} &nbsp;·&nbsp; {allRows.length} queries</span>
+                  <button disabled={sqlPage >= totalPages - 1} onclick={() => sqlPage++}>Next ›</button>
+                </div>
+              {/if}
+            </div>
+          {/if}
+        {/each}
+      </div>
+    {/if}
   {/if}
 </div>
 
@@ -2297,4 +2649,24 @@
   .flame-mode-btns { display: flex; border: 1px solid #3a3b50; border-radius: 4px; overflow: hidden; }
   .flame-mode-btns button { background: none; border: none; padding: 2px 8px; font-size: 10px; cursor: pointer; color: #9ca3af; }
   .flame-mode-btns button.active { background: #3a3b50; color: #e0e0e0; }
+
+  /* ── Cross-run SQL table ── */
+  .chart-group-tabs { display: flex; gap: 2px; border-bottom: 1px solid #e5e7eb; overflow-x: auto; margin-bottom: 0; }
+  .chart-group-tab { background: transparent; border: 0; border-bottom: 2px solid transparent; color: #64748b; cursor: pointer; font-size: 12px; font-weight: 700; padding: 6px 10px; white-space: nowrap; margin-bottom: -1px; }
+  .chart-group-tab:hover { color: #333; }
+  .chart-group-tab.active { color: #0066cc; border-bottom-color: #0066cc; }
+
+  .cross-metric-picker { display: flex; gap: 3px; margin: 8px 0 0; flex-wrap: wrap; }
+  .mode-toggle-btn { background: #f5f5f5; border: 1px solid #ddd; border-radius: 4px; padding: 2px 10px; font-size: 11px; cursor: pointer; color: #555; }
+  .mode-toggle-btn:hover { background: #e8eeff; border-color: #aac; }
+  .mode-toggle-btn.active { background: #0066cc; border-color: #0055bb; color: #fff; }
+
+  .cross-run-section { margin-bottom: 4px; }
+  .cross-run-table-wrap { overflow-x: auto; margin-top: 8px; }
+  .cross-run-table { table-layout: auto; }
+  .cross-run-table .cross-query-col { min-width: 180px; max-width: 260px; overflow: hidden; }
+  .cross-run-table .cross-run-col { text-align: right; min-width: 90px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+  .per-run-toggle-btn { background: none; border: 1px solid #d0d0d0; border-radius: 4px; padding: 2px 10px; font-size: 11px; color: #666; cursor: pointer; }
+  .per-run-toggle-btn:hover { background: #f5f5f5; border-color: #aaa; color: #333; }
 </style>
