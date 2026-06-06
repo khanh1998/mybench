@@ -4,6 +4,7 @@
   import { RUN_COMPARE_COLORS } from '$lib/compare/colors';
   import type { CompareRunInfo, CompareStepPerf } from '$lib/compare/types';
   import { correctPerfEvent } from '$lib/perf-utils';
+  import type { PgbenchScriptResult } from '$lib/pgbench-results';
 
   interface RunParam {
     name: string;
@@ -64,7 +65,15 @@
     { key: 'transactions' as const, label: 'Transactions', decimals: 0, higherBetter: true }
   ];
 
+  const SCRIPT_METRICS = [
+    { key: 'tps' as const,                label: 'TPS',          higherBetter: true,  fmt: (v: number) => v.toFixed(3) },
+    { key: 'latency_avg_ms' as const,     label: 'Avg Latency',  higherBetter: false, fmt: (v: number) => `${v.toFixed(3)} ms` },
+    { key: 'latency_stddev_ms' as const,  label: 'Stddev',       higherBetter: false, fmt: (v: number) => `${v.toFixed(3)} ms` },
+    { key: 'transactions' as const,       label: 'Transactions', higherBetter: true,  fmt: (v: number) => v.toLocaleString() }
+  ];
+
   let activeCompareTab = $state<'summary' | 'load' | 'telemetry' | 'perf' | 'host_metrics'>('summary');
+  let selectedScriptMetricKey = $state<'tps' | 'latency_avg_ms' | 'latency_stddev_ms' | 'transactions'>('tps');
   let hostMetricsTab = $state<'system' | 'processes'>('system');
   let selectedPerfMetric = $state('');
   let selectedSummaryMetricKey = $state('');
@@ -674,6 +683,35 @@
     return 'mixed';
   });
 
+  const scriptCompareData = $derived((): {
+    stepName: string | null;
+    scriptNames: string[];
+    runsWithScripts: { runId: number; scripts: PgbenchScriptResult[] }[];
+  } | null => {
+    if (benchType() !== 'pgbench') return null;
+    const runsWithScripts = selectedRunIds.map((runId) => {
+      const run = getRunForId(runId);
+      let scripts: PgbenchScriptResult[] = [];
+      if (run?.pgbench_scripts_json) {
+        try { scripts = JSON.parse(run.pgbench_scripts_json) as PgbenchScriptResult[]; } catch { /* ignore */ }
+      }
+      return { runId, scripts };
+    });
+    const allNames: string[] = [];
+    const seen = new Set<string>();
+    for (const { scripts } of runsWithScripts) {
+      for (const s of scripts) {
+        if (s.name && !seen.has(s.name)) { seen.add(s.name); allNames.push(s.name); }
+      }
+    }
+    if (allNames.length === 0) return null;
+    const stepNames = selectedRunIds
+      .map((id) => getRunForId(id)?.bench_step_name ?? null)
+      .filter((n): n is string => n !== null);
+    const stepName = stepNames.length > 0 && stepNames.every((n) => n === stepNames[0]) ? stepNames[0] : null;
+    return { stepName, scriptNames: allNames, runsWithScripts };
+  });
+
   const activeSummaryMetrics = $derived(
     benchType() === 'sysbench' ? SYSBENCH_SUMMARY_METRICS : PGBENCH_SUMMARY_METRICS
   );
@@ -910,6 +948,68 @@
                     <td class:param-diff={index > 0 && value !== row.values[0]}>
                       {#if value !== null && value !== ''}
                         {value}
+                      {:else}
+                        <span class="missing-value">—</span>
+                      {/if}
+                    </td>
+                  {/each}
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    {/if}
+    {#if scriptCompareData()}
+      {@const scd = scriptCompareData()!}
+      {@const scriptMetric = SCRIPT_METRICS.find((m) => m.key === selectedScriptMetricKey) ?? SCRIPT_METRICS[0]}
+      <div class="card">
+        <div class="row section-header compact">
+          <div>
+            <h3 style="margin:0">Benchmark Scripts</h3>
+            {#if scd.stepName}<p class="section-note" style="margin:2px 0 0">{scd.stepName}</p>{/if}
+          </div>
+        </div>
+
+        <div class="summary-metric-pills">
+          {#each SCRIPT_METRICS as metric}
+            <button
+              class="metric-pill"
+              class:active={selectedScriptMetricKey === metric.key}
+              onclick={() => selectedScriptMetricKey = metric.key}
+            >{metric.label}</button>
+          {/each}
+        </div>
+
+        <div class="table-wrap">
+          <table class="summary-table scripts-compare-table">
+            <thead>
+              <tr>
+                <th>Script</th>
+                <th class="col-weight">Weight</th>
+                {#each selectedRunIds as runId, index}
+                  <th class="col-num" style="color:{COLORS[index % COLORS.length]}">{getRunLabel(runId, true)}</th>
+                {/each}
+              </tr>
+            </thead>
+            <tbody>
+              {#each scd.scriptNames as scriptName}
+                {@const values = scd.runsWithScripts.map(({ scripts }) => {
+                  const s = scripts.find((sc) => sc.name === scriptName);
+                  const v = s?.[scriptMetric.key] ?? null;
+                  return v !== null ? Number(v) : null;
+                })}
+                {@const weight = scd.runsWithScripts.map(({ scripts }) => scripts.find((sc) => sc.name === scriptName)?.weight ?? null).find((w) => w !== null) ?? null}
+                {@const valid = values.filter((v): v is number => v !== null)}
+                {@const bestVal = valid.length < 2 ? null : scriptMetric.higherBetter ? Math.max(...valid) : Math.min(...valid)}
+                <tr>
+                  <td class="metric-label">{scriptName}</td>
+                  <td class="col-weight script-weight">{weight ?? '—'}</td>
+                  {#each values as value}
+                    {@const isBest = value !== null && value === bestVal}
+                    <td class="col-num" class:winner-cell={isBest}>
+                      {#if value !== null}
+                        <span class:winner-value={isBest}>{scriptMetric.fmt(value)}</span>
                       {:else}
                         <span class="missing-value">—</span>
                       {/if}
@@ -1594,6 +1694,10 @@
     padding: 12px 0;
     margin: 0;
   }
+
+  .scripts-compare-table .col-num { text-align: right; }
+  .scripts-compare-table .col-weight { text-align: center; color: #888; font-size: 12px; }
+  .script-weight { font-family: monospace; }
 
   @media (max-width: 720px) {
     .run-tabs {

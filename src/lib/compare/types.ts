@@ -37,6 +37,8 @@ export interface CompareRunInfo {
   design_name?: string | null;
   compare_label?: string;
   compare_short_label?: string;
+  bench_step_name?: string | null;
+  pgbench_scripts_json?: string | null;
   perf?: CompareStepPerf[];
 }
 

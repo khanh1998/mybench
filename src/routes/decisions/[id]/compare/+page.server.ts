@@ -87,7 +87,9 @@ export const load: PageServerLoad = ({ params }) => {
     design_id: number;
     design_name: string | null;
     bench_step_type: string | null;
+    bench_step_name: string | null;
     pgbench_summary_json: string | null;
+    pgbench_scripts_json: string | null;
     sysbench_summary_json: string | null;
     bench_stdout: string | null;
     bench_stderr: string | null;
@@ -110,7 +112,9 @@ export const load: PageServerLoad = ({ params }) => {
               br.profile_name, br.run_params, br.started_at, br.bench_started_at, br.post_started_at, br.finished_at,
               br.host_config, br.runner_spec, br.db_spec, br.db_pg_config, d.id AS design_id, d.name AS design_name,
               rs.type AS bench_step_type,
+              rs.name AS bench_step_name,
               rs.pgbench_summary_json,
+              rs.pgbench_scripts_json,
               rs.sysbench_summary_json,
               substr(rs.stdout, 1, 5000) AS bench_stdout,
               substr(rs.stderr, 1, 2000) AS bench_stderr
@@ -142,6 +146,8 @@ export const load: PageServerLoad = ({ params }) => {
         ...run,
         perf: perfByRun.get(run.id) ?? [],
         bench_type: 'sysbench' as const,
+        bench_step_name: run.bench_step_name,
+        pgbench_scripts_json: null,
         tps: summary?.tps ?? run.tps,
         latency_avg_ms: summary?.latency_avg_ms ?? run.latency_avg_ms,
         latency_stddev_ms: null,
@@ -173,6 +179,8 @@ export const load: PageServerLoad = ({ params }) => {
       ...run,
       perf: perfByRun.get(run.id) ?? [],
       bench_type: 'pgbench' as const,
+      bench_step_name: run.bench_step_name,
+      pgbench_scripts_json: run.pgbench_scripts_json,
       tps: summary?.tps ?? run.tps,
       latency_avg_ms: summary?.latency_avg_ms ?? run.latency_avg_ms,
       latency_stddev_ms: summary?.latency_stddev_ms ?? run.latency_stddev_ms,
