@@ -27,6 +27,7 @@
     queryid: string; query_short: string; query_full: string;
     delta_calls: number; delta_exec_time: number; delta_rows: number;
     cache_hit_pct: number | null; delta_blks_read: number;
+    delta_plan_time: number;
     mean_exec_time: number; max_exec_time: number; stddev_exec_time: number;
     total_plan_time: number; delta_temp_blks_read: number; delta_wal_bytes: number;
     snapshot_count: number; bench_secs: number;
@@ -603,6 +604,7 @@
                   CASE WHEN COUNT(*) > 1 THEN MAX(blks_read)-MIN(blks_read) ELSE MAX(blks_read) END as delta_blks_read,
                   CASE WHEN COUNT(*) > 1 THEN MAX(temp_blks_read)-MIN(temp_blks_read) ELSE MAX(temp_blks_read) END as delta_temp_blks_read,
                   CASE WHEN COUNT(*) > 1 THEN MAX(wal_bytes)-MIN(wal_bytes) ELSE MAX(wal_bytes) END as delta_wal_bytes,
+                  CASE WHEN COUNT(*) > 1 THEN MAX(total_plan_time)-MIN(total_plan_time) ELSE MAX(total_plan_time) END as delta_plan_time,
                   MAX(mean_exec_time) as mean_exec_time,
                   MAX(max_exec_time) as max_exec_time,
                   MAX(stddev_exec_time) as stddev_exec_time,
@@ -615,6 +617,7 @@
                 SUBSTR(query_full,1,300) as query_short,
                 delta_calls, delta_exec_time, delta_rows,
                 cache_hit_pct, delta_blks_read, delta_temp_blks_read, delta_wal_bytes,
+                delta_plan_time,
                 mean_exec_time, max_exec_time, stddev_exec_time, total_plan_time,
                 snapshot_count, bench_secs
          FROM agg WHERE delta_exec_time > 0
@@ -1676,6 +1679,9 @@
                   <th class="sortable" onclick={() => setSqlSort('delta_exec_time')}>
                     Total Time {sqlSort.col === 'delta_exec_time' ? (sqlSort.asc ? '▲' : '▼') : ''}
                   </th>
+                  <th class="sortable" title="Total planning time across all calls" onclick={() => setSqlSort('delta_plan_time')}>
+                    Plan Time {sqlSort.col === 'delta_plan_time' ? (sqlSort.asc ? '▲' : '▼') : ''}
+                  </th>
                   <th class="sortable" title="Share of total DB execution time" onclick={() => setSqlSort('delta_exec_time')}>
                     % Total {sqlSort.col === 'delta_exec_time' ? (sqlSort.asc ? '▲' : '▼') : ''}
                   </th>
@@ -1697,6 +1703,7 @@
                     </td>
                     <td style="text-align:right">{sqlColVal(row, 'delta_calls', runSecs)}</td>
                     <td style="text-align:right">{fmtMs(Number(row.delta_exec_time))}</td>
+                    <td style="text-align:right;color:#888">{row.delta_plan_time > 0 ? fmtMs(Number(row.delta_plan_time)) : '—'}</td>
                     <td style="text-align:right;color:#888">{pct}%</td>
                     <td style="text-align:right;font-variant-numeric:tabular-nums">{fmtMs(Number(row.mean_exec_time ?? 0))}</td>
                     <td>
@@ -2171,9 +2178,10 @@
   .sql-table td:first-child, .sql-table th:first-child { overflow: hidden; }
   .sql-table th:nth-child(2), .sql-table td:nth-child(2) { width: 65px; }
   .sql-table th:nth-child(3), .sql-table td:nth-child(3) { width: 90px; }
-  .sql-table th:nth-child(4), .sql-table td:nth-child(4) { width: 70px; }
-  .sql-table th:nth-child(5), .sql-table td:nth-child(5) { width: 72px; }
-  .sql-table th:nth-child(6), .sql-table td:nth-child(6) { width: 135px; }
+  .sql-table th:nth-child(4), .sql-table td:nth-child(4) { width: 90px; }
+  .sql-table th:nth-child(5), .sql-table td:nth-child(5) { width: 70px; }
+  .sql-table th:nth-child(6), .sql-table td:nth-child(6) { width: 72px; }
+  .sql-table th:nth-child(7), .sql-table td:nth-child(7) { width: 135px; }
   .query-cell-btn { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: monospace; font-size: 11px; background: none; border: none; padding: 0; cursor: pointer; text-align: left; color: inherit; display: block; }
   .query-cell-btn:hover { text-decoration: underline; color: #4f6ef7; }
 
