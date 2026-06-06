@@ -27,7 +27,7 @@
     queryid: string; query_short: string; query_full: string;
     delta_calls: number; delta_exec_time: number; delta_rows: number;
     cache_hit_pct: number | null; delta_blks_read: number;
-    delta_plan_time: number;
+    delta_plan_time: number; mean_plan_time: number;
     mean_exec_time: number; max_exec_time: number; stddev_exec_time: number;
     total_plan_time: number; delta_temp_blks_read: number; delta_wal_bytes: number;
     snapshot_count: number; bench_secs: number;
@@ -281,8 +281,9 @@
   let hasSql     = $state<Record<number, boolean>>({});
   let hiddenSessionStates = $state<string[]>([]);
 
-  let sqlSort    = $state<{ col: keyof SqlRow; asc: boolean }>({ col: 'delta_exec_time', asc: false });
-  let sqlMode    = $state<'total' | 'persec'>('total');
+  let sqlSort      = $state<{ col: keyof SqlRow; asc: boolean }>({ col: 'delta_exec_time', asc: false });
+  let sqlMode      = $state<'total' | 'persec'>('total');
+  let showPlanCols = $state(false);
   let expandedLockNodes       = $state<Set<string>>(new Set());
   let activeLockNode          = $state<ActiveLockNode | null>(null);
   let lockSort                = $state<'times_seen' | 'pid'>('times_seen');
@@ -586,6 +587,7 @@
                   CAST(max_exec_time AS REAL) as max_exec_time,
                   CAST(stddev_exec_time AS REAL) as stddev_exec_time,
                   CAST(COALESCE(total_plan_time,0) AS REAL) as total_plan_time,
+                  CAST(COALESCE(mean_plan_time,0) AS REAL) as mean_plan_time,
                   CAST(COALESCE(temp_blks_read,0) AS REAL) as temp_blks_read,
                   CAST(COALESCE(wal_bytes,0) AS REAL) as wal_bytes,
                   _collected_at
@@ -605,6 +607,7 @@
                   CASE WHEN COUNT(*) > 1 THEN MAX(temp_blks_read)-MIN(temp_blks_read) ELSE MAX(temp_blks_read) END as delta_temp_blks_read,
                   CASE WHEN COUNT(*) > 1 THEN MAX(wal_bytes)-MIN(wal_bytes) ELSE MAX(wal_bytes) END as delta_wal_bytes,
                   CASE WHEN COUNT(*) > 1 THEN MAX(total_plan_time)-MIN(total_plan_time) ELSE MAX(total_plan_time) END as delta_plan_time,
+                  MAX(mean_plan_time) as mean_plan_time,
                   MAX(mean_exec_time) as mean_exec_time,
                   MAX(max_exec_time) as max_exec_time,
                   MAX(stddev_exec_time) as stddev_exec_time,
@@ -617,7 +620,7 @@
                 SUBSTR(query_full,1,300) as query_short,
                 delta_calls, delta_exec_time, delta_rows,
                 cache_hit_pct, delta_blks_read, delta_temp_blks_read, delta_wal_bytes,
-                delta_plan_time,
+                delta_plan_time, mean_plan_time,
                 mean_exec_time, max_exec_time, stddev_exec_time, total_plan_time,
                 snapshot_count, bench_secs
          FROM agg WHERE delta_exec_time > 0
@@ -1646,6 +1649,10 @@
 <div class="section">
   <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px;flex-wrap:wrap">
     <h4 class="section-title" style="margin:0">Top SQL</h4>
+    <label class="plan-cols-toggle">
+      <input type="checkbox" bind:checked={showPlanCols} />
+      Show planning time
+    </label>
   </div>
   {#if !anySql}
     <div class="empty">pg_stat_statements not available — add a <code>pg_stat</code> step and select <code>pg_stat_statements</code> in the table list to collect query stats.</div>
@@ -1673,22 +1680,29 @@
               <thead>
                 <tr>
                   <th>Query</th>
-                  <th class="sortable" onclick={() => setSqlSort('delta_calls')}>
+                  <th class="sortable" style="width:65px" onclick={() => setSqlSort('delta_calls')}>
                     Calls {sqlSort.col === 'delta_calls' ? (sqlSort.asc ? '▲' : '▼') : ''}
                   </th>
-                  <th class="sortable" onclick={() => setSqlSort('delta_exec_time')}>
-                    Total Time {sqlSort.col === 'delta_exec_time' ? (sqlSort.asc ? '▲' : '▼') : ''}
+                  <th class="sortable" style="width:90px" onclick={() => setSqlSort('delta_exec_time')}>
+                    Exec Time {sqlSort.col === 'delta_exec_time' ? (sqlSort.asc ? '▲' : '▼') : ''}
                   </th>
-                  <th class="sortable" title="Total planning time across all calls" onclick={() => setSqlSort('delta_plan_time')}>
+                  {#if showPlanCols}
+                  <th class="sortable" style="width:90px" title="Total planning time across all calls" onclick={() => setSqlSort('delta_plan_time')}>
                     Plan Time {sqlSort.col === 'delta_plan_time' ? (sqlSort.asc ? '▲' : '▼') : ''}
                   </th>
-                  <th class="sortable" title="Share of total DB execution time" onclick={() => setSqlSort('delta_exec_time')}>
+                  {/if}
+                  <th class="sortable" style="width:70px" title="Share of total DB execution time" onclick={() => setSqlSort('delta_exec_time')}>
                     % Total {sqlSort.col === 'delta_exec_time' ? (sqlSort.asc ? '▲' : '▼') : ''}
                   </th>
-                  <th class="sortable" title="Avg latency per call" onclick={() => setSqlSort('mean_exec_time')}>
-                    Avg Lat {sqlSort.col === 'mean_exec_time' ? (sqlSort.asc ? '▲' : '▼') : ''}
+                  <th class="sortable" style="width:90px" title="Avg execution time per call" onclick={() => setSqlSort('mean_exec_time')}>
+                    Avg Exec Time {sqlSort.col === 'mean_exec_time' ? (sqlSort.asc ? '▲' : '▼') : ''}
                   </th>
-                  <th title="Wait profile — click for detail">Wait</th>
+                  {#if showPlanCols}
+                  <th class="sortable" style="width:90px" title="Avg planning time per call" onclick={() => setSqlSort('mean_plan_time')}>
+                    Avg Plan Time {sqlSort.col === 'mean_plan_time' ? (sqlSort.asc ? '▲' : '▼') : ''}
+                  </th>
+                  {/if}
+                  <th style="width:135px" title="Wait profile — click for detail">Wait</th>
                 </tr>
               </thead>
               <tbody>
@@ -1701,12 +1715,17 @@
                     <td>
                       <div class="query-cell-btn" role="button" tabindex="0" title={row.query_full || row.query_short} onclick={() => openFlame(run, row)} onkeydown={(e) => { if (e.key === 'Enter') openFlame(run, row); }}>{row.query_short}</div>
                     </td>
-                    <td style="text-align:right">{sqlColVal(row, 'delta_calls', runSecs)}</td>
-                    <td style="text-align:right">{fmtMs(Number(row.delta_exec_time))}</td>
-                    <td style="text-align:right;color:#888">{row.delta_plan_time > 0 ? fmtMs(Number(row.delta_plan_time)) : '—'}</td>
-                    <td style="text-align:right;color:#888">{pct}%</td>
-                    <td style="text-align:right;font-variant-numeric:tabular-nums">{fmtMs(Number(row.mean_exec_time ?? 0))}</td>
-                    <td>
+                    <td style="text-align:right;width:65px">{sqlColVal(row, 'delta_calls', runSecs)}</td>
+                    <td style="text-align:right;width:90px">{fmtMs(Number(row.delta_exec_time))}</td>
+                    {#if showPlanCols}
+                    <td style="text-align:right;width:90px;color:#888">{row.delta_plan_time > 0 ? fmtMs(Number(row.delta_plan_time)) : '—'}</td>
+                    {/if}
+                    <td style="text-align:right;width:70px;color:#888">{pct}%</td>
+                    <td style="text-align:right;width:90px;font-variant-numeric:tabular-nums">{fmtMs(Number(row.mean_exec_time ?? 0))}</td>
+                    {#if showPlanCols}
+                    <td style="text-align:right;width:90px;color:#888;font-variant-numeric:tabular-nums">{row.mean_plan_time > 0 ? fmtMs(Number(row.mean_plan_time)) : '—'}</td>
+                    {/if}
+                    <td style="width:135px">
                       {#if wItems.length > 0}
                         <div class="wait-bar-inline" role="button" tabindex="0"
                              onclick={(e) => { e.stopPropagation(); activeWaitOverlay = { items: wItems, x: e.clientX, y: e.clientY, queryShort: row.query_short }; }}
@@ -2176,12 +2195,8 @@
 
   .sql-table { table-layout: fixed; }
   .sql-table td:first-child, .sql-table th:first-child { overflow: hidden; }
-  .sql-table th:nth-child(2), .sql-table td:nth-child(2) { width: 65px; }
-  .sql-table th:nth-child(3), .sql-table td:nth-child(3) { width: 90px; }
-  .sql-table th:nth-child(4), .sql-table td:nth-child(4) { width: 90px; }
-  .sql-table th:nth-child(5), .sql-table td:nth-child(5) { width: 70px; }
-  .sql-table th:nth-child(6), .sql-table td:nth-child(6) { width: 72px; }
-  .sql-table th:nth-child(7), .sql-table td:nth-child(7) { width: 135px; }
+  .plan-cols-toggle { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #888; cursor: pointer; user-select: none; }
+  .plan-cols-toggle input { cursor: pointer; }
   .query-cell-btn { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: monospace; font-size: 11px; background: none; border: none; padding: 0; cursor: pointer; text-align: left; color: inherit; display: block; }
   .query-cell-btn:hover { text-decoration: underline; color: #4f6ef7; }
 
