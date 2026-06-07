@@ -1417,12 +1417,6 @@
     return fmtNum(n);
   }
 
-function openFlameForCrossRow(row: CrossRow) {
-    const run = runs.find(r => row.byRun[r.id] != null);
-    const sqlRow = run ? row.byRun[run.id] : undefined;
-    if (run && sqlRow) openFlame(run, sqlRow);
-  }
-
   // ── Paging ─────────────────────────────────────────────────────────────────
   const PER_PAGE = 10;
   let sqlPage       = $state(0);
@@ -1543,6 +1537,51 @@ function openFlameForCrossRow(row: CrossRow) {
   let waitProfiles = $state<Record<number, Record<string, FlameItem[]>>>({});
   let waitProfilesLoaded = $state<Set<number>>(new Set());
   let activeWaitOverlay = $state<{ items: FlameItem[]; x: number; y: number; queryShort: string } | null>(null);
+
+  interface EventQueryItem { queryid: string; query_short: string; samples: number; pct: number; }
+  let activeEventQueries = $state<{
+    run: RunMeta; label: string;
+    items: EventQueryItem[]; loading: boolean;
+    x: number; y: number;
+  } | null>(null);
+
+  async function openEventQueries(run: RunMeta, row: WaitRow, isBroad: boolean, e: MouseEvent) {
+    const label = isBroad ? row.wait_event_type : `${row.wait_event_type} · ${row.wait_event}`;
+    activeEventQueries = { run, label, items: [], loading: true, x: e.clientX, y: e.clientY };
+
+    const p = showPhaseFilter ? localPhases : phases;
+    const { clause, params: pParams } = phaseClause(p);
+
+    const whereEvent = isBroad
+      ? `AND COALESCE(wait_event_type,'CPU') = ?`
+      : `AND COALESCE(wait_event_type,'CPU') = ? AND COALESCE(wait_event,'running') = ?`;
+    const eventParams = isBroad
+      ? [row.wait_event_type]
+      : [row.wait_event_type, row.wait_event];
+
+    const res = await queryApi(
+      `SELECT COALESCE(CAST(query_id AS TEXT), '__null__') as queryid, COUNT(*) as samples
+       FROM snap_pg_stat_activity
+       WHERE _run_id = ? AND ${clause} AND state = 'active'
+         ${whereEvent}
+       GROUP BY 1 ORDER BY 2 DESC LIMIT 10`,
+      [run.id, ...pParams, ...eventParams]
+    );
+
+    if (!activeEventQueries) return; // dismissed while loading
+    const rows = res.error ? [] : (res.rows as { queryid: string; samples: number }[]);
+    const total = rows.reduce((s, r) => s + Number(r.samples), 0);
+    const sqlLookup = new Map((sqlData[run.id] ?? []).map(r => [r.queryid, r.query_short]));
+    const items: EventQueryItem[] = rows.map(r => ({
+      queryid: r.queryid,
+      query_short: r.queryid === '__null__'
+        ? '(no active statement — between queries or mid-commit)'
+        : (sqlLookup.get(r.queryid) ?? `query_id ${r.queryid}`),
+      samples: Number(r.samples),
+      pct: total > 0 ? Number(r.samples) / total * 100 : 0,
+    }));
+    activeEventQueries = { ...activeEventQueries, items, loading: false };
+  }
 
   async function loadWaitProfiles(run: RunMeta) {
     const p = showPhaseFilter ? localPhases : phases;
@@ -1883,7 +1922,10 @@ function openFlameForCrossRow(row: CrossRow) {
                 {@const aasPct      = totalOccurrences > 0 ? occ / totalOccurrences * 100 : 0}
                 {@const barW        = Math.min(aas / vcpuCount * 100, 100).toFixed(1)}
                 {@const color = getWaitColor(row.wait_event_type, waitsView === 'broad' ? row.wait_event_type : row.wait_event)}
-                <tr>
+                <tr class="wait-event-row" title="Click to see top queries for this wait event"
+                  onclick={(e) => openEventQueries(run, row, waitsView === 'broad', e)}
+                  onkeydown={(e) => { if (e.key === 'Enter') openEventQueries(run, row, waitsView === 'broad', e as unknown as MouseEvent); }}
+                  tabindex="0" role="button">
                   <td><span class="wait-badge" style="background:{color}20;color:{color}">{row.wait_event_type}</span></td>
                   {#if waitsView === 'detail'}<td style="font-family:monospace;font-size:11px">{row.wait_event}</td>{/if}
                   <td style="text-align:right;font-variant-numeric:tabular-nums">{fmtNum(occ)}</td>
@@ -1969,7 +2011,7 @@ function openFlameForCrossRow(row: CrossRow) {
         Delta from first to last pg_stat_statements snapshot.
       {/if}
       {#if isCompare}
-        Click a query to see statement detail. Click a wait bar for wait breakdown.
+        Click a metric value to see statement detail for that run. Click a wait bar for wait breakdown.
       {:else}
         Click a column header to sort. Click a query to see statement detail. Click a wait bar for wait breakdown.
       {/if}
@@ -2013,12 +2055,9 @@ function openFlameForCrossRow(row: CrossRow) {
               {#each crossPageRows as row}
                 <tr>
                   <td class="cross-query-col">
-                    <div class="query-cell-btn" role="button" tabindex="0"
-                      title={row.query_full || row.query_short}
-                      onclick={() => openFlameForCrossRow(row)}
-                      onkeydown={(e) => { if (e.key === 'Enter') openFlameForCrossRow(row); }}>
+                    <span class="cross-query-text" title={row.query_full || row.query_short}>
                       {row.query_short}
-                    </div>
+                    </span>
                   </td>
                   {#each runs as run}
                     <td class="cross-run-col">
@@ -2039,7 +2078,17 @@ function openFlameForCrossRow(row: CrossRow) {
                         {/if}
                       {:else}
                         {@const m = activeCrossGroup.metrics.find(m => m.key === sqlCrossMetric)}
-                        {m ? fmtCrossMetric(row.byRun[run.id], m.key, m.format) : '—'}
+                        {@const sqlRow = row.byRun[run.id]}
+                        {#if sqlRow && m}
+                          <span class="cross-val-link" role="button" tabindex="0"
+                            title="View statement detail for {run.label}"
+                            onclick={() => openFlame(run, sqlRow)}
+                            onkeydown={(e) => { if (e.key === 'Enter') openFlame(run, sqlRow); }}>
+                            {fmtCrossMetric(sqlRow, m.key, m.format)}
+                          </span>
+                        {:else}
+                          <span class="cross-val-empty">—</span>
+                        {/if}
                       {/if}
                     </td>
                   {/each}
@@ -2410,6 +2459,37 @@ function openFlameForCrossRow(row: CrossRow) {
   </div>
 {/if}
 
+<!-- ── Event Queries Overlay ──────────────────────────────────────────────── -->
+{#if activeEventQueries}
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions a11y_click_events_have_key_events -->
+  <div class="wait-overlay-backdrop"
+       role="dialog" aria-modal="true" tabindex="-1"
+       onclick={(e) => { if (e.currentTarget === e.target) activeEventQueries = null; }}
+       onkeydown={(e) => { if (e.key === 'Escape') activeEventQueries = null; }}>
+    <div role="document" class="wait-overlay-box event-queries-box"
+         style="left:{activeEventQueries.x + 12}px;top:{activeEventQueries.y + 12}px">
+      <div class="wait-overlay-title">Top queries — {activeEventQueries.label}</div>
+      {#if activeEventQueries.loading}
+        <div style="color:#9ca3af;font-size:12px;padding:4px 0">Loading…</div>
+      {:else if activeEventQueries.items.length === 0}
+        <div style="color:#9ca3af;font-size:12px;padding:4px 0">No query data for this wait event.</div>
+      {:else}
+        {#each activeEventQueries.items as item}
+          <div class="event-query-row">
+            <span class="event-query-pct">{item.pct.toFixed(1)}%</span>
+            <span class="event-query-bar-wrap">
+              <span class="event-query-bar" style="width:{item.pct.toFixed(1)}%"></span>
+            </span>
+            <span class="event-query-text" title={item.query_short}
+              style={item.queryid === '__null__' ? 'color:#6b7280;font-style:italic;font-family:sans-serif' : ''}
+            >{item.query_short}</span>
+          </div>
+        {/each}
+      {/if}
+    </div>
+  </div>
+{/if}
+
 <!-- ── Lock Detail Popup ─────────────────────────────────────────────────── -->
 {#if activeLockNode}
   <div
@@ -2602,6 +2682,15 @@ function openFlameForCrossRow(row: CrossRow) {
 
   .wait-overlay-backdrop { position: fixed; inset: 0; z-index: 200; }
   .wait-overlay-box { position: fixed; z-index: 201; background: #1e1f2e; border: 1px solid #3a3b50; border-radius: 8px; padding: 12px 14px; max-width: 320px; min-width: 220px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); max-height: 60vh; overflow-y: auto; }
+  .event-queries-box { max-width: 420px; min-width: 280px; }
+  .event-query-row { display: grid; grid-template-columns: 38px 60px 1fr; align-items: center; gap: 6px; padding: 4px 0; border-bottom: 1px solid #2a2b3a; }
+  .event-query-row:last-child { border-bottom: none; }
+  .event-query-pct { font-size: 11px; font-variant-numeric: tabular-nums; color: #9ca3af; text-align: right; }
+  .event-query-bar-wrap { height: 6px; background: #2a2b3a; border-radius: 3px; overflow: hidden; }
+  .event-query-bar { display: block; height: 100%; background: #4f6ef7; border-radius: 3px; }
+  .event-query-text { font-family: monospace; font-size: 11px; color: #e5e7eb; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .wait-event-row { cursor: pointer; }
+  .wait-event-row:hover td { background: #1e1f2e; }
   .wait-overlay-title { font-family: monospace; font-size: 11px; color: #9ca3af; margin-bottom: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .wait-overlay-row { display: flex; align-items: center; gap: 6px; padding: 3px 0; font-size: 12px; color: #e5e7eb; }
   .wait-dot { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
@@ -2709,6 +2798,10 @@ function openFlameForCrossRow(row: CrossRow) {
   .cross-run-table { table-layout: auto; }
   .cross-run-table .cross-query-col { min-width: 180px; max-width: 260px; overflow: hidden; }
   .cross-run-table .cross-run-col { text-align: right; min-width: 90px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .cross-query-text { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: monospace; font-size: 11px; color: #9ca3af; }
+  .cross-val-link { cursor: pointer; color: inherit; }
+  .cross-val-link:hover { text-decoration: underline; color: #4f6ef7; }
+  .cross-val-empty { color: #555; }
 
   .per-run-toggle-btn { background: none; border: 1px solid #d0d0d0; border-radius: 4px; padding: 2px 10px; font-size: 11px; color: #666; cursor: pointer; }
   .per-run-toggle-btn:hover { background: #f5f5f5; border-color: #aaa; color: #333; }
