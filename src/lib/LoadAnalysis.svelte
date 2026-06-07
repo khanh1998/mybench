@@ -392,6 +392,9 @@
   let sqlCrossGroup  = $state('Execution Time');
   let sqlCrossMetric = $state<keyof SqlRow>('delta_exec_time');
   let sqlCrossPage   = $state(0);
+  let waitFilterType  = $state('');   // '' = no filter → show bar
+  let waitFilterEvent = $state('');   // '' = aggregate all events for the type
+  let waitFilterValue = $state<'pct' | 'seconds'>('pct');
   // cross-run table is always sorted by total calls desc, then queryid — no user-controlled sort
   let expandedLockNodes       = $state<Set<string>>(new Set());
   let activeLockNode          = $state<ActiveLockNode | null>(null);
@@ -1393,6 +1396,39 @@
 
   const activeCrossGroup = $derived(CROSS_RUN_METRIC_GROUPS.find(g => g.title === sqlCrossGroup) ?? CROSS_RUN_METRIC_GROUPS[0]);
 
+  const waitTypeOptions = $derived.by(() => {
+    const types = new Set<string>();
+    for (const profiles of Object.values(waitProfiles)) {
+      for (const items of Object.values(profiles)) {
+        for (const item of items) types.add(item.wtype);
+      }
+    }
+    return [...types].sort();
+  });
+
+  const waitEventOptions = $derived.by(() => {
+    if (!waitFilterType) return [];
+    const events = new Set<string>();
+    for (const profiles of Object.values(waitProfiles)) {
+      for (const items of Object.values(profiles)) {
+        for (const item of items) {
+          if (item.wtype === waitFilterType) events.add(item.wevent);
+        }
+      }
+    }
+    return [...events].sort();
+  });
+
+  function waitCellValue(items: FlameItem[]): { seconds: number; pct: number } | null {
+    if (!waitFilterType) return null; // no filter → caller shows bar
+    const wTotal = items.reduce((s, i) => s + i.seconds, 0);
+    const matched = items.filter(i =>
+      i.wtype === waitFilterType && (!waitFilterEvent || i.wevent === waitFilterEvent)
+    );
+    const seconds = matched.reduce((s, i) => s + i.seconds, 0);
+    return { seconds, pct: wTotal > 0 ? seconds / wTotal * 100 : 0 };
+  }
+
   function setCrossGroup(title: string) {
     sqlCrossGroup = title;
     const grp = CROSS_RUN_METRIC_GROUPS.find(g => g.title === title);
@@ -2028,6 +2064,34 @@
           {/each}
         </div>
 
+        <!-- Wait tab filters -->
+        {#if activeCrossGroup.isWait}
+          <div class="wait-filter-bar">
+            <select class="wait-filter-select"
+              value={waitFilterType}
+              onchange={(e) => { waitFilterType = (e.target as HTMLSelectElement).value; waitFilterEvent = ''; }}>
+              <option value="">All waits (bar)</option>
+              {#each waitTypeOptions as t}
+                <option value={t}>{t}</option>
+              {/each}
+            </select>
+            {#if waitFilterType}
+              <select class="wait-filter-select"
+                value={waitFilterEvent}
+                onchange={(e) => { waitFilterEvent = (e.target as HTMLSelectElement).value; }}>
+                <option value="">All events</option>
+                {#each waitEventOptions as ev}
+                  <option value={ev}>{ev}</option>
+                {/each}
+              </select>
+              <div class="mode-toggle">
+                <button class:active={waitFilterValue === 'pct'} onclick={() => waitFilterValue = 'pct'}>%</button>
+                <button class:active={waitFilterValue === 'seconds'} onclick={() => waitFilterValue = 'seconds'}>s</button>
+              </div>
+            {/if}
+          </div>
+        {/if}
+
         <!-- Metric sub-picker (not shown for Wait tab) -->
         {#if !activeCrossGroup.isWait && activeCrossGroup.metrics.length > 1}
           <div class="cross-metric-picker">
@@ -2064,7 +2128,21 @@
                       {#if activeCrossGroup.isWait}
                         {@const wItems = waitProfiles[run.id]?.[row.queryid] ?? []}
                         {@const wTotal = wItems.reduce((s, i) => s + i.seconds, 0)}
-                        {#if wItems.length > 0}
+                        {@const cellVal = waitCellValue(wItems)}
+                        {#if cellVal !== null}
+                          <!-- filtered single-value mode -->
+                          {#if cellVal.seconds > 0}
+                            <span class="cross-val-link" role="button" tabindex="0"
+                              title="View statement detail for {run.label}"
+                              onclick={() => { const sr = row.byRun[run.id]; if (sr) openFlame(run, sr); }}
+                              onkeydown={(e) => { if (e.key === 'Enter') { const sr = row.byRun[run.id]; if (sr) openFlame(run, sr); } }}>
+                              {waitFilterValue === 'pct' ? cellVal.pct.toFixed(1) + '%' : cellVal.seconds.toFixed(2) + 's'}
+                            </span>
+                          {:else}
+                            <span class="cross-val-empty">—</span>
+                          {/if}
+                        {:else if wItems.length > 0}
+                          <!-- bar mode (no filter) -->
                           <div class="wait-bar-inline" role="button" tabindex="0"
                             onclick={(e) => { e.stopPropagation(); activeWaitOverlay = { items: wItems, x: e.clientX, y: e.clientY, queryShort: row.query_short }; }}
                             onkeydown={(e) => { if (e.key === 'Enter') activeWaitOverlay = { items: wItems, x: 0, y: 0, queryShort: row.query_short }; }}>
@@ -2802,6 +2880,9 @@
   .cross-val-link { cursor: pointer; color: inherit; }
   .cross-val-link:hover { text-decoration: underline; color: #4f6ef7; }
   .cross-val-empty { color: #555; }
+  .wait-filter-bar { display: flex; align-items: center; gap: 8px; margin: 8px 0 4px; flex-wrap: wrap; }
+  .wait-filter-select { background: #1e1f2e; border: 1px solid #3a3b50; border-radius: 4px; color: #e5e7eb; font-size: 12px; padding: 3px 8px; cursor: pointer; width: auto; max-width: 160px; }
+  .wait-filter-select:focus { outline: none; border-color: #4f6ef7; }
 
   .per-run-toggle-btn { background: none; border: 1px solid #d0d0d0; border-radius: 4px; padding: 2px 10px; font-size: 11px; color: #666; cursor: pointer; }
   .per-run-toggle-btn:hover { background: #f5f5f5; border-color: #aaa; color: #333; }
