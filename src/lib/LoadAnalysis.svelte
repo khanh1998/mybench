@@ -1462,6 +1462,9 @@
   let waitsLineMode  = $state<'common' | 'all'>('common');
   let waitsLineValue = $state<'count' | 'aas' | 'pct' | 'freq' | 'concurrency'>('count');
   let aasGranularity = $state<'detail' | 'broad'>('detail');
+  let waitsTab       = $state<'list' | 'events-by-run'>('events-by-run');
+  let sessionTab     = $state<'charts' | 'average'>('average');
+  let aasExpanded    = $state(false);
 
   function pagedSql(runId: number): SqlRow[] {
     const all = sortedSql(runId);
@@ -1842,62 +1845,79 @@
 <div class="section">
   <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px;flex-wrap:wrap">
     <h4 class="section-title" style="margin:0">Average Active Sessions (AAS)</h4>
-    {#if isCompare}
-      <div class="mode-toggle">
-        <button class:active={aasGranularity === 'detail'} onclick={() => aasGranularity = 'detail'}>Detail</button>
-        <button class:active={aasGranularity === 'broad'} onclick={() => aasGranularity = 'broad'}>Broad</button>
-      </div>
+    {#if aasExpanded}
+      {#if isCompare}
+        <div class="mode-toggle">
+          <button class:active={aasGranularity === 'detail'} onclick={() => aasGranularity = 'detail'}>Detail</button>
+          <button class:active={aasGranularity === 'broad'} onclick={() => aasGranularity = 'broad'}>Broad</button>
+        </div>
+      {/if}
+      <button class="per-run-toggle-btn" onclick={() => aasExpanded = false}>Hide charts</button>
+    {:else}
+      <button class="per-run-toggle-btn" onclick={() => aasExpanded = true}>Show charts</button>
     {/if}
   </div>
   <p class="section-desc">Active sessions at each snapshot, stacked by wait event type. Higher = more database load.</p>
 
-  {#if isCompare}
-    <!-- Per-run stacked breakdown -->
-    <div class="chart-grid">
+  {#if aasExpanded}
+    {#if isCompare}
+      <!-- Per-run stacked breakdown -->
+      <div class="chart-grid">
+        {#each runs as run}
+          {@const series = buildAasSeries(run)}
+          {@const rawRows = buildAasRawRows(run)}
+          <div>
+            <div class="run-label" style="color:{run.color}">{run.label}</div>
+            <StackedAreaChart {series} {rawRows} title="AAS by wait type" markers={buildMarkers(run)} referenceLines={buildVcpuReferenceLines(run)} originMs={origin(run)} granularity={aasGranularity} showDetailToggle={false} />
+          </div>
+        {/each}
+      </div>
+    {:else}
       {#each runs as run}
         {@const series = buildAasSeries(run)}
         {@const rawRows = buildAasRawRows(run)}
-        <div>
-          <div class="run-label" style="color:{run.color}">{run.label}</div>
-          <StackedAreaChart {series} {rawRows} title="AAS by wait type" markers={buildMarkers(run)} referenceLines={buildVcpuReferenceLines(run)} originMs={origin(run)} granularity={aasGranularity} showDetailToggle={false} />
-        </div>
+        <StackedAreaChart {series} {rawRows} title="AAS by wait type" markers={buildMarkers(run)} referenceLines={buildVcpuReferenceLines(run)} originMs={origin(run)} />
       {/each}
-    </div>
-  {:else}
-    {#each runs as run}
-      {@const series = buildAasSeries(run)}
-      {@const rawRows = buildAasRawRows(run)}
-      <StackedAreaChart {series} {rawRows} title="AAS by wait type" markers={buildMarkers(run)} referenceLines={buildVcpuReferenceLines(run)} originMs={origin(run)} />
-    {/each}
+    {/if}
   {/if}
 </div>
 
 <!-- ── Section 2: Session States ────────────────────────────────────────── -->
 <div class="section">
-  <h4 class="section-title">Session States</h4>
-  <p class="section-desc">All sessions over time by state. "idle in transaction" sessions hold locks and block VACUUM.</p>
-  <div class="chart-grid">
-    {#each runs as run}
-      {@const series = buildSessionSeries(run)}
-      {@const rawRows = buildSessionRawRows(run)}
-      <div>
-        {#if isCompare}<div class="run-label" style="color:{run.color}">{run.label}</div>{/if}
-        <StackedAreaChart
-          {series}
-          {rawRows}
-          title="Session states"
-          markers={buildMarkers(run)}
-          originMs={origin(run)}
-          showDetailToggle={false}
-          granularity="broad"
-          valueLabel="sessions"
-          hiddenLabels={hiddenSessionStates}
-          onToggleLabel={toggleSessionState}
-        />
+  <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px;flex-wrap:wrap">
+    <h4 class="section-title" style="margin:0">Session States</h4>
+    {#if isCompare}
+      <div class="mode-toggle">
+        <button class:active={sessionTab === 'charts'} onclick={() => sessionTab = 'charts'}>Per run</button>
+        <button class:active={sessionTab === 'average'} onclick={() => sessionTab = 'average'}>Average</button>
       </div>
-    {/each}
+    {/if}
   </div>
-  {#if isCompare}
+  <p class="section-desc">All sessions over time by state. "idle in transaction" sessions hold locks and block VACUUM.</p>
+  {#if !isCompare || sessionTab === 'charts'}
+    <div class="chart-grid">
+      {#each runs as run}
+        {@const series = buildSessionSeries(run)}
+        {@const rawRows = buildSessionRawRows(run)}
+        <div>
+          {#if isCompare}<div class="run-label" style="color:{run.color}">{run.label}</div>{/if}
+          <StackedAreaChart
+            {series}
+            {rawRows}
+            title="Session states"
+            markers={buildMarkers(run)}
+            originMs={origin(run)}
+            showDetailToggle={false}
+            granularity="broad"
+            valueLabel="sessions"
+            hiddenLabels={hiddenSessionStates}
+            onToggleLabel={toggleSessionState}
+          />
+        </div>
+      {/each}
+    </div>
+  {/if}
+  {#if isCompare && sessionTab === 'average'}
     <div class="session-summary-chart">
       <StackedBarChart
         groups={buildSessionAverageGroups()}
@@ -1913,83 +1933,93 @@
 <div class="section">
   <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px;flex-wrap:wrap">
     <h4 class="section-title" style="margin:0">Top Wait Events</h4>
-    <div class="mode-toggle">
-      <button class:active={waitsView === 'detail'} onclick={() => { waitsView = 'detail'; waitsPage = 0; hiddenWaitEventLabels = []; }}>Detail</button>
-      <button class:active={waitsView === 'broad'} onclick={() => { waitsView = 'broad'; waitsPage = 0; hiddenWaitEventLabels = []; }}>Broad</button>
-    </div>
+    {#if isCompare}
+      <div class="mode-toggle">
+        <button class:active={waitsTab === 'list'} onclick={() => { waitsTab = 'list'; waitsPage = 0; }}>Per run</button>
+        <button class:active={waitsTab === 'events-by-run'} onclick={() => { waitsTab = 'events-by-run'; hiddenWaitEventLabels = []; }}>Average</button>
+      </div>
+    {/if}
+    {#if !isCompare || waitsTab === 'list'}
+      <div class="mode-toggle">
+        <button class:active={waitsView === 'detail'} onclick={() => { waitsView = 'detail'; waitsPage = 0; hiddenWaitEventLabels = []; }}>Detail</button>
+        <button class:active={waitsView === 'broad'} onclick={() => { waitsView = 'broad'; waitsPage = 0; hiddenWaitEventLabels = []; }}>Broad</button>
+      </div>
+    {/if}
   </div>
   <div class="waits-header-row">
-    <p class="section-desc" style="margin:0">Most frequent wait events across active sessions. AAS = avg active sessions (bar scaled to stored vCPU count).{waitsView === 'broad' ? ' Broad mode groups by wait type.' : ''}</p>
+    <p class="section-desc" style="margin:0">Most frequent wait events across active sessions. AAS = avg active sessions (bar scaled to stored vCPU count).{waitsView === 'broad' && (!isCompare || waitsTab === 'list') ? ' Broad mode groups by wait type.' : ''}</p>
   </div>
-  <div class="waits-grid" style="margin-top:10px">
-    {#each runs as run}
-      {@const allRows = activeWaits(run.id)}
-      {@const pageRows = pagedWaits(run.id)}
-      {@const totalSnapshots = allRows.length > 0 ? Number(allRows[0].total_snapshots || 1) : 1}
-      {@const totalOccurrences = allRows.reduce((s, r) => s + Number(r.occurrences), 0)}
-      {@const totalPages = waitsPageCount(run.id)}
-      {@const vcpuCount = runVcpuCount(run)}
-      <div class="waits-panel">
-        {#if isCompare}<div class="run-label" style="color:{run.color}">{run.label}</div>{/if}
-        {#if (waitsData[run.id] ?? []).length === 0}
-          <div class="empty">No wait event data</div>
-        {:else}
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>Wait Type</th>
-                {#if waitsView === 'detail'}<th>Wait Event</th>{/if}
-                <th style="text-align:right;cursor:pointer;user-select:none" onclick={() => { waitsSort = 'count'; waitsPage = 0; }} title="Total times this wait event was sampled across all snapshots in the observation window.">Count{waitsSort === 'count' ? ' ▾' : ''}</th>
-                <th style="text-align:right" title="Share of total AAS attributed to this event. Computed as this event's occurrences ÷ all active-session occurrences. Equivalent to this event's AAS ÷ total AAS.">AAS %</th>
-                <th style="text-align:right;cursor:pointer;user-select:none" onclick={() => { waitsSort = 'aas'; waitsPage = 0; }} title="Average Active Sessions (Oracle AWR-style): occurrences ÷ total snapshots in the window. Measures the average load contribution over the entire observation period. Values are additive — summing all events gives total AAS.">AAS{waitsSort === 'aas' ? ' ▾' : ''}</th>
-                <th style="text-align:right" title="Frequency: fraction of snapshots in which this event was observed at least once. High frequency = steady background pressure; low frequency = bursty or intermittent event.">Freq</th>
-                <th style="text-align:right" title="Avg Concurrency: average number of sessions simultaneously in this wait state when the event is occurring (occurrences ÷ snapshots where it appeared). High concurrency + low frequency = bursty pile-up; low concurrency + high frequency = steady trickle.">Concurrency</th>
-                <th style="width:100px" title="Load bar: this event's AAS scaled against the run's vCPU count ({vcpuCount}). A full bar means this single event consumed all available CPU capacity on average.">Load (AAS/{vcpuCount} vCPU)</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each pageRows as row}
-                {@const occ     = Number(row.occurrences)}
-                {@const evSnaps = Number(row.event_snapshots)}
-                {@const totSnaps = Number(row.total_snapshots || totalSnapshots)}
-                {@const aas         = totSnaps > 0 ? occ / totSnaps : 0}
-                {@const freq        = totSnaps > 0 ? evSnaps / totSnaps * 100 : 0}
-                {@const concurrency = evSnaps  > 0 ? occ / evSnaps : 0}
-                {@const aasPct      = totalOccurrences > 0 ? occ / totalOccurrences * 100 : 0}
-                {@const barW        = Math.min(aas / vcpuCount * 100, 100).toFixed(1)}
-                {@const color = getWaitColor(row.wait_event_type, waitsView === 'broad' ? row.wait_event_type : row.wait_event)}
-                <tr class="wait-event-row" title="Click to see top queries for this wait event"
-                  onclick={(e) => openEventQueries(run, row, waitsView === 'broad', e)}
-                  onkeydown={(e) => { if (e.key === 'Enter') openEventQueries(run, row, waitsView === 'broad', e as unknown as MouseEvent); }}
-                  tabindex="0" role="button">
-                  <td><span class="wait-badge" style="background:{color}20;color:{color}">{row.wait_event_type}</span></td>
-                  {#if waitsView === 'detail'}<td style="font-family:monospace;font-size:11px">{row.wait_event}</td>{/if}
-                  <td style="text-align:right;font-variant-numeric:tabular-nums">{fmtNum(occ)}</td>
-                  <td style="text-align:right;font-variant-numeric:tabular-nums;color:#9ca3af">{aasPct.toFixed(1)}%</td>
-                  <td style="text-align:right;font-variant-numeric:tabular-nums;color:#555">{aas.toFixed(2)}</td>
-                  <td style="text-align:right;font-variant-numeric:tabular-nums;color:#9ca3af">{freq.toFixed(0)}%</td>
-                  <td style="text-align:right;font-variant-numeric:tabular-nums;color:#555">{concurrency.toFixed(2)}</td>
-                  <td><div class="bar-bg"><div class="bar-fill" style="width:{barW}%;background:{color}"></div></div></td>
+  {#if !isCompare || waitsTab === 'list'}
+    <div class="waits-grid" style="margin-top:10px">
+      {#each runs as run}
+        {@const allRows = activeWaits(run.id)}
+        {@const pageRows = pagedWaits(run.id)}
+        {@const totalSnapshots = allRows.length > 0 ? Number(allRows[0].total_snapshots || 1) : 1}
+        {@const totalOccurrences = allRows.reduce((s, r) => s + Number(r.occurrences), 0)}
+        {@const totalPages = waitsPageCount(run.id)}
+        {@const vcpuCount = runVcpuCount(run)}
+        <div class="waits-panel">
+          {#if isCompare}<div class="run-label" style="color:{run.color}">{run.label}</div>{/if}
+          {#if (waitsData[run.id] ?? []).length === 0}
+            <div class="empty">No wait event data</div>
+          {:else}
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Wait Type</th>
+                  {#if waitsView === 'detail'}<th>Wait Event</th>{/if}
+                  <th style="text-align:right;cursor:pointer;user-select:none" onclick={() => { waitsSort = 'count'; waitsPage = 0; }} title="Total times this wait event was sampled across all snapshots in the observation window.">Count{waitsSort === 'count' ? ' ▾' : ''}</th>
+                  <th style="text-align:right" title="Share of total AAS attributed to this event. Computed as this event's occurrences ÷ all active-session occurrences. Equivalent to this event's AAS ÷ total AAS.">AAS %</th>
+                  <th style="text-align:right;cursor:pointer;user-select:none" onclick={() => { waitsSort = 'aas'; waitsPage = 0; }} title="Average Active Sessions (Oracle AWR-style): occurrences ÷ total snapshots in the window. Measures the average load contribution over the entire observation period. Values are additive — summing all events gives total AAS.">AAS{waitsSort === 'aas' ? ' ▾' : ''}</th>
+                  <th style="text-align:right" title="Frequency: fraction of snapshots in which this event was observed at least once. High frequency = steady background pressure; low frequency = bursty or intermittent event.">Freq</th>
+                  <th style="text-align:right" title="Avg Concurrency: average number of sessions simultaneously in this wait state when the event is occurring (occurrences ÷ snapshots where it appeared). High concurrency + low frequency = bursty pile-up; low concurrency + high frequency = steady trickle.">Concurrency</th>
+                  <th style="width:100px" title="Load bar: this event's AAS scaled against the run's vCPU count ({vcpuCount}). A full bar means this single event consumed all available CPU capacity on average.">Load (AAS/{vcpuCount} vCPU)</th>
                 </tr>
-              {/each}
-            </tbody>
-          </table>
-          {#if totalPages > 1}
-            <div class="pager">
-              <button disabled={waitsPage === 0} onclick={() => waitsPage--}>‹ Prev</button>
-              <span>Page {waitsPage + 1} of {totalPages} &nbsp;·&nbsp; {allRows.length} events</span>
-              <button disabled={waitsPage >= totalPages - 1} onclick={() => waitsPage++}>Next ›</button>
-            </div>
+              </thead>
+              <tbody>
+                {#each pageRows as row}
+                  {@const occ     = Number(row.occurrences)}
+                  {@const evSnaps = Number(row.event_snapshots)}
+                  {@const totSnaps = Number(row.total_snapshots || totalSnapshots)}
+                  {@const aas         = totSnaps > 0 ? occ / totSnaps : 0}
+                  {@const freq        = totSnaps > 0 ? evSnaps / totSnaps * 100 : 0}
+                  {@const concurrency = evSnaps  > 0 ? occ / evSnaps : 0}
+                  {@const aasPct      = totalOccurrences > 0 ? occ / totalOccurrences * 100 : 0}
+                  {@const barW        = Math.min(aas / vcpuCount * 100, 100).toFixed(1)}
+                  {@const color = getWaitColor(row.wait_event_type, waitsView === 'broad' ? row.wait_event_type : row.wait_event)}
+                  <tr class="wait-event-row" title="Click to see top queries for this wait event"
+                    onclick={(e) => openEventQueries(run, row, waitsView === 'broad', e)}
+                    onkeydown={(e) => { if (e.key === 'Enter') openEventQueries(run, row, waitsView === 'broad', e as unknown as MouseEvent); }}
+                    tabindex="0" role="button">
+                    <td><span class="wait-badge" style="background:{color}20;color:{color}">{row.wait_event_type}</span></td>
+                    {#if waitsView === 'detail'}<td style="font-family:monospace;font-size:11px">{row.wait_event}</td>{/if}
+                    <td style="text-align:right;font-variant-numeric:tabular-nums">{fmtNum(occ)}</td>
+                    <td style="text-align:right;font-variant-numeric:tabular-nums;color:#9ca3af">{aasPct.toFixed(1)}%</td>
+                    <td style="text-align:right;font-variant-numeric:tabular-nums;color:#555">{aas.toFixed(2)}</td>
+                    <td style="text-align:right;font-variant-numeric:tabular-nums;color:#9ca3af">{freq.toFixed(0)}%</td>
+                    <td style="text-align:right;font-variant-numeric:tabular-nums;color:#555">{concurrency.toFixed(2)}</td>
+                    <td><div class="bar-bg"><div class="bar-fill" style="width:{barW}%;background:{color}"></div></div></td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+            {#if totalPages > 1}
+              <div class="pager">
+                <button disabled={waitsPage === 0} onclick={() => waitsPage--}>‹ Prev</button>
+                <span>Page {waitsPage + 1} of {totalPages} &nbsp;·&nbsp; {allRows.length} events</span>
+                <button disabled={waitsPage >= totalPages - 1} onclick={() => waitsPage++}>Next ›</button>
+              </div>
+            {/if}
           {/if}
-        {/if}
-      </div>
-    {/each}
-  </div>
-  {#if runs.some(r => (waitsData[r.id] ?? []).length > 0)}
+        </div>
+      {/each}
+    </div>
+  {/if}
+  {#if runs.some(r => (waitsData[r.id] ?? []).length > 0) && (!isCompare || waitsTab === 'events-by-run')}
     {@const waitBarGroups = buildWaitEventBarGroups()}
     <div style="margin-top:16px">
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap">
-        <span style="font-size:13px;color:#555;font-weight:500">Events by run</span>
+        {#if !isCompare}<span style="font-size:13px;color:#555;font-weight:500">Events by run</span>{/if}
         <div class="mode-toggle">
           <button class:active={waitsLineMode === 'common'} onclick={() => waitsLineMode = 'common'}>Common</button>
           <button class:active={waitsLineMode === 'all'} onclick={() => waitsLineMode = 'all'}>All</button>
