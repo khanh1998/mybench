@@ -21,7 +21,7 @@
   // ── Types ──────────────────────────────────────────────────────────────────
   interface AasRow     { _collected_at: string; wait_event_type: string; wait_event: string; n: number; }
   interface SessionRow { _collected_at: string; state: string; n: number; }
-  interface WaitRow    { wait_event_type: string; wait_event: string; occurrences: number; snapshot_count: number; }
+  interface WaitRow    { wait_event_type: string; wait_event: string; occurrences: number; event_snapshots: number; total_snapshots: number; }
   // queryid stored as CAST(queryid AS TEXT) to avoid JS float64 precision loss on large int64 values
   interface SqlRow {
     queryid: string; query_short: string; query_full: string;
@@ -666,16 +666,26 @@
       );
       sessionData = { ...sessionData, [rid]: sessRes.error ? [] : (sessRes.rows as unknown as SessionRow[]) };
 
-      // Top waits — include snapshot_count for AAS = occurrences / snapshot_count
+      // Top waits — return both per-event and total snapshot counts so the caller can
+      // compute all three derived metrics:
+      //   AAS           = occurrences / total_snapshots   (Oracle-style; additive across events)
+      //   Frequency     = event_snapshots / total_snapshots (how often the event appears)
+      //   Avg Concurrency = occurrences / event_snapshots  (depth when it does appear)
       const waitsRes = await queryApi(
-        `SELECT COALESCE(wait_event_type,'CPU') as wait_event_type,
+        `WITH total AS (
+           SELECT COUNT(DISTINCT _collected_at) AS total_snapshots
+           FROM snap_pg_stat_activity
+           WHERE _run_id = ? AND ${clause}
+         )
+         SELECT COALESCE(wait_event_type,'CPU') as wait_event_type,
                 COALESCE(wait_event,'running') as wait_event,
                 COUNT(*) as occurrences,
-                COUNT(DISTINCT _collected_at) as snapshot_count
+                COUNT(DISTINCT _collected_at) as event_snapshots,
+                (SELECT total_snapshots FROM total) as total_snapshots
          FROM snap_pg_stat_activity
          WHERE _run_id = ? AND ${clause} AND state = 'active'
          GROUP BY 1,2 ORDER BY 3 DESC LIMIT 20`,
-        [rid, ...pParams]
+        [rid, ...pParams, rid, ...pParams]
       );
       waitsData = { ...waitsData, [rid]: waitsRes.error ? [] : (waitsRes.rows as unknown as WaitRow[]) };
 
@@ -1420,7 +1430,7 @@ function openFlameForCrossRow(row: CrossRow) {
   let waitsView     = $state<'detail' | 'broad'>('detail');
   let waitsSort     = $state<'count' | 'aas'>('count');
   let waitsLineMode  = $state<'common' | 'all'>('common');
-  let waitsLineValue = $state<'count' | 'aas'>('count');
+  let waitsLineValue = $state<'count' | 'aas' | 'pct' | 'freq' | 'concurrency'>('count');
   let aasGranularity = $state<'detail' | 'broad'>('detail');
 
   function pagedSql(runId: number): SqlRow[] {
@@ -1431,27 +1441,29 @@ function openFlameForCrossRow(row: CrossRow) {
 
   function broadWaits(runId: number): WaitRow[] {
     const rows = waitsData[runId] ?? [];
-    const map = new Map<string, { occurrences: number; snapshot_count: number }>();
+    const map = new Map<string, { occurrences: number; event_snapshots: number; total_snapshots: number }>();
     for (const r of rows) {
       const key = r.wait_event_type;
       const existing = map.get(key);
       if (existing) {
         existing.occurrences += Number(r.occurrences);
-        existing.snapshot_count = Math.max(existing.snapshot_count, Number(r.snapshot_count));
+        // event_snapshots per type: use MAX across events in the type as a conservative
+        // lower bound (exact value would need a separate GROUP BY type query).
+        existing.event_snapshots = Math.max(existing.event_snapshots, Number(r.event_snapshots));
       } else {
-        map.set(key, { occurrences: Number(r.occurrences), snapshot_count: Number(r.snapshot_count) });
+        map.set(key, { occurrences: Number(r.occurrences), event_snapshots: Number(r.event_snapshots), total_snapshots: Number(r.total_snapshots) });
       }
     }
     return [...map.entries()]
-      .map(([type, v]) => ({ wait_event_type: type, wait_event: type, occurrences: v.occurrences, snapshot_count: v.snapshot_count }));
+      .map(([type, v]) => ({ wait_event_type: type, wait_event: type, occurrences: v.occurrences, event_snapshots: v.event_snapshots, total_snapshots: v.total_snapshots }));
   }
 
   function activeWaits(runId: number): WaitRow[] {
     const rows = waitsView === 'broad' ? broadWaits(runId) : [...(waitsData[runId] ?? [])];
     if (waitsSort === 'aas') {
       return rows.slice().sort((a, b) => {
-        const aasA = Number(a.snapshot_count) > 0 ? Number(a.occurrences) / Number(a.snapshot_count) : 0;
-        const aasB = Number(b.snapshot_count) > 0 ? Number(b.occurrences) / Number(b.snapshot_count) : 0;
+        const aasA = Number(a.total_snapshots) > 0 ? Number(a.occurrences) / Number(a.total_snapshots) : 0;
+        const aasB = Number(b.total_snapshots) > 0 ? Number(b.occurrences) / Number(b.total_snapshots) : 0;
         return aasB - aasA;
       });
     }
@@ -1466,13 +1478,15 @@ function openFlameForCrossRow(row: CrossRow) {
   let hiddenWaitEventLabels = $state<string[]>([]);
 
   function buildWaitEventBarGroups() {
+    const isBroad = waitsView === 'broad';
     const eventsByRun = new Map<number, Set<string>>();
     const allEvents = new Set<string>();
     for (const run of runs) {
-      const rows = waitsData[run.id] ?? [];
+      const rows = isBroad ? broadWaits(run.id) : (waitsData[run.id] ?? []);
       const events = new Set<string>();
       for (const row of rows) {
-        const key = `${row.wait_event_type}||${row.wait_event}`;
+        // In broad mode wait_event === wait_event_type, so key is just the type.
+        const key = isBroad ? row.wait_event_type : `${row.wait_event_type}||${row.wait_event}`;
         events.add(key);
         allEvents.add(key);
       }
@@ -1483,16 +1497,31 @@ function openFlameForCrossRow(row: CrossRow) {
       : allEvents;
 
     return runs.map(run => {
-      const rows = waitsData[run.id] ?? [];
+      const rows = isBroad ? broadWaits(run.id) : (waitsData[run.id] ?? []);
+      const totalOcc = rows.reduce((s, r) => s + Number(r.occurrences), 0);
       const segments = rows
-        .filter(row => targetEvents.has(`${row.wait_event_type}||${row.wait_event}`))
+        .filter(row => {
+          const key = isBroad ? row.wait_event_type : `${row.wait_event_type}||${row.wait_event}`;
+          return targetEvents.has(key);
+        })
         .map(row => {
+          const occ  = Number(row.occurrences);
+          const evSn = Number(row.event_snapshots);
+          const totSn = Number(row.total_snapshots);
           const value = waitsLineValue === 'aas'
-            ? (Number(row.snapshot_count) > 0 ? Number(row.occurrences) / Number(row.snapshot_count) : 0)
-            : Number(row.occurrences);
+            ? (totSn > 0 ? occ / totSn : 0)
+            : waitsLineValue === 'pct'
+            ? (totalOcc > 0 ? occ / totalOcc * 100 : 0)
+            : waitsLineValue === 'freq'
+            ? (totSn > 0 ? evSn / totSn * 100 : 0)
+            : waitsLineValue === 'concurrency'
+            ? (evSn > 0 ? occ / evSn : 0)
+            : occ;
+          // In broad mode label is just the type; in detail mode include the event name.
+          const label = isBroad ? row.wait_event_type : `${row.wait_event_type} · ${row.wait_event}`;
           return {
-            label: `${row.wait_event_type} · ${row.wait_event}`,
-            color: getWaitColor(row.wait_event_type, row.wait_event),
+            label,
+            color: getWaitColor(row.wait_event_type, isBroad ? row.wait_event_type : row.wait_event),
             value
           };
         })
@@ -1810,8 +1839,8 @@ function openFlameForCrossRow(row: CrossRow) {
   <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px;flex-wrap:wrap">
     <h4 class="section-title" style="margin:0">Top Wait Events</h4>
     <div class="mode-toggle">
-      <button class:active={waitsView === 'detail'} onclick={() => { waitsView = 'detail'; waitsPage = 0; }}>Detail</button>
-      <button class:active={waitsView === 'broad'} onclick={() => { waitsView = 'broad'; waitsPage = 0; }}>Broad</button>
+      <button class:active={waitsView === 'detail'} onclick={() => { waitsView = 'detail'; waitsPage = 0; hiddenWaitEventLabels = []; }}>Detail</button>
+      <button class:active={waitsView === 'broad'} onclick={() => { waitsView = 'broad'; waitsPage = 0; hiddenWaitEventLabels = []; }}>Broad</button>
     </div>
   </div>
   <div class="waits-header-row">
@@ -1821,7 +1850,8 @@ function openFlameForCrossRow(row: CrossRow) {
     {#each runs as run}
       {@const allRows = activeWaits(run.id)}
       {@const pageRows = pagedWaits(run.id)}
-      {@const totalSnapshots = allRows.length ? Math.max(...allRows.map(r => Number(r.snapshot_count || 1))) : 1}
+      {@const totalSnapshots = allRows.length > 0 ? Number(allRows[0].total_snapshots || 1) : 1}
+      {@const totalOccurrences = allRows.reduce((s, r) => s + Number(r.occurrences), 0)}
       {@const totalPages = waitsPageCount(run.id)}
       {@const vcpuCount = runVcpuCount(run)}
       <div class="waits-panel">
@@ -1834,23 +1864,33 @@ function openFlameForCrossRow(row: CrossRow) {
               <tr>
                 <th>Wait Type</th>
                 {#if waitsView === 'detail'}<th>Wait Event</th>{/if}
-                <th style="text-align:right;cursor:pointer;user-select:none" onclick={() => { waitsSort = 'count'; waitsPage = 0; }}>Count{waitsSort === 'count' ? ' ▾' : ''}</th>
-                <th style="text-align:right;cursor:pointer;user-select:none" onclick={() => { waitsSort = 'aas'; waitsPage = 0; }}>AAS{waitsSort === 'aas' ? ' ▾' : ''}</th>
-                <th style="width:100px" title="Load by waits (AAS), bar scaled to this run's stored {vcpuCount} vCPUs">Load (AAS/{vcpuCount} vCPU)</th>
+                <th style="text-align:right;cursor:pointer;user-select:none" onclick={() => { waitsSort = 'count'; waitsPage = 0; }} title="Total times this wait event was sampled across all snapshots in the observation window.">Count{waitsSort === 'count' ? ' ▾' : ''}</th>
+                <th style="text-align:right" title="Share of total AAS attributed to this event. Computed as this event's occurrences ÷ all active-session occurrences. Equivalent to this event's AAS ÷ total AAS.">AAS %</th>
+                <th style="text-align:right;cursor:pointer;user-select:none" onclick={() => { waitsSort = 'aas'; waitsPage = 0; }} title="Average Active Sessions (Oracle AWR-style): occurrences ÷ total snapshots in the window. Measures the average load contribution over the entire observation period. Values are additive — summing all events gives total AAS.">AAS{waitsSort === 'aas' ? ' ▾' : ''}</th>
+                <th style="text-align:right" title="Frequency: fraction of snapshots in which this event was observed at least once. High frequency = steady background pressure; low frequency = bursty or intermittent event.">Freq</th>
+                <th style="text-align:right" title="Avg Concurrency: average number of sessions simultaneously in this wait state when the event is occurring (occurrences ÷ snapshots where it appeared). High concurrency + low frequency = bursty pile-up; low concurrency + high frequency = steady trickle.">Concurrency</th>
+                <th style="width:100px" title="Load bar: this event's AAS scaled against the run's vCPU count ({vcpuCount}). A full bar means this single event consumed all available CPU capacity on average.">Load (AAS/{vcpuCount} vCPU)</th>
               </tr>
             </thead>
             <tbody>
               {#each pageRows as row}
-                {@const occ = Number(row.occurrences)}
-                {@const snaps = Number(row.snapshot_count || totalSnapshots)}
-                {@const aas = snaps > 0 ? occ / snaps : 0}
-                {@const barW = Math.min(aas / vcpuCount * 100, 100).toFixed(1)}
+                {@const occ     = Number(row.occurrences)}
+                {@const evSnaps = Number(row.event_snapshots)}
+                {@const totSnaps = Number(row.total_snapshots || totalSnapshots)}
+                {@const aas         = totSnaps > 0 ? occ / totSnaps : 0}
+                {@const freq        = totSnaps > 0 ? evSnaps / totSnaps * 100 : 0}
+                {@const concurrency = evSnaps  > 0 ? occ / evSnaps : 0}
+                {@const aasPct      = totalOccurrences > 0 ? occ / totalOccurrences * 100 : 0}
+                {@const barW        = Math.min(aas / vcpuCount * 100, 100).toFixed(1)}
                 {@const color = getWaitColor(row.wait_event_type, waitsView === 'broad' ? row.wait_event_type : row.wait_event)}
                 <tr>
                   <td><span class="wait-badge" style="background:{color}20;color:{color}">{row.wait_event_type}</span></td>
                   {#if waitsView === 'detail'}<td style="font-family:monospace;font-size:11px">{row.wait_event}</td>{/if}
                   <td style="text-align:right;font-variant-numeric:tabular-nums">{fmtNum(occ)}</td>
+                  <td style="text-align:right;font-variant-numeric:tabular-nums;color:#9ca3af">{aasPct.toFixed(1)}%</td>
                   <td style="text-align:right;font-variant-numeric:tabular-nums;color:#555">{aas.toFixed(2)}</td>
+                  <td style="text-align:right;font-variant-numeric:tabular-nums;color:#9ca3af">{freq.toFixed(0)}%</td>
+                  <td style="text-align:right;font-variant-numeric:tabular-nums;color:#555">{concurrency.toFixed(2)}</td>
                   <td><div class="bar-bg"><div class="bar-fill" style="width:{barW}%;background:{color}"></div></div></td>
                 </tr>
               {/each}
@@ -1877,8 +1917,11 @@ function openFlameForCrossRow(row: CrossRow) {
           <button class:active={waitsLineMode === 'all'} onclick={() => waitsLineMode = 'all'}>All</button>
         </div>
         <div class="mode-toggle">
-          <button class:active={waitsLineValue === 'count'} onclick={() => waitsLineValue = 'count'}>Count</button>
-          <button class:active={waitsLineValue === 'aas'} onclick={() => waitsLineValue = 'aas'}>AAS</button>
+          <button class:active={waitsLineValue === 'count'} onclick={() => waitsLineValue = 'count'} title="Raw sample count — total times each event was observed across all snapshots">Count</button>
+          <button class:active={waitsLineValue === 'aas'} onclick={() => waitsLineValue = 'aas'} title="Average Active Sessions (Oracle-style): occurrences ÷ total snapshots. Additive — bars sum to total AAS.">AAS</button>
+          <button class:active={waitsLineValue === 'pct'} onclick={() => waitsLineValue = 'pct'} title="Share of total AAS: this event's AAS as a percentage of the overall AAS">AAS %</button>
+          <button class:active={waitsLineValue === 'freq'} onclick={() => waitsLineValue = 'freq'} title="Frequency: percentage of snapshots in which this event was observed">Freq %</button>
+          <button class:active={waitsLineValue === 'concurrency'} onclick={() => waitsLineValue = 'concurrency'} title="Avg Concurrency: average number of simultaneous sessions in this wait state when the event is occurring (occurrences ÷ snapshots where it appeared)">Concurrency</button>
         </div>
       </div>
       {#if waitBarGroups.every(g => g.segments.length === 0)}
@@ -1886,7 +1929,7 @@ function openFlameForCrossRow(row: CrossRow) {
       {:else}
         <StackedBarChart
           groups={waitBarGroups}
-          title={waitsLineValue === 'aas' ? 'AAS' : 'Count'}
+          title={waitsLineValue === 'aas' ? 'AAS' : waitsLineValue === 'pct' ? 'AAS %' : waitsLineValue === 'freq' ? 'Frequency (%)' : waitsLineValue === 'concurrency' ? 'Avg Concurrency' : 'Count'}
           hiddenLabels={hiddenWaitEventLabels}
           onToggleLabel={(label) => {
             hiddenWaitEventLabels = hiddenWaitEventLabels.includes(label)
