@@ -333,6 +333,7 @@
     }
     return options.filter((o) =>
       perfViewMode === 'raw' ? (o.kind === 'raw' || o.kind === 'derived') :
+      perfViewMode === 'per_tx' ? (o.kind === 'per_tx' || o.kind === 'derived') :
       o.kind === perfViewMode
     );
   });
@@ -501,9 +502,9 @@
         };
       });
 
-      // In raw view: add extra rows for perf-log derived values (e.g. GHz for cpu-cycles)
+      // In raw and per_tx views: add extra rows for perf-log derived values (e.g. GHz for cpu-cycles)
       const extraDerivedRows: PerfAllEventRow[] = [];
-      if (perfViewMode === 'raw') {
+      if (perfViewMode === 'raw' || perfViewMode === 'per_tx') {
         for (const eventName of [...derivedEventNames].sort()) {
           const perfs = correctedRunsWithPerf.map((entry) =>
             entry.perf.find((p) => `${p.step_type ?? 'step'}:${p.step_name ?? p.step_id}` === stepKey)
@@ -522,7 +523,7 @@
       }
 
       const allRows = perfViewMode === 'per_tx'
-        ? baseRows
+        ? [...baseRows, ...extraDerivedRows]
         : perfViewMode === 'raw'
           ? [...baseRows, ...extraDerivedRows]
           : baseRows;
