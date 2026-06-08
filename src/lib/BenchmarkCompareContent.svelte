@@ -752,6 +752,56 @@
   $effect(() => {
     if (selectedRunIds.length < 2) activeCompareTab = 'summary';
   });
+
+  let summaryCopied = $state<'json' | 'markdown' | null>(null);
+  let summaryCopyTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function markSummaryCopied(kind: 'json' | 'markdown') {
+    summaryCopied = kind;
+    if (summaryCopyTimer) clearTimeout(summaryCopyTimer);
+    summaryCopyTimer = setTimeout(() => { summaryCopied = null; }, 1600);
+  }
+
+  function hexToRgba(hex: string, alpha: number): string {
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    return `rgba(${r},${g},${b},${alpha})`;
+  }
+
+  function copySummaryChartJson() {
+    const metric = selectedSummaryMetric;
+    if (!metric) return;
+    const vals = summaryChartValues();
+    const config = {
+      type: 'bar',
+      data: {
+        labels: vals.map(d => d.label),
+        datasets: [{
+          label: metric.label,
+          data: vals.map(d => d.value !== null ? +d.value.toFixed(metric.decimals) : null),
+          backgroundColor: vals.map(d => hexToRgba(d.color, 0.8)),
+          borderColor: vals.map(d => hexToRgba(d.color, 1)),
+          borderWidth: 1,
+        }]
+      },
+      options: {
+        interaction: { mode: 'index', intersect: false },
+        plugins: { legend: { display: false } }
+      }
+    };
+    navigator.clipboard.writeText(JSON.stringify(config, null, 2));
+    markSummaryCopied('json');
+  }
+
+  function copySummaryChartMarkdown() {
+    const metric = selectedSummaryMetric;
+    if (!metric) return;
+    const vals = summaryChartValues();
+    const rows = vals.map(d => [d.label, d.value !== null ? +d.value.toFixed(metric.decimals) : '—']);
+    navigator.clipboard.writeText(markdownTable(['Run', metric.label], rows));
+    markSummaryCopied('markdown');
+  }
 </script>
 
 {#if selectedRunIds.length >= 2}
@@ -815,6 +865,26 @@
       </div>
 
       {#if chartValid.length > 0 && selectedSummaryMetric}
+        <div class="summary-chart-header">
+          <div class="copy-group" aria-label="Copy chart data">
+            <button type="button" class="copy-btn" class:copied={summaryCopied === 'json'} title="Copy as Chart.js JSON" onclick={copySummaryChartJson}>
+              {#if summaryCopied === 'json'}
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0z"/></svg>
+              {:else}
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"/><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"/></svg>
+              {/if}
+              JSON
+            </button>
+            <button type="button" class="copy-btn" class:copied={summaryCopied === 'markdown'} title="Copy as Markdown table" onclick={copySummaryChartMarkdown}>
+              {#if summaryCopied === 'markdown'}
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.75.75 0 0 1 1.06-1.06L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0z"/></svg>
+              {:else}
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"/><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"/></svg>
+              {/if}
+              MD
+            </button>
+          </div>
+        </div>
         <div class="summary-chart-shell">
           <svg
             class="summary-bar-chart"
@@ -1473,6 +1543,37 @@
     border-color: #0055bb;
     color: #fff;
   }
+
+  .summary-chart-header {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 6px;
+  }
+
+  .copy-group {
+    display: inline-flex;
+    flex-shrink: 0;
+  }
+
+  .copy-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+    font-size: 11px;
+    color: #888;
+    background: none;
+    border: 1px solid #e3e3e3;
+    padding: 2px 7px;
+    cursor: pointer;
+    line-height: 1.4;
+    min-height: 22px;
+  }
+
+  .copy-btn:first-child { border-radius: 4px 0 0 4px; }
+  .copy-btn:last-child { border-left: 0; border-radius: 0 4px 4px 0; }
+  .copy-btn:hover { color: #333; border-color: #bbb; background: #f7f7f7; }
+  .copy-btn.copied { color: #16a34a; border-color: #86efac; background: #f0fdf4; }
 
   .summary-chart-shell {
     overflow-x: auto;
