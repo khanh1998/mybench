@@ -1,9 +1,11 @@
 <script lang="ts">
   import LineChart from '$lib/LineChart.svelte';
   import BarChart from '$lib/BarChart.svelte';
+  import CopyTableButton from '$lib/CopyTableButton.svelte';
   import { formatValue } from '$lib/telemetry/format';
   import TelemetryValueCard from '$lib/telemetry/TelemetryValueCard.svelte';
   import type { TelemetryChartMetric, TelemetryMarker, TelemetrySection, TelemetryTableSnapshot, TelemetryValueKind } from '$lib/telemetry/types';
+  import { markdownTable } from '$lib/utils';
 
   let {
     section,
@@ -371,14 +373,30 @@
               {/if}
             </div>
           </div>
-          <button
-            type="button"
-            class="table-toggle"
-            aria-expanded={tableExpanded}
-            onclick={() => tableExpanded = !tableExpanded}
-          >
-            {tableExpanded ? 'Hide table' : 'Show table'}
-          </button>
+          <div class="table-header-actions">
+            <CopyTableButton getMarkdown={() => {
+              const headers = section.tableColumns.map(c => c.label);
+              const rows = displayedTableRows.map(row =>
+                section.tableColumns.map(col =>
+                  formatValue(
+                    row[col.key],
+                    col.key === 'value'
+                      ? ((row.value_kind as TelemetryValueKind | undefined) ?? col.kind ?? 'text')
+                      : (col.kind ?? 'text')
+                  )
+                )
+              );
+              return markdownTable(headers, rows);
+            }} />
+            <button
+              type="button"
+              class="table-toggle"
+              aria-expanded={tableExpanded}
+              onclick={() => tableExpanded = !tableExpanded}
+            >
+              {tableExpanded ? 'Hide table' : 'Show table'}
+            </button>
+          </div>
         </div>
 
         {#if tableExpanded}
@@ -723,6 +741,12 @@
     margin-top: 2px;
     font-size: 12px;
     color: #6b7280;
+  }
+
+  .table-header-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
   }
 
   .table-toggle {

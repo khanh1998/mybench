@@ -39,3 +39,17 @@ export function fmtTime(ts: string | null | undefined): string {
 		second: '2-digit'
 	});
 }
+
+export function markdownCell(value: string | number | null | undefined): string {
+	if (value === null || value === undefined) return '';
+	if (typeof value === 'number') return Number.isFinite(value) ? String(+value.toFixed(4)) : '';
+	return value.replace(/\|/g, '\\|').replace(/\n/g, '<br>');
+}
+
+export function markdownTable(headers: string[], rows: (string | number | null | undefined)[][]): string {
+	return [
+		`| ${headers.map(markdownCell).join(' | ')} |`,
+		`| ${headers.map(() => '---').join(' | ')} |`,
+		...rows.map((row) => `| ${row.map(markdownCell).join(' | ')} |`)
+	].join('\n');
+}

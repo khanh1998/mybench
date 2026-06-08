@@ -3,6 +3,8 @@
   import StackedBarChart from '$lib/StackedBarChart.svelte';
   import LineChart from '$lib/LineChart.svelte';
   import { buildLockTree, MAX_LOCK_DEPTH, type LockPairRow, type LockWaitInfo, type LockNode } from '$lib/lock-tree';
+  import CopyTableButton from '$lib/CopyTableButton.svelte';
+  import { markdownTable } from '$lib/utils';
 
   interface RunMeta {
     id: number;
@@ -1963,6 +1965,29 @@
           {#if (waitsData[run.id] ?? []).length === 0}
             <div class="empty">No wait event data</div>
           {:else}
+            <div class="table-copy-header">
+              <CopyTableButton getMarkdown={() => {
+                const allRows = activeWaits(run.id);
+                const totSnaps = allRows.length > 0 ? Number(allRows[0].total_snapshots || 1) : 1;
+                const totalOccurrences = allRows.reduce((s, r) => s + Number(r.occurrences), 0);
+                const headers = waitsView === 'detail'
+                  ? ['Wait Type', 'Wait Event', 'Count', 'AAS %', 'AAS', 'Freq', 'Concurrency']
+                  : ['Wait Type', 'Count', 'AAS %', 'AAS', 'Freq', 'Concurrency'];
+                const rows = allRows.map(row => {
+                  const occ = Number(row.occurrences);
+                  const evSnaps = Number(row.event_snapshots);
+                  const aas = totSnaps > 0 ? occ / totSnaps : 0;
+                  const freq = totSnaps > 0 ? evSnaps / totSnaps * 100 : 0;
+                  const concurrency = evSnaps > 0 ? occ / evSnaps : 0;
+                  const aasPct = totalOccurrences > 0 ? occ / totalOccurrences * 100 : 0;
+                  const cells: (string | number | null)[] = [row.wait_event_type];
+                  if (waitsView === 'detail') cells.push(row.wait_event);
+                  cells.push(fmtNum(occ), aasPct.toFixed(1) + '%', aas.toFixed(2), freq.toFixed(0) + '%', concurrency.toFixed(2));
+                  return cells;
+                });
+                return markdownTable(headers, rows);
+              }} />
+            </div>
             <table class="data-table">
               <thead>
                 <tr>
@@ -2133,6 +2158,19 @@
         {/if}
 
         <!-- Pivot table -->
+        {#if !activeCrossGroup.isWait}
+          <div class="table-copy-header">
+            <CopyTableButton getMarkdown={() => {
+              const m = activeCrossGroup.metrics.find(met => met.key === sqlCrossMetric) ?? activeCrossGroup.metrics[0];
+              const headers = ['Query', ...runs.map(r => r.label)];
+              const rows = sortedCrossRows.map(row => [
+                row.query_short,
+                ...runs.map(r => fmtCrossMetric(row.byRun[r.id], m.key, m.format))
+              ]);
+              return markdownTable(headers, rows);
+            }} />
+          </div>
+        {/if}
         <div class="cross-run-table-wrap">
           <table class="data-table cross-run-table">
             <thead>
@@ -2227,6 +2265,27 @@
             {@const runSecs = runBenchSecs(run)}
             <div class="sql-panel">
               {#if isCompare}<div class="run-label" style="color:{run.color}">{run.label}</div>{/if}
+              <div class="table-copy-header">
+                <CopyTableButton getMarkdown={() => {
+                  const runSecs2 = runBenchSecs(run);
+                  const totalTime2 = totalExecTime(sqlData[run.id] ?? []);
+                  const headers = ['Query', 'Calls', 'Exec Time', ...(showPlanCols ? ['Plan Time'] : []), '% Total', 'Avg Exec Time', ...(showPlanCols ? ['Avg Plan Time'] : [])];
+                  const rows = sortedSql(run.id).map(row => {
+                    const execTime = Number(row.delta_exec_time ?? 0);
+                    const pct = totalTime2 > 0 ? (execTime / totalTime2 * 100).toFixed(1) + '%' : '0%';
+                    const cells: (string | number | null)[] = [
+                      row.query_short,
+                      sqlColVal(row, 'delta_calls', runSecs2),
+                      fmtMs(Number(row.delta_exec_time))
+                    ];
+                    if (showPlanCols) cells.push(row.delta_plan_time > 0 ? fmtMs(Number(row.delta_plan_time)) : '—');
+                    cells.push(pct, fmtMs(Number(row.mean_exec_time ?? 0)));
+                    if (showPlanCols) cells.push(row.mean_plan_time > 0 ? fmtMs(Number(row.mean_plan_time)) : '—');
+                    return cells;
+                  });
+                  return markdownTable(headers, rows);
+                }} />
+              </div>
               <table class="data-table sql-table">
                 <thead>
                   <tr>
@@ -2429,6 +2488,20 @@
                     </div>
                   </div>
                 {:else if contention.length > 0}
+                  <div class="table-copy-header" style="margin-bottom:4px">
+                    <CopyTableButton getMarkdown={() => {
+                      const headers = contentionGranularity === 'table+mode'
+                        ? ['Resource', 'Mode', 'Wait', 'Block', 'Peak PIDs Wait', 'Peak PIDs Block']
+                        : ['Resource', 'Wait', 'Block', 'Peak PIDs Wait', 'Peak PIDs Block'];
+                      const rows = contention.map(r => {
+                        const cells: (string | number | null)[] = [r.resource];
+                        if (contentionGranularity === 'table+mode') cells.push(r.mode ?? '—');
+                        cells.push(r.lock_wait, r.lock_block, r.pid_wait, r.pid_block);
+                        return cells;
+                      });
+                      return markdownTable(headers, rows);
+                    }} />
+                  </div>
                   <div class="ct-table">
                     <div class="ct-header" class:ct-has-mode={contentionGranularity === 'table+mode'}>
                       <span>Resource</span>
@@ -2646,6 +2719,7 @@
 
   .section { margin-bottom: 28px; }
   .section-title { font-size: 14px; font-weight: 700; color: #222; margin: 0 0 4px; }
+  .table-copy-header { display: flex; justify-content: flex-end; margin-bottom: 4px; }
   .section-desc { font-size: 12px; color: #888; margin: 0 0 12px; }
 
   .run-label { font-size: 12px; font-weight: 600; margin-bottom: 4px; }

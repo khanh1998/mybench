@@ -9,8 +9,9 @@
   import PgbenchOverview from '$lib/PgbenchOverview.svelte';
   import SysbenchOverview from '$lib/SysbenchOverview.svelte';
   import type { PageData } from './$types';
-  import { fmtTs, fmtTime } from '$lib/utils';
+  import { fmtTs, fmtTime, markdownTable } from '$lib/utils';
   import { correctPerfEvent } from '$lib/perf-utils';
+  import CopyTableButton from '$lib/CopyTableButton.svelte';
 
   let { data }: { data: PageData } = $props();
 
@@ -987,6 +988,26 @@
               {#if (perf.mode ?? 'stat') === 'stat' && perf.events.length}
                 {@const groupedRows = buildPerfRows(perf, run?.transactions)}
                 <div class="perf-events-wrap">
+                  <div class="table-copy-header">
+                    <CopyTableButton getMarkdown={() => {
+                      const rows: (string | number | null)[][] = [];
+                      for (const group of PERF_GROUP_ORDER) {
+                        const groupRows = groupedRows.get(group);
+                        if (!groupRows) continue;
+                        rows.push([`**${group}**`, '', '', '', '']);
+                        for (const row of groupRows) {
+                          rows.push([
+                            row.event_name,
+                            row.counter_value !== null ? fmtMetric(row.counter_value, 3) : '—',
+                            row.per_transaction !== null ? fmtMetric(row.per_transaction, 3) : '—',
+                            fmtDerivedMetric(row),
+                            row.percent_running !== null ? `${fmtMetric(row.percent_running, 2)}%` : '—'
+                          ]);
+                        }
+                      }
+                      return markdownTable(['Event', 'Total', 'Per Tx', 'Derived', 'Coverage'], rows);
+                    }} />
+                  </div>
                   <table class="perf-events-table">
                     <thead>
                       <tr>
@@ -1025,6 +1046,12 @@
                 <div class="perf-events-wrap">
                   <div class="perf-record-actions">
                     <a class="button-link" href={`/api/runs/${runId}/perf-script/${s.step_id}?mode=record`}>Download perf script</a>
+                    <div class="table-copy-header">
+                      <CopyTableButton getMarkdown={() => {
+                        const rows = topFunctions.map(row => [`${fmtMetric(row.overhead, 2)}%`, row.symbol, row.dso]);
+                        return markdownTable(['Overhead', 'Symbol', 'DSO'], rows);
+                      }} />
+                    </div>
                   </div>
                   <table class="perf-events-table">
                     <thead>
@@ -1050,6 +1077,12 @@
               {:else if perf.mode === 'trace'}
                 {@const syscallGroups = sortedGroupedSyscalls(groupSyscalls(perfSyscalls(perf)))}
                 <div class="perf-events-wrap">
+                  <div class="table-copy-header">
+                    <CopyTableButton getMarkdown={() => {
+                      const rows = syscallGroups.map(g => [g.syscall, fmtMetric(g.calls, 0), fmtMetric(g.errors, 0), fmtMetric(g.avg_ms, 3), fmtMetric(g.max_ms, 3)]);
+                      return markdownTable(['Syscall', 'Calls', 'Errors', 'Avg ms', 'Max ms'], rows);
+                    }} />
+                  </div>
                   <table class="perf-events-table">
                     <thead>
                       <tr>
@@ -1177,7 +1210,8 @@
   .perf-warnings { margin-bottom: 12px; padding: 8px 12px; background: #fff8e8; border: 1px solid #f3dfaa; border-radius: 6px; color: #7a4f00; font-size: 12px; display: flex; flex-direction: column; gap: 4px; }
   .perf-warning-row { display: flex; align-items: flex-start; gap: 6px; }
   .perf-events-wrap { margin-bottom: 10px; border: 1px solid #e8e8e8; border-radius: 6px; overflow: hidden; }
-  .perf-record-actions { padding: 8px 10px; background: #fafafa; border-bottom: 1px solid #e8e8e8; }
+  .perf-record-actions { display: flex; align-items: center; gap: 8px; padding: 8px 10px; background: #fafafa; border-bottom: 1px solid #e8e8e8; }
+  .table-copy-header { display: flex; justify-content: flex-end; padding: 4px 8px; background: #fafafa; border-bottom: 1px solid #e8e8e8; }
   .button-link { display: inline-flex; align-items: center; padding: 5px 10px; border: 1px solid #cbd5e1; border-radius: 4px; background: #fff; color: #0044bb; font-size: 12px; font-weight: 700; text-decoration: none; }
   .button-link:hover { background: #f5f7fa; }
   .perf-events-table { width: 100%; font-size: 12px; border-collapse: collapse; background: #fff; }

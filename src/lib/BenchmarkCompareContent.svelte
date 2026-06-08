@@ -1,10 +1,12 @@
 <script lang="ts">
   import LoadAnalysis from '$lib/LoadAnalysis.svelte';
   import DatabaseTelemetryCompare from '$lib/DatabaseTelemetryCompare.svelte';
+  import CopyTableButton from '$lib/CopyTableButton.svelte';
   import { RUN_COMPARE_COLORS } from '$lib/compare/colors';
   import type { CompareRunInfo, CompareStepPerf } from '$lib/compare/types';
   import { correctPerfEvent } from '$lib/perf-utils';
   import type { PgbenchScriptResult } from '$lib/pgbench-results';
+  import { markdownTable } from '$lib/utils';
 
   interface RunParam {
     name: string;
@@ -849,6 +851,20 @@
         </div>
       {/if}
 
+      <div class="table-copy-header">
+        <CopyTableButton getMarkdown={() => {
+          const headers = ['Metric', ...selectedRunIds.map(id => getRunLabel(id, true))];
+          const rows = activeSummaryMetrics.map(metric => {
+            const values = selectedRunIds.map(runId => {
+              const run = getRunForId(runId);
+              const value = run?.[metric.key] ?? null;
+              return value !== null ? metric.decimals === 0 ? value.toFixed(0) : value.toFixed(metric.decimals) : '—';
+            });
+            return [metric.label, ...values];
+          });
+          return markdownTable(headers, rows);
+        }} />
+      </div>
       <div class="table-wrap">
         <table class="summary-table">
           <thead>
@@ -891,6 +907,19 @@
       {#if summaryContextRows().length > 0}
         <div class="summary-extra">
           <div class="summary-extra-title">Run context</div>
+          <div class="table-copy-header">
+            <CopyTableButton getMarkdown={() => {
+              const headers = ['Info', ...selectedRunIds.map(id => getRunLabel(id, true))];
+              const rows = summaryContextRows().map(row => {
+                if (row.uniform) {
+                  const val = row.values.find(v => v !== null) ?? '—';
+                  return [row.label, ...selectedRunIds.map(() => val)];
+                }
+                return [row.label, ...row.values.map(v => v ?? '—')];
+              });
+              return markdownTable(headers, rows);
+            }} />
+          </div>
           <div class="table-wrap">
             <table class="summary-context-table">
               <thead>
@@ -930,6 +959,13 @@
           {:else}
             <span class="section-note warn">Highlighted cells differ from the first selected run</span>
           {/if}
+        </div>
+        <div class="table-copy-header">
+          <CopyTableButton getMarkdown={() => {
+            const headers = ['Parameter', ...selectedRunIds.map(id => getRunLabel(id, true))];
+            const rows = paramDiffRows().map(row => [row.name, ...row.values.map(v => v ?? '—')]);
+            return markdownTable(headers, rows);
+          }} />
         </div>
         <div class="table-wrap">
           <table class="params-table">
@@ -982,6 +1018,21 @@
           {/each}
         </div>
 
+        <div class="table-copy-header">
+          <CopyTableButton getMarkdown={() => {
+            const headers = ['Script', 'Weight', ...selectedRunIds.map(id => getRunLabel(id, true))];
+            const rows = scd.scriptNames.map(scriptName => {
+              const weight = scd.runsWithScripts.map(({ scripts }) => scripts.find(sc => sc.name === scriptName)?.weight ?? null).find(w => w !== null) ?? null;
+              const values = scd.runsWithScripts.map(({ scripts }) => {
+                const s = scripts.find(sc => sc.name === scriptName);
+                const v = s?.[scriptMetric.key] ?? null;
+                return v !== null ? scriptMetric.fmt(Number(v)) : '—';
+              });
+              return [scriptName, weight ?? '—', ...values];
+            });
+            return markdownTable(headers, rows);
+          }} />
+        </div>
         <div class="table-wrap">
           <table class="summary-table scripts-compare-table">
             <thead>
@@ -1105,6 +1156,21 @@
             {#if perfAllEventsSteps().length > 1}
               <div class="perf-step-label">{step.stepLabel}</div>
             {/if}
+            <div class="table-copy-header">
+              <CopyTableButton getMarkdown={() => {
+                const runLabels = selectedRunsWithPerf.map(e => e.label);
+                const headers = ['Event', ...runLabels];
+                const rows: (string | number | null)[][] = [];
+                for (const group of step.groups) {
+                  rows.push([`**${group.name}**`, ...runLabels.map(() => '')]);
+                  for (const row of group.rows) {
+                    const label = row.isDerived ? `${row.eventName} (derived${row.derivedUnit ? ` ${row.derivedUnit}` : ''})` : row.eventName;
+                    rows.push([label, ...row.values.map(v => v !== null ? v : null)]);
+                  }
+                }
+                return markdownTable(headers, rows);
+              }} />
+            </div>
             <div class="table-wrap">
               <table class="perf-all-events-table">
                 <thead>
@@ -1182,6 +1248,13 @@
             <div class="perf-step-label">{step.stepLabel}</div>
           {/if}
           {#if step.rows.length > 0}
+            <div class="table-copy-header">
+              <CopyTableButton getMarkdown={() => {
+                const headers = ['Symbol', 'DSO', ...correctedRunsWithPerf.map(e => e.label)];
+                const rows = step.rows.map(row => [row.symbol, row.dso, ...row.values.map(v => v !== null ? `${v.toFixed(2)}%` : '—')]);
+                return markdownTable(headers, rows);
+              }} />
+            </div>
             <div class="table-wrap">
               <table class="perf-record-table">
                 <thead>
@@ -1235,6 +1308,17 @@
             <div class="perf-step-label">{step.stepLabel}</div>
           {/if}
           {#if step.rows.length > 0}
+            <div class="table-copy-header">
+              <CopyTableButton getMarkdown={() => {
+                const metricLabel = perfTraceMetric === 'calls' ? 'Calls' : perfTraceMetric === 'errors' ? 'Errors' : perfTraceMetric === 'avg_ms' ? 'Avg ms' : 'Max ms';
+                const headers = [`Syscall (${metricLabel})`, ...correctedRunsWithPerf.map(e => e.label)];
+                const rows = step.rows.map(row => {
+                  const vals = perfTraceMetric === 'calls' ? row.callsPerRun : perfTraceMetric === 'errors' ? row.errorsPerRun : perfTraceMetric === 'avg_ms' ? row.avgMsPerRun : row.maxMsPerRun;
+                  return [row.syscall, ...vals.map(v => v !== null ? (perfTraceMetric === 'calls' || perfTraceMetric === 'errors' ? v.toLocaleString() : `${v.toFixed(3)} ms`) : '—')];
+                });
+                return markdownTable(headers, rows);
+              }} />
+            </div>
             <div class="table-wrap">
               <table class="perf-trace-table">
                 <thead>
@@ -1525,6 +1609,12 @@
     overflow-x: auto;
     max-height: 360px;
     overflow-y: auto;
+  }
+
+  .table-copy-header {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 4px;
   }
 
   .perf-compare-panel {
