@@ -345,12 +345,12 @@
 		<button class="tab-btn" class:active={activeTab === 'custom'} onclick={() => activeTab = 'custom'}>Custom Benchmarks</button>
 	</div>
 
-	{#if servers.length === 0}
+	{#if activeTab === 'preset'}
+		<PresetBenchmarkPanel servers={servers as any} benchmarks={(data.presetBenchmarks ?? []) as any} />
+	{:else if servers.length === 0}
 		<section class="card empty">
 			No SSH-enabled PostgreSQL servers. Add SSH details for a server in Settings first.
 		</section>
-	{:else if activeTab === 'preset'}
-		<PresetBenchmarkPanel servers={servers as any} benchmarks={(data.presetBenchmarks ?? []) as any} />
 	{:else}
 		<div class="server-select">
 			<label for="server">Server</label>

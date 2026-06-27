@@ -82,6 +82,18 @@
 	let compareBenchmarks = $state<{ benchmark: SystemBenchmark; results: CompletedTest[] }[]>([]);
 	let showCompare = $state(false);
 
+	// Reconnect to a running benchmark on mount
+	$effect(() => {
+		if (running) return;
+		const runningBm = initialBenchmarks.find(b => b.status === 'running');
+		if (runningBm) {
+			running = true;
+			activeBenchmarkId = runningBm.id;
+			startElapsedTimer();
+			connectSSE(runningBm.id);
+		}
+	});
+
 	let startTime = $state<number | null>(null);
 	let elapsedSecs = $state(0);
 	let elapsedTimer: ReturnType<typeof setInterval> | null = null;
@@ -271,6 +283,28 @@
 				exitCode: r.exit_code,
 			}));
 		} catch { /* ignore */ }
+	}
+
+	let editingNameId = $state<number | null>(null);
+	let editingNameValue = $state('');
+
+	function startEditName(bm: SystemBenchmark) {
+		editingNameId = bm.id;
+		editingNameValue = bm.pg_server_name;
+	}
+
+	async function saveEditName(id: number) {
+		const name = editingNameValue.trim();
+		if (!name) { editingNameId = null; return; }
+		const res = await fetch(`/api/preset-benchmarks/${id}`, {
+			method: 'PATCH',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ pg_server_name: name }),
+		});
+		if (res.ok) {
+			benchmarks = benchmarks.map(b => b.id === id ? { ...b, pg_server_name: name } : b);
+		}
+		editingNameId = null;
 	}
 
 	async function deleteBenchmark(id: number) {
@@ -582,7 +616,18 @@
 									/>
 								</td>
 								<td>{fmtDate(bm.created_at)}</td>
-								<td>{bm.pg_server_name}</td>
+								<td class="name-cell">
+									{#if editingNameId === bm.id}
+										<input
+											class="name-input"
+											bind:value={editingNameValue}
+											onkeydown={(e) => { if (e.key === 'Enter') saveEditName(bm.id); if (e.key === 'Escape') editingNameId = null; }}
+											onblur={() => saveEditName(bm.id)}
+										/>
+									{:else}
+										<span class="name-text" ondblclick={() => startEditName(bm)}>{bm.pg_server_name || '-'}</span>
+									{/if}
+								</td>
 								<td class="capitalize">{bm.preset}</td>
 								<td>
 									<span class="status-badge {bm.status}">{bm.status}</span>
@@ -821,6 +866,18 @@
 	.col-cmp input { width: auto; margin: 0; }
 
 	.active-row { background: #f0f7ff; }
+
+	.name-cell { min-width: 100px; }
+	.name-text { cursor: default; }
+	.name-text:hover { text-decoration: underline dotted; cursor: text; }
+	.name-input {
+		width: 100%;
+		padding: 2px 4px;
+		font-size: inherit;
+		border: 1px solid #0066cc;
+		border-radius: 3px;
+		outline: none;
+	}
 	.spec-cell { font-size: 12px; color: #666; white-space: nowrap; }
 
 	.status-badge {
