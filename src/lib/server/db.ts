@@ -589,6 +589,10 @@ function migrate(db: Database.Database) {
       perf_stat_delay TEXT NOT NULL DEFAULT '',
       perf_record_delay TEXT NOT NULL DEFAULT '',
       perf_trace_delay TEXT NOT NULL DEFAULT '',
+      perf_c2c_enabled INTEGER NOT NULL DEFAULT 0,
+      perf_c2c_duration TEXT NOT NULL DEFAULT '',
+      perf_c2c_delay TEXT NOT NULL DEFAULT '',
+      perf_ldlat TEXT NOT NULL DEFAULT '',
       perf_mode TEXT NOT NULL DEFAULT 'stat',
       perf_cgroup TEXT NOT NULL DEFAULT '',
       perf_events TEXT NOT NULL DEFAULT '',
@@ -942,6 +946,10 @@ function migrate(db: Database.Database) {
 	if (!stepCols.includes('perf_stat_delay')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_stat_delay TEXT NOT NULL DEFAULT ''`);
 	if (!stepCols.includes('perf_record_delay')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_record_delay TEXT NOT NULL DEFAULT ''`);
 	if (!stepCols.includes('perf_trace_delay')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_trace_delay TEXT NOT NULL DEFAULT ''`);
+	if (!stepCols.includes('perf_c2c_enabled')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_c2c_enabled INTEGER NOT NULL DEFAULT 0`);
+	if (!stepCols.includes('perf_c2c_duration')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_c2c_duration TEXT NOT NULL DEFAULT ''`);
+	if (!stepCols.includes('perf_c2c_delay')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_c2c_delay TEXT NOT NULL DEFAULT ''`);
+	if (!stepCols.includes('perf_ldlat')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_ldlat TEXT NOT NULL DEFAULT ''`);
 	if (!stepCols.includes('perf_mode')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_mode TEXT NOT NULL DEFAULT 'stat'`);
 	if (!stepCols.includes('perf_cgroup')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_cgroup TEXT NOT NULL DEFAULT ''`);
 	if (!stepCols.includes('perf_events')) db.exec(`ALTER TABLE design_steps ADD COLUMN perf_events TEXT NOT NULL DEFAULT ''`);
@@ -1331,6 +1339,72 @@ FROM snap_pg_stat_bgwriter WHERE _run_id = ? ORDER BY _collected_at DESC LIMIT 1
       value      TEXT    NOT NULL DEFAULT ''
     );
   `);
+
+	if (!db.prepare(`SELECT id FROM schema_migrations WHERE id = ?`).get('preset_system_benchmarks_v1')) {
+		db.exec(`
+      CREATE TABLE IF NOT EXISTS system_benchmarks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pg_server_id INTEGER REFERENCES pg_servers(id) ON DELETE SET NULL,
+        pg_server_name TEXT NOT NULL DEFAULT '',
+        preset TEXT NOT NULL DEFAULT 'standard',
+        status TEXT NOT NULL DEFAULT 'running',
+        cpu_model TEXT NOT NULL DEFAULT '',
+        cpu_cores INTEGER NOT NULL DEFAULT 0,
+        ram_mb INTEGER NOT NULL DEFAULT 0,
+        storage_type TEXT NOT NULL DEFAULT '',
+        disk_size_gb INTEGER NOT NULL DEFAULT 0,
+        os_version TEXT NOT NULL DEFAULT '',
+        kernel_version TEXT NOT NULL DEFAULT '',
+        error_message TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        finished_at TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS system_benchmark_results (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        benchmark_id INTEGER NOT NULL REFERENCES system_benchmarks(id) ON DELETE CASCADE,
+        test_category TEXT NOT NULL,
+        threads INTEGER NOT NULL DEFAULT 1,
+        metrics_json TEXT NOT NULL DEFAULT '{}',
+        raw_output TEXT NOT NULL DEFAULT '',
+        duration_secs REAL NOT NULL DEFAULT 0,
+        exit_code INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_system_benchmarks_server ON system_benchmarks(pg_server_id);
+      CREATE INDEX IF NOT EXISTS idx_system_benchmark_results_benchmark ON system_benchmark_results(benchmark_id);
+    `);
+		db.prepare(`INSERT INTO schema_migrations (id) VALUES (?)`).run('preset_system_benchmarks_v1');
+	}
+
+	// Fix: system_benchmarks should not cascade-delete when pg_server is deleted
+	if (!db.prepare(`SELECT id FROM schema_migrations WHERE id = ?`).get('system_benchmarks_no_cascade_v1')) {
+		db.exec(`
+      CREATE TABLE IF NOT EXISTS system_benchmarks_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pg_server_id INTEGER REFERENCES pg_servers(id) ON DELETE SET NULL,
+        pg_server_name TEXT NOT NULL DEFAULT '',
+        preset TEXT NOT NULL DEFAULT 'standard',
+        status TEXT NOT NULL DEFAULT 'running',
+        cpu_model TEXT NOT NULL DEFAULT '',
+        cpu_cores INTEGER NOT NULL DEFAULT 0,
+        ram_mb INTEGER NOT NULL DEFAULT 0,
+        storage_type TEXT NOT NULL DEFAULT '',
+        disk_size_gb INTEGER NOT NULL DEFAULT 0,
+        os_version TEXT NOT NULL DEFAULT '',
+        kernel_version TEXT NOT NULL DEFAULT '',
+        error_message TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        finished_at TEXT
+      );
+      INSERT INTO system_benchmarks_new SELECT * FROM system_benchmarks;
+      DROP TABLE system_benchmarks;
+      ALTER TABLE system_benchmarks_new RENAME TO system_benchmarks;
+      CREATE INDEX IF NOT EXISTS idx_system_benchmarks_server ON system_benchmarks(pg_server_id);
+    `);
+		db.prepare(`INSERT INTO schema_migrations (id) VALUES (?)`).run('system_benchmarks_no_cascade_v1');
+	}
 }
 
 export default getDb;

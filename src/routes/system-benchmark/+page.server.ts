@@ -1,4 +1,5 @@
 import getDb from '$lib/server/db';
+import type { SystemBenchmark } from '$lib/server/preset-benchmark';
 import type { PageServerLoad } from './$types';
 
 type PgServerRow = {
@@ -23,5 +24,6 @@ export const load: PageServerLoad = () => {
 	const db = getDb();
 	const servers = db.prepare('SELECT * FROM pg_servers WHERE ssh_enabled = 1 ORDER BY name').all() as PgServerRow[];
 	const runs = db.prepare('SELECT * FROM sysbench_system_runs ORDER BY created_at DESC LIMIT 200').all() as SysbenchSystemRunRow[];
-	return { servers, runs };
+	const presetBenchmarks = db.prepare('SELECT * FROM system_benchmarks ORDER BY created_at DESC LIMIT 50').all() as SystemBenchmark[];
+	return { servers, runs, presetBenchmarks };
 };

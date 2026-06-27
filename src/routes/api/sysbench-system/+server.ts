@@ -3,7 +3,7 @@ import type { Client } from 'ssh2';
 import { connectSsh, exec } from '$lib/server/ec2-runner';
 import getDb from '$lib/server/db';
 import { getPgServer } from '$lib/server/services/pg-servers';
-import type { PgServer } from '$lib/types';
+import { buildSshTarget } from '$lib/server/preset-benchmark';
 import type { RequestHandler } from './$types';
 
 const TEST_TYPES = new Set(['cpu', 'memory', 'fileio', 'mutex', 'threads']);
@@ -18,25 +18,6 @@ type SysbenchSystemRun = {
 	exit_code: number;
 	created_at: string;
 };
-
-function buildSshTarget(server: PgServer) {
-	if (!server.ssh_enabled) throw error(400, 'SSH is not enabled for this server');
-	if (!server.ssh_user) throw error(400, 'SSH user is required');
-	if (!server.ssh_private_key) throw error(400, 'SSH private key is required');
-
-	return {
-		id: server.id,
-		name: server.name,
-		host: server.ssh_host || server.host,
-		user: server.ssh_user,
-		port: server.ssh_port,
-		private_key: server.ssh_private_key,
-		remote_dir: '',
-		log_dir: '',
-		cli_log_dir: '/tmp/gocli-logs',
-		vpc: server.vpc
-	};
-}
 
 function combineOutput(stdout: string, stderr: string) {
 	return stderr ? `${stdout}${stdout && !stdout.endsWith('\n') ? '\n' : ''}${stderr}` : stdout;

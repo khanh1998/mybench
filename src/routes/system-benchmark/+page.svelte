@@ -1,5 +1,9 @@
 <script lang="ts">
 	import type { PageData } from './$types';
+	import PresetBenchmarkPanel from '$lib/PresetBenchmarkPanel.svelte';
+
+	type BenchmarkTab = 'preset' | 'custom';
+	let activeTab = $state<BenchmarkTab>('preset');
 
 	type TestType = 'cpu' | 'memory' | 'fileio' | 'mutex' | 'threads';
 
@@ -334,6 +338,20 @@
 <div class="page">
 	<div class="page-header">
 		<h1>System Benchmarks</h1>
+	</div>
+
+	<div class="tab-bar">
+		<button class="tab-btn" class:active={activeTab === 'preset'} onclick={() => activeTab = 'preset'}>Preset Benchmarks</button>
+		<button class="tab-btn" class:active={activeTab === 'custom'} onclick={() => activeTab = 'custom'}>Custom Benchmarks</button>
+	</div>
+
+	{#if servers.length === 0}
+		<section class="card empty">
+			No SSH-enabled PostgreSQL servers. Add SSH details for a server in Settings first.
+		</section>
+	{:else if activeTab === 'preset'}
+		<PresetBenchmarkPanel servers={servers as any} benchmarks={(data.presetBenchmarks ?? []) as any} />
+	{:else}
 		<div class="server-select">
 			<label for="server">Server</label>
 			<select id="server" bind:value={selectedServerId}>
@@ -349,13 +367,7 @@
 				<span class="status-badge fail">{checkState.error} ✗</span>
 			{/if}
 		</div>
-	</div>
 
-	{#if servers.length === 0}
-		<section class="card empty">
-			No SSH-enabled PostgreSQL servers. Add SSH details for a server in Settings first.
-		</section>
-	{:else}
 		<section class="card">
 			<div class="type-tabs">
 				{#each TEST_TYPES as type}
@@ -508,8 +520,6 @@
 				<pre class="output">{latestOutput}</pre>
 			</section>
 		{/if}
-	{/if}
-
 	<section class="card">
 		<h2>History</h2>
 		{#if runs.length === 0}
@@ -559,6 +569,7 @@
 			</div>
 		{/if}
 	</section>
+	{/if}
 </div>
 
 <style>
@@ -574,6 +585,34 @@
 		gap: 16px;
 		align-items: flex-start;
 		flex-wrap: wrap;
+	}
+
+	.tab-bar {
+		display: flex;
+		gap: 0;
+		border-bottom: 2px solid #e0e0e0;
+	}
+
+	.tab-btn {
+		padding: 8px 16px;
+		border: none;
+		background: none;
+		cursor: pointer;
+		font-size: 14px;
+		font-weight: 500;
+		color: #666;
+		border-bottom: 2px solid transparent;
+		margin-bottom: -2px;
+		transition: color 0.15s, border-color 0.15s;
+	}
+
+	.tab-btn.active {
+		color: #0066cc;
+		border-bottom-color: #0066cc;
+	}
+
+	.tab-btn:hover:not(.active) {
+		color: #333;
 	}
 
 	.server-select {

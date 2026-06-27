@@ -2,27 +2,8 @@ import { error, json } from '@sveltejs/kit';
 import type { Client } from 'ssh2';
 import { connectSsh, exec } from '$lib/server/ec2-runner';
 import { getPgServer } from '$lib/server/services/pg-servers';
-import type { PgServer } from '$lib/types';
+import { buildSshTarget } from '$lib/server/preset-benchmark';
 import type { RequestHandler } from './$types';
-
-function buildSshTarget(server: PgServer) {
-	if (!server.ssh_enabled) throw error(400, 'SSH is not enabled for this server');
-	if (!server.ssh_user) throw error(400, 'SSH user is required');
-	if (!server.ssh_private_key) throw error(400, 'SSH private key is required');
-
-	return {
-		id: server.id,
-		name: server.name,
-		host: server.ssh_host || server.host,
-		user: server.ssh_user,
-		port: server.ssh_port,
-		private_key: server.ssh_private_key,
-		remote_dir: '',
-		log_dir: '',
-		cli_log_dir: '/tmp/gocli-logs',
-		vpc: server.vpc
-	};
-}
 
 export const GET: RequestHandler = async ({ url }) => {
 	const pgServerId = Number(url.searchParams.get('pg_server_id'));
