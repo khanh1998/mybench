@@ -16,6 +16,7 @@ export interface PerfInspectResult {
 	perf_cgroup: string;
 	perf_events: string;
 	needs_custom_slice: boolean;
+	pg_dbgsym_ok: boolean;
 	warning: string;
 	error: string;
 }
@@ -46,6 +47,7 @@ export function parsePerfInspectOutput(output: string): PerfInspectResult {
 		perf_cgroup: scope === 'postgres_cgroup' ? postgresCgroup : '',
 		perf_events: DEFAULT_PERF_EVENTS,
 		needs_custom_slice: getValue(lines, 'NEEDS_CUSTOM_SLICE') === '1',
+		pg_dbgsym_ok: getValue(lines, 'PG_DBGSYM_OK') === '1',
 		warning: getValue(lines, 'WARNING'),
 		error: getValue(lines, 'ERROR')
 	};
@@ -111,6 +113,20 @@ else
   WARNING="PostgreSQL is not systemd-managed or no active service was found; using system-wide perf"
 fi
 
+PG_DBGSYM_OK=0
+PG_BIN=$(pg_config --bindir 2>/dev/null)/postgres
+if [ -x "$PG_BIN" ]; then
+  # Use "file" rather than "readelf" — binutils (which provides readelf) is not
+  # installed by default on Ubuntu 24.04, while "file" is part of the base image.
+  BUILD_ID=$(file "$PG_BIN" 2>/dev/null | sed -n 's/.*BuildID\\[sha1\\]=\\([0-9a-f]*\\).*/\\1/p')
+  if [ -n "$BUILD_ID" ] && [ \${#BUILD_ID} -ge 3 ]; then
+    BUILD_ID_PREFIX=$(printf '%s' "$BUILD_ID" | cut -c1-2)
+    BUILD_ID_REST=$(printf '%s' "$BUILD_ID" | cut -c3-)
+    DEBUG_FILE="/usr/lib/debug/.build-id/$BUILD_ID_PREFIX/$BUILD_ID_REST.debug"
+    [ -f "$DEBUG_FILE" ] && PG_DBGSYM_OK=1
+  fi
+fi
+
 printf 'PERF_INSTALLED=%s\\n' "$PERF_INSTALLED"
 printf 'PERF_VERSION=%s\\n' "$PERF_VERSION"
 printf 'SUDO_PERF_OK=%s\\n' "$SUDO_PERF_OK"
@@ -120,6 +136,7 @@ printf 'POSTGRES_CGROUP=%s\\n' "$POSTGRES_CGROUP"
 printf 'CGROUP_PERF_OK=%s\\n' "$CGROUP_PERF_OK"
 printf 'SCOPE=%s\\n' "$SCOPE"
 printf 'NEEDS_CUSTOM_SLICE=%s\\n' "$NEEDS_CUSTOM_SLICE"
+printf 'PG_DBGSYM_OK=%s\\n' "$PG_DBGSYM_OK"
 printf 'WARNING=%s\\n' "$WARNING"
 printf 'ERROR=%s\\n' "$ERROR"
 `.trim();

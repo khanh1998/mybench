@@ -3,8 +3,7 @@ import { connectSsh, execStreaming } from '$lib/server/ec2-runner';
 import type { RequestHandler } from './$types';
 
 function buildConfigureCmd(
-	dbPrivateIp: string,
-	clientPrivateIp: string,
+	clientPrivateIp: string | null,
 	dbUser: string,
 	dbPass: string,
 	dbName: string,
@@ -59,12 +58,12 @@ fi
 ${tuneBlock}
 echo ""
 echo "==> Adding pg_hba.conf rules..."
-if grep -qF "${clientPrivateIp}/32" "$PG_HBA"; then
+${clientPrivateIp ? `if grep -qF "${clientPrivateIp}/32" "$PG_HBA"; then
   echo "Client VPC rule already present, skipping."
 else
   echo "host    all    all    ${clientPrivateIp}/32    scram-sha-256" | sudo tee -a "$PG_HBA"
   echo "Client VPC rule added (${clientPrivateIp}/32)."
-fi
+fi` : 'echo "No client VPC IP given, relying on public rule below."'}
 if grep -qF "0.0.0.0/0" "$PG_HBA"; then
   echo "Public access rule already present, skipping."
 else
@@ -91,7 +90,7 @@ echo "Statistics settings applied."
 echo ""
 echo "==> Configuring UFW: ensuring SSH stays open, then allowing port 5432..."
 sudo ufw allow ssh comment 'SSH access'
-sudo ufw allow from ${clientPrivateIp} to any port 5432 comment 'mybench client VPC'
+${clientPrivateIp ? `sudo ufw allow from ${clientPrivateIp} to any port 5432 comment 'mybench client VPC'` : ''}
 sudo ufw allow 5432/tcp comment 'mybench public'
 sudo ufw --force enable
 sudo ufw status
@@ -121,16 +120,16 @@ echo "==> Configuration complete!"
 /**
  * POST /api/onboard/configure-pg
  * Auto-configures PostgreSQL on the DB droplet. Streams output as SSE.
- * Body: { host, user, private_key, db_private_ip, client_private_ip, db_user, db_pass, db_name }
+ * Body: { host, user, private_key, client_private_ip?, db_user, db_pass, db_name }
+ * client_private_ip is optional — when omitted, only the public (password-protected)
+ * pg_hba/ufw rules are written, skipping the client-specific allow rule.
  */
 export const POST: RequestHandler = async ({ request }) => {
 	const body = await request.json();
-	const { host, user, private_key, db_private_ip, client_private_ip, db_user, db_pass, db_name, tune_config,
+	const { host, user, private_key, client_private_ip, db_user, db_pass, db_name, tune_config,
 		track_io_timing, track_wal_io_timing, track_activities, track_counts, track_functions, track_planning } = body;
 	if (!host) throw error(400, 'host is required');
 	if (!private_key) throw error(400, 'private_key is required');
-	if (!db_private_ip) throw error(400, 'db_private_ip is required');
-	if (!client_private_ip) throw error(400, 'client_private_ip is required');
 	if (!db_pass) throw error(400, 'db_pass is required');
 
 	const server = { id: 0, name: '', host, user: user ?? 'root', port: 22, private_key, remote_dir: '~', log_dir: '/tmp', cli_log_dir: '/tmp/gocli-logs', vpc: '' };
@@ -142,7 +141,7 @@ export const POST: RequestHandler = async ({ request }) => {
 		trackFunctions: track_functions === true,
 		trackPlanning: track_planning === true
 	};
-	const cmd = buildConfigureCmd(db_private_ip, client_private_ip, db_user ?? 'mybench', db_pass, db_name ?? 'mybench', tune_config ?? null, statsSettings);
+	const cmd = buildConfigureCmd(client_private_ip ?? null, db_user ?? 'mybench', db_pass, db_name ?? 'mybench', tune_config ?? null, statsSettings);
 
 	const stream = new ReadableStream({
 		async start(controller) {
