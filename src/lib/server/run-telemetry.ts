@@ -3990,6 +3990,8 @@ const HOST_COL_LABELS: Record<string, string> = {
 	pgfault: 'Minor faults/s', pgmajfault: 'Major faults/s',
 	pswpin: 'Swap in/s', pswpout: 'Swap out/s',
 	nr_dirty: 'Dirty pages', nr_writeback: 'Writeback pages', nr_shmem: 'Shared pages',
+	nr_dirtied: 'Pages dirtied/s', nr_written: 'Pages written back/s',
+	nr_dirty_threshold: 'Dirty threshold (pages)', nr_dirty_background_threshold: 'Background threshold (pages)',
 	pgsteal_kswapd: 'kswapd reclaim/s', pgsteal_direct: 'Direct reclaim/s',
 	pgscan_kswapd: 'kswapd scanned/s', pgscan_direct: 'Direct scanned/s',
 	allocstall_normal: 'Normal alloc stalls/s', allocstall_movable: 'Movable alloc stalls/s',
@@ -4084,6 +4086,10 @@ const HOST_COL_DESCS: Record<string, string> = {
 	pswpout: 'Pages swapped out to swap device per second',
 	nr_dirty: 'Dirty pages in page cache awaiting writeback',
 	nr_writeback: 'Pages currently being written back to disk',
+	nr_dirtied: 'Pages dirtied per second (cumulative nr_dirtied counter) — how fast writers produce dirty page cache, including pages re-dirtied after writeback',
+	nr_written: 'Pages written back to disk per second (cumulative nr_written counter) — how fast the kernel flushes dirty pages',
+	nr_dirty_threshold: 'Dirty pages at which writers are throttled and forced into synchronous writeback (vm.dirty_ratio / dirty_bytes, computed by the kernel)',
+	nr_dirty_background_threshold: 'Dirty pages at which background flusher threads start writeback (vm.dirty_background_ratio / dirty_background_bytes, computed by the kernel)',
 	nr_shmem: 'Pages in shared memory / tmpfs',
 	pgsteal_kswapd: 'Pages reclaimed by kswapd (background) per second',
 	pgsteal_direct: 'Pages reclaimed by allocator directly (synchronous) per second',
@@ -4314,6 +4320,12 @@ function buildHostSystemSection(db: Database.Database, runId: number, runStartMs
 		const g4 = buildInstantGroup('dirty_pages', 'Dirty Pages', 'Dirty / Writeback Pages', procVmstatRows,
 			['nr_dirty', 'nr_writeback', 'nr_shmem'], 'count', runStartMs, 1, L, D);
 		pushChartMetric(chartMetrics, withChartGroup(g4, 'Memory'));
+		const dirtyFlow = buildRateGroup('dirty_flow', 'Dirty Flow', 'Page Dirtying vs Writeback /s', procVmstatRows,
+			['nr_dirtied', 'nr_written'], 'count', runStartMs, 1, L, D);
+		pushChartMetric(chartMetrics, withChartGroup(dirtyFlow, 'Memory'));
+		const dirtyThresholds = buildInstantGroup('dirty_thresholds', 'Dirty Thresholds', 'Dirty Pages vs Kernel Thresholds', procVmstatRows,
+			['nr_dirty', 'nr_dirty_background_threshold', 'nr_dirty_threshold'], 'count', runStartMs, 1, L, D);
+		pushChartMetric(chartMetrics, withChartGroup(dirtyThresholds, 'Memory'));
 		const g5 = buildRateGroup('page_reclaim', 'Page Reclaim', 'Page Reclaim /s', procVmstatRows,
 			['pgsteal_kswapd', 'pgsteal_direct'], 'count', runStartMs, 1, L, D);
 		pushChartMetric(chartMetrics, withChartGroup(g5, 'Kernel Pressure'));
@@ -4387,6 +4399,18 @@ function buildHostSystemSection(db: Database.Database, runId: number, runStartMs
 				},
 			], 'bytes', runStartMs);
 		pushChartMetric(chartMetrics, withChartGroup(gReqSize, 'Block Devices', dev));
+		const gTime = buildRateGroup(`disk_${dev}_time`, 'I/O Time', `Disk ${dev} — I/O Time (ms/s)`, devRows,
+			['rd_ticks', 'wr_ticks', 'io_ticks', 'time_in_queue', 'dc_ticks', 'fl_ticks'], 'duration_ms', runStartMs, 1,
+			{ rd_ticks: 'Reading ms/s', wr_ticks: 'Writing ms/s', io_ticks: 'Doing I/O ms/s', time_in_queue: 'Weighted doing I/O ms/s', dc_ticks: 'Discarding ms/s', fl_ticks: 'Flushing ms/s' },
+			{
+				rd_ticks: 'Milliseconds spent reading per second (time_reading_ms); summed across in-flight reads, so can exceed 1000',
+				wr_ticks: 'Milliseconds spent writing per second (time_writing_ms); summed across in-flight writes, so can exceed 1000',
+				io_ticks: 'Milliseconds the device had at least one I/O in flight per second (time_doing_io_ms); max 1000',
+				time_in_queue: 'Weighted milliseconds doing I/O per second (weighted_time_doing_io_ms): each I/O in flight adds its own time, so this is queue depth × 1000',
+				dc_ticks: 'Milliseconds spent discarding (TRIM) per second (time_discarding_ms)',
+				fl_ticks: 'Milliseconds spent flushing (fsync) per second (time_flushing_ms)'
+			});
+		pushChartMetric(chartMetrics, withChartGroup(gTime, 'Block Devices', dev));
 		const g3 = buildInstantGroup(`disk_${dev}_queue`, 'Queue', `Disk ${dev} — In-flight I/Os`, devRows,
 			['in_flight'], 'count', runStartMs, 1, L, D);
 		pushChartMetric(chartMetrics, withChartGroup(g3, 'Block Devices', dev));
@@ -4403,6 +4427,14 @@ function buildHostSystemSection(db: Database.Database, runId: number, runStartMs
 			], 'count', runStartMs);
 		const g4b_queue = buildHostDerivedRateGroup(`disk_${dev}_occupancy`, 'Queue Depth', `Disk ${dev} — Avg Queue Occupancy`,
 			devRows, [
+				{
+					label: 'Avg queue depth (all I/O)',
+					description: 'Average number of I/Os in flight over the interval (time_in_queue / elapsed_ms) — the weighted time doing I/O divided by wall-clock time; the same quantity iostat reports as aqu-sz',
+					valueFn: (cur, prev, dt) => {
+						const dTicks = Number(cur.time_in_queue) - Number(prev.time_in_queue);
+						return dTicks / (dt * 1000);
+					},
+				},
 				{
 					label: 'Avg concurrent reads',
 					description: 'Average number of read I/Os in flight simultaneously (rd_ticks / elapsed_ms). Greater than 1 means parallel reads.',
