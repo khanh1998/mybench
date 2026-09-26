@@ -106,13 +106,16 @@ export const load: PageServerLoad = ({ params }) => {
 		.prepare(
 			`SELECT br.id, br.name, br.status, br.tps, br.latency_avg_ms, br.latency_stddev_ms, br.transactions,
 			        br.profile_name, br.run_params, br.started_at, br.bench_started_at, br.post_started_at, br.finished_at,
-			        br.host_config, br.runner_spec, br.db_spec, br.db_pg_config, br.series_id,
+			        br.host_config, br.runner_spec, br.db_spec, br.db_pg_config,
+			        br.series_id, bs.name AS series_name, bs.suite_id, ds.name AS suite_name,
 			        rs.type AS bench_step_type,
 			        rs.pgbench_summary_json,
 			        rs.sysbench_summary_json,
 			        substr(rs.stdout, 1, 5000) AS bench_stdout,
 			        substr(rs.stderr, 1, 2000) AS bench_stderr
 			 FROM benchmark_runs br
+			 LEFT JOIN benchmark_series bs ON bs.id = br.series_id
+			 LEFT JOIN decision_suites ds ON ds.id = bs.suite_id
 			 LEFT JOIN run_step_results rs ON rs.id = (
 			   SELECT id
 			   FROM run_step_results
@@ -122,7 +125,12 @@ export const load: PageServerLoad = ({ params }) => {
 			 )
 			 WHERE br.design_id = ? AND br.status = 'completed' ORDER BY br.id DESC`
 		)
-		.all(id) as (CompareRunRow & { series_id: number | null })[];
+		.all(id) as (CompareRunRow & {
+			series_id: number | null;
+			series_name: string | null;
+			suite_id: number | null;
+			suite_name: string | null;
+		})[];
 	const perfByRun = loadPerfByRun(db, rawRuns.map((run) => run.id));
 
 	const runs = rawRuns.map((run) => {
@@ -192,8 +200,14 @@ export const load: PageServerLoad = ({ params }) => {
 		: [];
 
 	const seriesList = db
-		.prepare('SELECT id, name FROM benchmark_series WHERE design_id = ? ORDER BY id')
-		.all(id) as { id: number; name: string }[];
+		.prepare(
+			`SELECT bs.id, bs.name, bs.suite_id, ds.name AS suite_name
+			   FROM benchmark_series bs
+			   LEFT JOIN decision_suites ds ON ds.id = bs.suite_id
+			  WHERE bs.design_id = ?
+			  ORDER BY bs.id`
+		)
+		.all(id) as { id: number; name: string; suite_id: number | null; suite_name: string | null }[];
 
 	return { design, decision, runs, metrics, seriesList };
 };

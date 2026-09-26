@@ -4,6 +4,7 @@
   import { goto } from '$app/navigation';
   import BenchmarkCompareContent from '$lib/BenchmarkCompareContent.svelte';
   import type { CompareRunInfo } from '$lib/compare/types';
+  import { groupRunsByLineage } from '$lib/compare/lineage';
   import { fmtTs } from '$lib/utils';
   import type { PageData } from './$types';
 
@@ -52,6 +53,19 @@
   function getDesignGroup(designId: number | null): DesignGroup | undefined {
     if (designId === null) return undefined;
     return designGroups.find((d) => d.id === designId);
+  }
+
+  /**
+   * Runs of a design grouped by suite. Suite-generated runs are all named after
+   * their profile (e.g. "c32"), so without the suite heading the options are
+   * indistinguishable apart from their timestamp.
+   */
+  function runOptionGroups(designId: number | null) {
+    return groupRunsByLineage(getDesignGroup(designId)?.runs ?? []);
+  }
+
+  function runOptionLabel(run: CompareRunInfo): string {
+    return `${run.name || `Run #${run.id}`} · ${fmtTs(run.started_at)}`;
   }
 
   function syncUrl() {
@@ -202,13 +216,28 @@
               onchange={(e) => handleRunChange(index, Number((e.currentTarget as HTMLSelectElement).value) || null)}
             >
               <option value="">Select run</option>
-              {#each getDesignGroup(slot.designId)?.runs ?? [] as run}
-                <option
-                  value={run.id}
-                  disabled={selectedRunIds.includes(run.id) && slot.runId !== run.id}
-                >
-                  {run.name || `Run #${run.id}`} · {fmtTs(run.started_at)}
-                </option>
+              {#each runOptionGroups(slot.designId) as group}
+                {#if group.label}
+                  <optgroup label={group.label}>
+                    {#each group.runs as run}
+                      <option
+                        value={run.id}
+                        disabled={selectedRunIds.includes(run.id) && slot.runId !== run.id}
+                      >
+                        {runOptionLabel(run)}
+                      </option>
+                    {/each}
+                  </optgroup>
+                {:else}
+                  {#each group.runs as run}
+                    <option
+                      value={run.id}
+                      disabled={selectedRunIds.includes(run.id) && slot.runId !== run.id}
+                    >
+                      {runOptionLabel(run)}
+                    </option>
+                  {/each}
+                {/if}
               {/each}
             </select>
           </div>

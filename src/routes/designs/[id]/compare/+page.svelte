@@ -5,6 +5,7 @@
   import BenchmarkCompareContent from '$lib/BenchmarkCompareContent.svelte';
   import { RUN_COMPARE_COLORS } from '$lib/compare/colors';
   import type { CompareRunInfo } from '$lib/compare/types';
+  import { runLineageBadges } from '$lib/compare/lineage';
   import { fmtTs } from '$lib/utils';
   import type { PageData } from './$types';
 
@@ -12,9 +13,31 @@
 
   const designId = $derived(Number($page.params.id));
 
-  interface SeriesInfo { id: number; name: string; }
-  const allRuns = $derived((data.runs ?? []) as (CompareRunInfo & { series_id: number | null })[]);
+  interface SeriesInfo { id: number; name: string; suite_id: number | null; suite_name: string | null; }
+  const allRuns = $derived((data.runs ?? []) as CompareRunInfo[]);
   const seriesList = $derived((data.seriesList ?? []) as SeriesInfo[]);
+
+  /** Suite/series label per run, deduplicated across runs of this design. */
+  const lineageBadges = $derived(runLineageBadges(allRuns));
+
+  /** A suite names each of its series after the design, so the bare series names
+   * repeat across suites — qualify them with the suite that produced them, and
+   * fall back to the suite id for the suite names that themselves collide. */
+  const seriesLabels = $derived.by(() => {
+    const base = new Map<number, string>();
+    for (const s of seriesList) {
+      const name = s.name || `#${s.id}`;
+      base.set(s.id, s.suite_id ? `${name} — ${s.suite_name || `Suite #${s.suite_id}`}` : name);
+    }
+    const counts = new Map<string, number>();
+    for (const label of base.values()) counts.set(label, (counts.get(label) ?? 0) + 1);
+    const labels = new Map<number, string>();
+    for (const s of seriesList) {
+      const label = base.get(s.id)!;
+      labels.set(s.id, (counts.get(label) ?? 0) > 1 ? `${label} #${s.suite_id ?? s.id}` : label);
+    }
+    return labels;
+  });
   let seriesFilter = $state<'all' | 'none' | number>('all');
   const visibleRuns = $derived(
     seriesFilter === 'all' ? allRuns :
@@ -78,7 +101,7 @@
         <option value="all">All runs</option>
         <option value="none">No series</option>
         {#each seriesList as s}
-          <option value={s.id}>Series: {s.name || '#' + s.id}</option>
+          <option value={s.id}>Series: {seriesLabels.get(s.id)}</option>
         {/each}
       </select>
     {/if}
@@ -106,6 +129,9 @@
           <span class="run-chip-id" style={selected ? `color:${color};font-weight:700` : ''}>
             {run.name || '#' + run.id}
           </span>
+          {#if lineageBadges.get(run.id)}
+            <span class="run-chip-lineage" title={lineageBadges.get(run.id)}>{lineageBadges.get(run.id)}</span>
+          {/if}
           <span class="run-chip-date">{fmtTs(run.started_at)}</span>
         </label>
       {/each}
@@ -206,6 +232,17 @@
 
   .run-chip-id {
     font-size: 13px;
+  }
+
+  .run-chip-lineage {
+    font-size: 11px;
+    color: #555;
+    background: #f0f0f0;
+    border-radius: 4px;
+    padding: 1px 6px;
+    max-width: 220px;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .run-chip-date {

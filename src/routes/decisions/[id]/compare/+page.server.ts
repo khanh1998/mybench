@@ -86,6 +86,10 @@ export const load: PageServerLoad = ({ params }) => {
     db_pg_config: string | null;
     design_id: number;
     design_name: string | null;
+    series_id: number | null;
+    series_name: string | null;
+    suite_id: number | null;
+    suite_name: string | null;
     bench_step_type: string | null;
     bench_step_name: string | null;
     pgbench_summary_json: string | null;
@@ -111,6 +115,7 @@ export const load: PageServerLoad = ({ params }) => {
       `SELECT br.id, br.name, br.status, br.tps, br.latency_avg_ms, br.latency_stddev_ms, br.transactions,
               br.profile_name, br.run_params, br.started_at, br.bench_started_at, br.post_started_at, br.finished_at,
               br.host_config, br.runner_spec, br.db_spec, br.db_pg_config, d.id AS design_id, d.name AS design_name,
+              br.series_id, bs.name AS series_name, bs.suite_id, ds.name AS suite_name,
               rs.type AS bench_step_type,
               rs.name AS bench_step_name,
               rs.pgbench_summary_json,
@@ -120,6 +125,8 @@ export const load: PageServerLoad = ({ params }) => {
               substr(rs.stderr, 1, 2000) AS bench_stderr
          FROM benchmark_runs br
          JOIN designs d ON d.id = br.design_id
+         LEFT JOIN benchmark_series bs ON bs.id = br.series_id
+         LEFT JOIN decision_suites ds ON ds.id = bs.suite_id
          LEFT JOIN run_step_results rs ON rs.id = (
            SELECT id
            FROM run_step_results
