@@ -1463,6 +1463,15 @@
   let waitsView     = $state<'detail' | 'broad'>('detail');
   let waitsSort     = $state<'count' | 'aas'>('count');
   let waitsLineMode  = $state<'common' | 'all'>('common');
+  // Shared by the table headers and the chart toggle so both views describe metrics identically.
+  const WAIT_METRIC_HELP = {
+    count:       'Count = samples\nTimes a backend was sampled in this state, summed over all snapshots.',
+    aas:         'AAS = Count ÷ snapshots\nAverage number of active sessions in this state at any instant. Rows add up to total AAS.',
+    pct:         'AAS % = Count ÷ total Count × 100\nShare of all active-session samples spent in this state.',
+    freq:        'Freq = snapshots with event ÷ all snapshots × 100\nHow often the event shows up at all. High = steady, low = bursty.',
+    concurrency: 'Concurrency = Count ÷ snapshots with event\nAverage sessions in this state when it occurs.',
+    load:        'Load = AAS ÷ vCPU\nBar width. 100% = this state alone kept every vCPU busy on average.',
+  } as const;
   let waitsLineValue = $state<'count' | 'aas' | 'pct' | 'freq' | 'concurrency'>('count');
   let aasGranularity = $state<'detail' | 'broad'>('detail');
   let waitsTab       = $state<'list' | 'events-by-run'>('events-by-run');
@@ -1950,7 +1959,7 @@
     {/if}
   </div>
   <div class="waits-header-row">
-    <p class="section-desc" style="margin:0">Most frequent wait events across active sessions. AAS = avg active sessions (bar scaled to stored vCPU count).{waitsView === 'broad' && (!isCompare || waitsTab === 'list') ? ' Broad mode groups by wait type.' : ''}</p>
+    <p class="section-desc" style="margin:0">Wait events sampled from active sessions (<code>pg_stat_activity</code>, <code>state = 'active'</code>). Hover a column header for its formula. <b>CPU · running</b> = active with no wait event (on a CPU or queued for one).{waitsView === 'broad' && (!isCompare || waitsTab === 'list') ? ' Broad mode groups by wait type.' : ''}</p>
   </div>
   {#if !isCompare || waitsTab === 'list'}
     <div class="waits-grid" style="margin-top:10px">
@@ -1994,12 +2003,12 @@
                 <tr>
                   <th>Wait Type</th>
                   {#if waitsView === 'detail'}<th>Wait Event</th>{/if}
-                  <th style="text-align:right;cursor:pointer;user-select:none" onclick={() => { waitsSort = 'count'; waitsPage = 0; }} title="Total times this wait event was sampled across all snapshots in the observation window.">Count{waitsSort === 'count' ? ' ▾' : ''}</th>
-                  <th style="text-align:right" title="Share of total AAS attributed to this event. Computed as this event's occurrences ÷ all active-session occurrences. Equivalent to this event's AAS ÷ total AAS.">AAS %</th>
-                  <th style="text-align:right;cursor:pointer;user-select:none" onclick={() => { waitsSort = 'aas'; waitsPage = 0; }} title="Average Active Sessions (Oracle AWR-style): occurrences ÷ total snapshots in the window. Measures the average load contribution over the entire observation period. Values are additive — summing all events gives total AAS.">AAS{waitsSort === 'aas' ? ' ▾' : ''}</th>
-                  <th style="text-align:right" title="Frequency: fraction of snapshots in which this event was observed at least once. High frequency = steady background pressure; low frequency = bursty or intermittent event.">Freq</th>
-                  <th style="text-align:right" title="Avg Concurrency: average number of sessions simultaneously in this wait state when the event is occurring (occurrences ÷ snapshots where it appeared). High concurrency + low frequency = bursty pile-up; low concurrency + high frequency = steady trickle.">Concurrency</th>
-                  <th style="width:100px" title="Load bar: this event's AAS scaled against the run's vCPU count ({vcpuCount}). A full bar means this single event consumed all available CPU capacity on average.">Load (AAS/{vcpuCount} vCPU)</th>
+                  <th style="text-align:right;cursor:pointer;user-select:none" onclick={() => { waitsSort = 'count'; waitsPage = 0; }} title={WAIT_METRIC_HELP.count}>Count{waitsSort === 'count' ? ' ▾' : ''}</th>
+                  <th style="text-align:right" title={WAIT_METRIC_HELP.pct}>AAS %</th>
+                  <th style="text-align:right;cursor:pointer;user-select:none" onclick={() => { waitsSort = 'aas'; waitsPage = 0; }} title={WAIT_METRIC_HELP.aas}>AAS{waitsSort === 'aas' ? ' ▾' : ''}</th>
+                  <th style="text-align:right" title={WAIT_METRIC_HELP.freq}>Freq</th>
+                  <th style="text-align:right" title={WAIT_METRIC_HELP.concurrency}>Concurrency</th>
+                  <th style="width:100px" title={WAIT_METRIC_HELP.load}>Load (AAS/{vcpuCount} vCPU)</th>
                 </tr>
               </thead>
               <tbody>
@@ -2051,11 +2060,11 @@
           <button class:active={waitsLineMode === 'all'} onclick={() => waitsLineMode = 'all'}>All</button>
         </div>
         <div class="mode-toggle">
-          <button class:active={waitsLineValue === 'count'} onclick={() => waitsLineValue = 'count'} title="Raw sample count — total times each event was observed across all snapshots">Count</button>
-          <button class:active={waitsLineValue === 'aas'} onclick={() => waitsLineValue = 'aas'} title="Average Active Sessions (Oracle-style): occurrences ÷ total snapshots. Additive — bars sum to total AAS.">AAS</button>
-          <button class:active={waitsLineValue === 'pct'} onclick={() => waitsLineValue = 'pct'} title="Share of total AAS: this event's AAS as a percentage of the overall AAS">AAS %</button>
-          <button class:active={waitsLineValue === 'freq'} onclick={() => waitsLineValue = 'freq'} title="Frequency: percentage of snapshots in which this event was observed">Freq %</button>
-          <button class:active={waitsLineValue === 'concurrency'} onclick={() => waitsLineValue = 'concurrency'} title="Avg Concurrency: average number of simultaneous sessions in this wait state when the event is occurring (occurrences ÷ snapshots where it appeared)">Concurrency</button>
+          <button class:active={waitsLineValue === 'count'} onclick={() => waitsLineValue = 'count'} title={WAIT_METRIC_HELP.count}>Count</button>
+          <button class:active={waitsLineValue === 'aas'} onclick={() => waitsLineValue = 'aas'} title={WAIT_METRIC_HELP.aas}>AAS</button>
+          <button class:active={waitsLineValue === 'pct'} onclick={() => waitsLineValue = 'pct'} title={WAIT_METRIC_HELP.pct}>AAS %</button>
+          <button class:active={waitsLineValue === 'freq'} onclick={() => waitsLineValue = 'freq'} title={WAIT_METRIC_HELP.freq}>Freq %</button>
+          <button class:active={waitsLineValue === 'concurrency'} onclick={() => waitsLineValue = 'concurrency'} title={WAIT_METRIC_HELP.concurrency}>Concurrency</button>
         </div>
       </div>
       {#if waitBarGroups.every(g => g.segments.length === 0)}
