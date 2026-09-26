@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { sseStream } from '$lib/sseStream';
+
 	// ── Types ────────────────────────────────────────────────────────────────────
 	interface ConnectResult {
 		ok: boolean;
@@ -21,6 +23,7 @@
 		perf_cgroup: string;
 		perf_events: string;
 		needs_custom_slice: boolean;
+		pg_dbgsym_ok: boolean;
 		warning: string;
 		error: string;
 	}
@@ -52,6 +55,8 @@
 	}
 
 	// ── State ────────────────────────────────────────────────────────────────────
+	let mode = $state<'full' | 'pg-only'>('full');
+	const pgOnly = $derived(mode === 'pg-only');
 	let currentStep = $state(1);
 
 	// Step 1
@@ -100,9 +105,49 @@
 	let registering = $state(false);
 	let registerResult = $state<RegisterResult | null>(null);
 
+	// PG-only mode: existing runners
+	interface Ec2ServerRef { id: number; name: string; host: string; vpc: string; spec: string; private_key: string; user: string }
+	let existingRunners = $state<Ec2ServerRef[]>([]);
+	let selectedRunnerId = $state<number | null>(null);
+	let loadingRunners = $state(false);
+	let runnerPrivateIp = $state('');
+	let detectingRunnerIp = $state(false);
+	const selectedRunner = $derived(existingRunners.find(r => r.id === selectedRunnerId) ?? null);
+
+	async function loadRunners() {
+		loadingRunners = true;
+		try {
+			const res = await fetch('/api/ec2');
+			existingRunners = await res.json();
+			if (existingRunners.length > 0 && !selectedRunnerId) {
+				selectedRunnerId = existingRunners[0].id;
+			}
+		} finally {
+			loadingRunners = false;
+		}
+	}
+
+	async function detectRunnerPrivateIp() {
+		if (!selectedRunner) return;
+		detectingRunnerIp = true;
+		try {
+			const res = await fetch('/api/onboard/connect', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ host: selectedRunner.host, user: selectedRunner.user, private_key: selectedRunner.private_key })
+			});
+			const data: ConnectResult = await res.json();
+			if (data.ok && data.private_ip) runnerPrivateIp = data.private_ip;
+		} finally {
+			detectingRunnerIp = false;
+		}
+	}
+
 	// ── Derived ──────────────────────────────────────────────────────────────────
 	const step1Done = $derived(sshKey.trim().length > 0);
-	const step2Done = $derived(!!(clientInfo?.ok && dbInfo?.ok && clientPrivateIp.trim() && dbPrivateIp.trim()));
+	const step2Done = $derived(pgOnly
+		? !!(dbInfo?.ok && dbPrivateIp.trim())
+		: !!(clientInfo?.ok && dbInfo?.ok && clientPrivateIp.trim() && dbPrivateIp.trim()));
 	// Two different public IPs = two different machines; allow parallel installs per host
 	const sameHost = $derived(clientHost.trim() !== '' && clientHost.trim() === dbHost.trim());
 	function isInstallBlocked(key: string): boolean {
@@ -111,43 +156,20 @@
 		return [...installing].some(k => k.startsWith(prefix + ':'));
 	}
 	const allInstallsDone = $derived(() => {
-		const ct = clientInspect?.tools;
 		const dt = dbInspect?.tools;
-		if (!ct || !dt) return false;
+		if (!dt) return false;
+		const dbTools = ['postgresql', 'sysbench'];
+		const dbOk = dbTools.every(t => dt[t]?.ok || installResults[`db:${t}`] === true);
+		if (pgOnly) return dbOk;
+		const ct = clientInspect?.tools;
+		if (!ct) return false;
 		const clientTools = ['mybench-runner', 'pgbench', 'sysbench'];
-		const dbTools = ['postgresql', 'sysbench']; // perf is optional, not required
-		return (
-			clientTools.every(t => ct[t]?.ok || installResults[`client:${t}`] === true) &&
-			dbTools.every(t => dt[t]?.ok || installResults[`db:${t}`] === true)
-		);
+		return clientTools.every(t => ct[t]?.ok || installResults[`client:${t}`] === true) && dbOk;
 	});
 	const step3Done = $derived(allInstallsDone());
 	const step4Done = $derived(configureOk === true);
 	const step5Done = $derived(registerResult?.ok === true);
-
-	function sseStream(url: string, body: object, onLine: (l: string) => void): Promise<boolean> {
-		return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-			.then(async (res) => {
-				const reader = res.body!.getReader();
-				const dec = new TextDecoder();
-				let buf = '';
-				while (true) {
-					const { done, value } = await reader.read();
-					if (done) break;
-					buf += dec.decode(value, { stream: true });
-					const parts = buf.split('\n\n');
-					buf = parts.pop() ?? '';
-					for (const part of parts) {
-						const dataLine = part.split('\n').find(l => l.startsWith('data: '));
-						if (!dataLine) continue;
-						const data = JSON.parse(dataLine.slice(6));
-						if (data.line !== undefined) onLine(data.line);
-						if (data.done) return data.ok as boolean;
-					}
-				}
-				return false;
-			});
-	}
+	const configureClientIp = $derived(pgOnly ? runnerPrivateIp : clientPrivateIp);
 
 	async function connectDroplet(role: 'client' | 'db') {
 		const host = role === 'client' ? clientHost : dbHost;
@@ -188,6 +210,18 @@
 	}
 
 	async function runInspect() {
+		if (pgOnly) {
+			if (!dbInfo?.ok) return;
+			inspecting = true;
+			dbInspect = null;
+			try {
+				dbInspect = await fetch('/api/onboard/inspect', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ host: dbHost, user: sshUser, private_key: sshKey, role: 'db' }) }).then(r => r.json());
+			} finally {
+				inspecting = false;
+			}
+			return;
+		}
 		if (!clientInfo?.ok || !dbInfo?.ok) return;
 		inspecting = true;
 		clientInspect = null; dbInspect = null;
@@ -293,6 +327,23 @@
 		}
 	}
 
+	async function installPgDbgsym() {
+		const key = 'db:pg-dbgsym';
+		installing = new Set([...installing, key]);
+		installOutputs[key] = '';
+		installResults[key] = false;
+		try {
+			const ok = await sseStream('/api/onboard/install-pg-dbgsym', { host: dbHost, user: sshUser, private_key: sshKey },
+				(line) => { installOutputs[key] += line + '\n'; });
+			installResults[key] = ok;
+			const res = await fetch('/api/onboard/inspect', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ host: dbHost, user: sshUser, private_key: sshKey, role: 'db' }) });
+			dbInspect = await res.json();
+		} finally {
+			installing = new Set([...installing].filter(k => k !== key));
+		}
+	}
+
 	async function configurePerfScope() {
 		const key = 'db:perf-scope';
 		installing = new Set([...installing, key]);
@@ -311,13 +362,14 @@
 	}
 
 	async function runConfigure() {
-		if (!clientPrivateIp.trim() || !dbPrivateIp.trim() || !pgPass.trim()) return;
+		const cip = configureClientIp.trim();
+		if (!cip || !dbPrivateIp.trim() || !pgPass.trim()) return;
 		configuring = true; configureOutput = ''; configureOk = null; configureDone = false;
 		try {
 			const ok = await sseStream('/api/onboard/configure-pg', {
 				host: dbHost, user: sshUser, private_key: sshKey,
 				db_private_ip: dbPrivateIp.trim(),
-				client_private_ip: clientPrivateIp.trim(),
+				client_private_ip: cip,
 				db_user: pgUser, db_pass: pgPass, db_name: pgDb,
 				tune_config: tuneConfig.trim() || null,
 				track_io_timing: trackIoTiming,
@@ -337,17 +389,30 @@
 	async function runRegister() {
 		registering = true; registerResult = null;
 		try {
-			const res = await fetch('/api/onboard/register', {
-				method: 'POST', headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					cluster_name: clusterName,
-					client: { host: clientHost, user: sshUser, private_key: sshKey, private_ip: clientPrivateIp.trim(), vpc: vpcTag, spec: clientSpec.trim() },
-					db: { public_host: dbHost, private_ip: dbPrivateIp.trim(), user: sshUser, private_key: sshKey, vpc: vpcTag, spec: dbSpec.trim(), pg_config: tuneConfig.trim() },
-					pg_config: { db_user: pgUser, db_pass: pgPass, db_name: pgDb },
-					perf: dbInspect?.perf ?? null
-				})
-			});
-			registerResult = await res.json();
+			if (pgOnly) {
+				const res = await fetch('/api/onboard/register-pg', {
+					method: 'POST', headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+						cluster_name: clusterName,
+						db: { public_host: dbHost, private_ip: dbPrivateIp.trim(), user: sshUser, private_key: sshKey, vpc: selectedRunner?.vpc ?? vpcTag, spec: dbSpec.trim(), pg_config: tuneConfig.trim() },
+						pg_config: { db_user: pgUser, db_pass: pgPass, db_name: pgDb },
+						perf: dbInspect?.perf ?? null
+					})
+				});
+				registerResult = await res.json();
+			} else {
+				const res = await fetch('/api/onboard/register', {
+					method: 'POST', headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+						cluster_name: clusterName,
+						client: { host: clientHost, user: sshUser, private_key: sshKey, private_ip: clientPrivateIp.trim(), vpc: vpcTag, spec: clientSpec.trim() },
+						db: { public_host: dbHost, private_ip: dbPrivateIp.trim(), user: sshUser, private_key: sshKey, vpc: vpcTag, spec: dbSpec.trim(), pg_config: tuneConfig.trim() },
+						pg_config: { db_user: pgUser, db_pass: pgPass, db_name: pgDb },
+						perf: dbInspect?.perf ?? null
+					})
+				});
+				registerResult = await res.json();
+			}
 		} finally {
 			registering = false;
 		}
@@ -389,7 +454,11 @@
 
 <div class="wizard">
 	<h1>Onboard New Cluster</h1>
-	<p class="subtitle">Set up two DigitalOcean droplets: one for benchmarks, one for PostgreSQL.</p>
+	<div class="mode-selector">
+		<button class="mode-btn" class:active={mode === 'full'} onclick={() => { mode = 'full'; currentStep = 1; }}>Full Cluster</button>
+		<button class="mode-btn" class:active={mode === 'pg-only'} onclick={() => { mode = 'pg-only'; currentStep = 1; loadRunners(); }}>PostgreSQL Server Only</button>
+	</div>
+	<p class="subtitle">{pgOnly ? 'Set up a new PostgreSQL droplet and pair it with an existing runner.' : 'Set up two DigitalOcean droplets: one for benchmarks, one for PostgreSQL.'}</p>
 
 	<!-- ── Step 1: SSH Access ──────────────────────────────────────────────── -->
 	<div class="step" class:active={currentStep === 1} class:done={currentStep > 1}>
@@ -402,7 +471,7 @@
 		</div>
 		{#if currentStep === 1}
 		<div class="step-body">
-			<p class="hint">Paste the SSH private key that grants access to both droplets. This key stays in your browser — it is only sent to mybench server for SSH operations.</p>
+			<p class="hint">{pgOnly ? 'Paste the SSH private key for the new PostgreSQL droplet.' : 'Paste the SSH private key that grants access to both droplets.'} This key stays in your browser — it is only sent to mybench server for SSH operations.</p>
 			<div class="row" style="align-items:flex-start; gap:16px">
 				<div class="form-group" style="flex:0 0 120px">
 					<label for="ssh-user">SSH Username</label>
@@ -419,7 +488,7 @@
 					<button style="margin-top:6px; font-size:12px" onclick={() => document.getElementById('key-file-input')?.click()}>Upload key file</button>
 				</div>
 			</div>
-			<button class="primary" disabled={!step1Done} onclick={() => currentStep = 2}>Next: Connect Droplets →</button>
+			<button class="primary" disabled={!step1Done} onclick={() => currentStep = 2}>{pgOnly ? 'Next: Connect DB Droplet →' : 'Next: Connect Droplets →'}</button>
 		</div>
 		{/if}
 	</div>
@@ -430,15 +499,46 @@
 			onclick={() => { if (currentStep > 2) currentStep = 2; }}
 			onkeydown={(e) => { if (e.key === 'Enter' && currentStep > 2) currentStep = 2; }}>
 			<span class="step-num" class:step-done={currentStep > 2}>{currentStep > 2 ? '✓' : '2'}</span>
-			<span class="step-title">Connect Droplets</span>
+			<span class="step-title">{pgOnly ? 'Connect DB Droplet' : 'Connect Droplets'}</span>
 			{#if currentStep > 2}
-				<span class="step-summary">client: {clientHost} · db: {dbHost}</span>
+				<span class="step-summary">{pgOnly ? `db: ${dbHost}` : `client: ${clientHost} · db: ${dbHost}`}</span>
 			{/if}
 		</div>
 		{#if currentStep === 2}
 		<div class="step-body">
-			<p class="hint">Enter the public IPv4 of each droplet. mybench will SSH in and auto-detect the private IP — you can correct it if needed.</p>
-			<div class="droplet-grid">
+			<p class="hint">{pgOnly ? 'Enter the public IPv4 of the new DB droplet and select the existing runner it will pair with.' : 'Enter the public IPv4 of each droplet. mybench will SSH in and auto-detect the private IP — you can correct it if needed.'}</p>
+			{#if pgOnly}
+				<!-- Runner selector for PG-only mode -->
+				<div class="runner-selector">
+					<div class="form-group" style="flex:1; max-width:300px">
+						<label for="runner-select">Existing Runner</label>
+						{#if loadingRunners}
+							<span style="font-size:12px; color:#888">Loading runners…</span>
+						{:else if existingRunners.length === 0}
+							<span style="font-size:12px; color:#c00">No runners found — use Full Cluster mode instead.</span>
+						{:else}
+							<select id="runner-select" onchange={(e) => { selectedRunnerId = Number(e.currentTarget.value); runnerPrivateIp = ''; }}>
+								{#each existingRunners as r}
+									<option value={r.id} selected={r.id === selectedRunnerId}>{r.name} ({r.host})</option>
+								{/each}
+							</select>
+						{/if}
+					</div>
+					{#if selectedRunner}
+						<div class="form-group" style="flex:0 0 200px">
+							<label for="runner-private-ip">Runner Private IP</label>
+							<div class="row" style="gap:6px">
+								<input id="runner-private-ip" bind:value={runnerPrivateIp} placeholder="10.x.x.x" />
+								<button style="font-size:12px; white-space:nowrap" disabled={detectingRunnerIp} onclick={detectRunnerPrivateIp}>
+									{detectingRunnerIp ? 'Detecting…' : 'Detect'}
+								</button>
+							</div>
+						</div>
+					{/if}
+				</div>
+			{/if}
+			<div class="droplet-grid" class:single={pgOnly}>
+				{#if !pgOnly}
 				<!-- Client -->
 				<div class="droplet-card">
 					<div class="droplet-label">Client Droplet <span class="badge badge-sql">benchmark runner</span></div>
@@ -470,6 +570,7 @@
 						</div>
 					{/if}
 				</div>
+				{/if}
 				<!-- DB -->
 				<div class="droplet-card">
 					<div class="droplet-label">DB Droplet <span class="badge badge-pgbench">PostgreSQL</span></div>
@@ -502,7 +603,7 @@
 					{/if}
 				</div>
 			</div>
-			{#if clientInfo?.ok || dbInfo?.ok}
+			{#if !pgOnly && (clientInfo?.ok || dbInfo?.ok)}
 				<div class="form-group" style="max-width:200px; margin-bottom:12px">
 					<label for="vpc-tag">VPC Network Tag <span style="color:#888; font-weight:400">(shared)</span></label>
 					<input id="vpc-tag" bind:value={vpcTag} placeholder="vpc-abc123" />
@@ -527,9 +628,10 @@
 		{#if currentStep === 3}
 		<div class="step-body">
 			{#if inspecting}
-				<p class="hint">Inspecting both droplets…</p>
+				<p class="hint">{pgOnly ? 'Inspecting DB droplet…' : 'Inspecting both droplets…'}</p>
 			{:else}
-				<div class="droplet-grid">
+				<div class="droplet-grid" class:single={pgOnly}>
+					{#if !pgOnly}
 					<!-- Client tools -->
 					<div class="droplet-card">
 						<div class="droplet-label">
@@ -570,6 +672,7 @@
 							<p style="color:#999; font-size:12px">Waiting…</p>
 						{/if}
 					</div>
+					{/if}
 					<!-- DB tools -->
 					<div class="droplet-card">
 						<div class="droplet-label">
@@ -672,6 +775,19 @@
 									{#if installOutputs[scopeKey]}
 										<pre class="output install-out">{installOutputs[scopeKey]}</pre>
 									{/if}
+									<div class="perf-capability-row">
+										<span>pg debug symbols <span style="color:#888; font-size:11px">(perf c2c)</span></span>
+										{#if perf.pg_dbgsym_ok || installResults['db:pg-dbgsym']}
+											<strong class="ok">installed</strong>
+										{:else}
+											<button style="font-size:11px; padding:2px 8px" disabled={isInstallBlocked('db:pg-dbgsym')} onclick={() => installPgDbgsym()}>
+												{installing.has('db:pg-dbgsym') ? 'Installing…' : 'Install'}
+											</button>
+										{/if}
+									</div>
+									{#if installOutputs['db:pg-dbgsym']}
+										<pre class="output install-out">{installOutputs['db:pg-dbgsym']}</pre>
+									{/if}
 								</div>
 							{/if}
 						{:else if dbInspect && !dbInspect.ok}
@@ -704,12 +820,12 @@
 				<summary>What this will do (click to expand)</summary>
 				<ul>
 					<li>Find <code>postgresql.conf</code> via <code>SHOW config_file</code> and set <code>listen_addresses = 'localhost,{dbPrivateIp || '&lt;db-private-ip&gt;'}'</code></li>
-					<li>Find <code>pg_hba.conf</code> via <code>SHOW hba_file</code> and add: <code>host all all {clientPrivateIp || '&lt;client-private-ip&gt;'}/32 scram-sha-256</code></li>
+					<li>Find <code>pg_hba.conf</code> via <code>SHOW hba_file</code> and add: <code>host all all {configureClientIp || '&lt;client-private-ip&gt;'}/32 scram-sha-256</code></li>
 					{#if tuneConfig.trim()}
 						<li>Write performance config to <code>conf.d/mybench-tune.conf</code> (deletable to revert)</li>
 					{/if}
 					<li>Run <code>sudo systemctl restart postgresql</code></li>
-					<li>Run <code>sudo ufw allow from {clientPrivateIp || '&lt;client-private-ip&gt;'} to any port 5432</code> and enable UFW</li>
+					<li>Run <code>sudo ufw allow from {configureClientIp || '&lt;client-private-ip&gt;'} to any port 5432</code> and enable UFW</li>
 					<li>Create user <code>{pgUser}</code> (if not exists) with the password below</li>
 					<li>Create database <code>{pgDb}</code> owned by <code>{pgUser}</code> (if not exists)</li>
 				</ul>
@@ -795,7 +911,10 @@
 			</div>
 
 			{#if !configureDone}
-				<button class="primary" disabled={configuring || !pgPass.trim()} onclick={runConfigure}>
+				{#if pgOnly && !configureClientIp.trim()}
+					<p style="color:#c00; font-size:12px; margin-bottom:6px">Runner private IP is required — go back to Step 2 and detect or enter it.</p>
+				{/if}
+				<button class="primary" disabled={configuring || !pgPass.trim() || !configureClientIp.trim()} onclick={runConfigure}>
 					{configuring ? 'Configuring…' : 'Configure'}
 				</button>
 			{/if}
@@ -825,9 +944,9 @@
 		</div>
 		{#if currentStep === 5}
 		<div class="step-body">
-			<p class="hint">Save both droplets to mybench and run a final end-to-end connectivity test.</p>
+			<p class="hint">{pgOnly ? 'Save the PostgreSQL server to mybench and test connectivity.' : 'Save both droplets to mybench and run a final end-to-end connectivity test.'}</p>
 			<div class="form-group" style="max-width:300px">
-				<label for="cluster-name">Cluster Name</label>
+				<label for="cluster-name">{pgOnly ? 'Server Name' : 'Cluster Name'}</label>
 				<input id="cluster-name" bind:value={clusterName} placeholder="DO Singapore" />
 			</div>
 			{#if !registerResult}
@@ -838,9 +957,9 @@
 			{#if registerResult}
 				{#if registerResult.ok}
 					<div class="result-banner ok">
-						<strong>✓ Cluster registered successfully!</strong><br/>
-						PostgreSQL: {registerResult.pg_test?.version}<br/>
-						mybench-runner: {registerResult.ec2_test?.binary?.version ?? 'ok'}
+						<strong>✓ {pgOnly ? 'PostgreSQL server registered!' : 'Cluster registered successfully!'}</strong><br/>
+						PostgreSQL: {registerResult.pg_test?.version ?? 'ok'}
+						{#if !pgOnly}<br/>mybench-runner: {registerResult.ec2_test?.binary?.version ?? 'ok'}{/if}
 					</div>
 					<div class="final-actions">
 						<a href="/settings" class="btn-link">View in Settings</a>
@@ -852,7 +971,7 @@
 						{#if registerResult.pg_test && !registerResult.pg_test.ok}
 							PostgreSQL: {registerResult.pg_test.error}<br/>
 						{/if}
-						{#if registerResult.ec2_test && !registerResult.ec2_test.ok}
+						{#if !pgOnly && registerResult.ec2_test && !registerResult.ec2_test.ok}
 							Client SSH: {registerResult.ec2_test.error ?? registerResult.ec2_test.ssh?.ok === false ? 'SSH failed' : 'tools missing'}
 						{/if}
 					</div>
@@ -867,6 +986,45 @@
 <style>
 	.wizard { max-width: 860px; }
 	h1 { margin-bottom: 4px; }
+	.mode-selector {
+		display: flex;
+		gap: 0;
+		margin: 12px 0 8px;
+		border: 1px solid #ddd;
+		border-radius: 6px;
+		overflow: hidden;
+		width: fit-content;
+	}
+	.mode-btn {
+		padding: 6px 16px;
+		font-size: 13px;
+		font-weight: 500;
+		border: none;
+		background: #f5f5f5;
+		color: #555;
+		cursor: pointer;
+		border-right: 1px solid #ddd;
+	}
+	.mode-btn:last-child { border-right: none; }
+	.mode-btn.active { background: #0066cc; color: #fff; }
+	.mode-btn:hover:not(.active) { background: #eee; }
+	.runner-selector {
+		display: flex;
+		gap: 16px;
+		align-items: flex-end;
+		margin-bottom: 16px;
+		padding: 12px 14px;
+		border: 1px solid #e0e0e0;
+		border-radius: 6px;
+		background: #f8f9fa;
+	}
+	.runner-selector select {
+		width: 100%;
+		padding: 6px 8px;
+		font-size: 13px;
+		border: 1px solid #ccc;
+		border-radius: 4px;
+	}
 	.subtitle { color: #666; margin-bottom: 24px; }
 
 	.step {
@@ -913,6 +1071,10 @@
 		grid-template-columns: 1fr 1fr;
 		gap: 16px;
 		margin-bottom: 16px;
+	}
+	.droplet-grid.single {
+		grid-template-columns: 1fr;
+		max-width: 420px;
 	}
 	.droplet-card {
 		border: 1px solid #e8e8e8;

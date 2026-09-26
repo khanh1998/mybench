@@ -15,6 +15,9 @@ echo "==> Updating apt..."
 sudo apt-get update -y || true
 echo "==> Installing postgresql-18..."
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-18
+echo "==> Installing postgresql-18-dbgsym (debug symbols for perf c2c)..."
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-18-dbgsym 2>/dev/null || \
+  echo "Warning: postgresql-18-dbgsym not available on this repo/distro; perf c2c symbol resolution will fall back to raw addresses."
 echo "==> Enabling and starting PostgreSQL service..."
 sudo systemctl enable postgresql
 sudo systemctl start postgresql

@@ -316,16 +316,32 @@
 		compareIds = new Set(compareIds);
 	}
 
+	type CompareMetric = '1_thread' | 'n_thread' | 'scaling' | 'latency_p95';
+	const COMPARE_METRICS: { key: CompareMetric; label: string }[] = [
+		{ key: '1_thread', label: '1 Thread' },
+		{ key: 'n_thread', label: 'N Threads' },
+		{ key: 'scaling', label: 'Scaling' },
+		{ key: 'latency_p95', label: 'Latency p95' },
+	];
+	let selectedCompareMetrics = $state<Set<CompareMetric>>(new Set(['1_thread', 'n_thread']));
+
+	function toggleCompareMetric(key: CompareMetric) {
+		const next = new Set(selectedCompareMetrics);
+		if (next.has(key)) { if (next.size > 1) next.delete(key); }
+		else next.add(key);
+		selectedCompareMetrics = next;
+	}
+
 	function toggleCompare(id: number) {
 		const next = new Set(compareIds);
 		if (next.has(id)) next.delete(id);
-		else if (next.size < 2) next.add(id);
+		else next.add(id);
 		compareIds = next;
 	}
 
 	async function loadCompare() {
 		const ids = [...compareIds];
-		if (ids.length !== 2) return;
+		if (ids.length < 2) return;
 		showCompare = true;
 		viewingBenchmarkId = null;
 		compareBenchmarks = [];
@@ -335,7 +351,7 @@
 			const data = await res.json();
 			return {
 				benchmark: data.benchmark as SystemBenchmark,
-				results: (data.results as any[]).map((r, i) => ({
+				results: (data.results as any[]).map((r: any, i: number) => ({
 					index: i, total: data.results.length,
 					category: r.test_category as TestCategory, threads: r.threads,
 					metrics: JSON.parse(r.metrics_json) as BenchmarkMetrics, exitCode: r.exit_code,
@@ -343,6 +359,50 @@
 			};
 		}));
 		compareBenchmarks = results;
+	}
+
+	function compareMetricValue(
+		metric: CompareMetric,
+		cat: TestCategory,
+		resultsMap: Map<string, CompletedTest>,
+		allResults: CompletedTest[],
+	): { display: string; value: number } {
+		const t1 = resultsMap.get(`${cat}_1`);
+		const nThreads = allResults.filter(t => t.category === cat && t.threads > 1)[0]?.threads ?? 0;
+		const tN = nThreads > 0 ? resultsMap.get(`${cat}_${nThreads}`) : undefined;
+
+		switch (metric) {
+			case '1_thread':
+				return t1
+					? { display: primaryMetric(cat, t1.metrics), value: primaryMetricValue(cat, t1.metrics) }
+					: { display: '-', value: 0 };
+			case 'n_thread':
+				return tN
+					? { display: primaryMetric(cat, tN.metrics), value: primaryMetricValue(cat, tN.metrics) }
+					: { display: '-', value: 0 };
+			case 'scaling': {
+				if (!t1 || !tN) return { display: '-', value: 0 };
+				const v1 = primaryMetricValue(cat, t1.metrics);
+				const vN = primaryMetricValue(cat, tN.metrics);
+				if (v1 === 0) return { display: '-', value: 0 };
+				const ratio = vN / v1;
+				return { display: ratio.toFixed(2) + 'x', value: ratio };
+			}
+			case 'latency_p95': {
+				const p95 = t1?.metrics.latency_p95_ms;
+				if (p95 == null) return { display: '-', value: Infinity };
+				return { display: p95.toFixed(2) + ' ms', value: p95 };
+			}
+		}
+	}
+
+	function isBestValue(metric: CompareMetric, value: number, allValues: number[]): boolean {
+		if (allValues.every(v => v === 0 || v === Infinity)) return false;
+		const validValues = allValues.filter(v => v > 0 && v < Infinity);
+		if (validValues.length < 2) return false;
+		// For latency: lower is better. For everything else: higher is better.
+		if (metric === 'latency_p95') return value === Math.min(...validValues);
+		return value === Math.max(...validValues);
 	}
 
 	// Helpers for scorecard
@@ -516,67 +576,69 @@
 	{/if}
 
 	<!-- Compare section -->
-	{#if showCompare && compareBenchmarks.length === 2}
-		{@const a = compareBenchmarks[0]}
-		{@const b = compareBenchmarks[1]}
-		{@const mapA = getResults(a.results)}
-		{@const mapB = getResults(b.results)}
+	{#if showCompare && compareBenchmarks.length >= 2}
+		{@const baseline = compareBenchmarks[0]}
+		{@const maps = compareBenchmarks.map(cb => getResults(cb.results))}
 		<section class="card">
-			<h2>Compare</h2>
-			<div class="compare-header">
-				<div class="compare-col">
-					<strong>{a.benchmark.pg_server_name}</strong>
-					<span class="compare-date">{fmtDate(a.benchmark.created_at)} — {a.benchmark.preset}</span>
-					<span class="compare-spec">
-						{a.benchmark.cpu_cores} vCPU, {a.benchmark.ram_mb >= 1024 ? `${Math.round(a.benchmark.ram_mb / 1024)} GB` : `${a.benchmark.ram_mb} MB`} RAM, {a.benchmark.storage_type}
-					</span>
-				</div>
-				<div class="compare-vs">vs</div>
-				<div class="compare-col">
-					<strong>{b.benchmark.pg_server_name}</strong>
-					<span class="compare-date">{fmtDate(b.benchmark.created_at)} — {b.benchmark.preset}</span>
-					<span class="compare-spec">
-						{b.benchmark.cpu_cores} vCPU, {b.benchmark.ram_mb >= 1024 ? `${Math.round(b.benchmark.ram_mb / 1024)} GB` : `${b.benchmark.ram_mb} MB`} RAM, {b.benchmark.storage_type}
-					</span>
-				</div>
+			<div class="compare-top-bar">
+				<h2>Compare</h2>
+				<button class="btn small" onclick={() => { showCompare = false; compareIds = new Set(); }}>Close</button>
 			</div>
-			<div class="table-wrap">
-				<table>
-					<thead>
-						<tr>
-							<th>Test</th>
-							<th class="right">A (1T)</th>
-							<th class="right">B (1T)</th>
-							<th class="right">Diff (1T)</th>
-							<th class="right">A (NT)</th>
-							<th class="right">B (NT)</th>
-							<th class="right">Diff (NT)</th>
-						</tr>
-					</thead>
-					<tbody>
-						{#each CATEGORIES as cat}
-							{@const a1 = mapA.get(`${cat}_1`)}
-							{@const b1 = mapB.get(`${cat}_1`)}
-							{@const aNThreads = a.results.filter(t => t.category === cat && t.threads > 1)[0]?.threads ?? 0}
-							{@const bNThreads = b.results.filter(t => t.category === cat && t.threads > 1)[0]?.threads ?? 0}
-							{@const aN = aNThreads > 0 ? mapA.get(`${cat}_${aNThreads}`) : undefined}
-							{@const bN = bNThreads > 0 ? mapB.get(`${cat}_${bNThreads}`) : undefined}
-							{@const diff1 = a1 && b1 ? pctDiff(primaryMetricValue(cat, a1.metrics), primaryMetricValue(cat, b1.metrics)) : { text: '-', cls: '' }}
-							{@const diffN = aN && bN ? pctDiff(primaryMetricValue(cat, aN.metrics), primaryMetricValue(cat, bN.metrics)) : { text: '-', cls: '' }}
-							<tr>
-								<td class="cat-label">{CATEGORY_LABELS[cat]}</td>
-								<td class="right mono">{a1 ? primaryMetric(cat, a1.metrics) : '-'}</td>
-								<td class="right mono">{b1 ? primaryMetric(cat, b1.metrics) : '-'}</td>
-								<td class="right mono {diff1.cls}">{diff1.text}</td>
-								<td class="right mono">{aN ? primaryMetric(cat, aN.metrics) : '-'}</td>
-								<td class="right mono">{bN ? primaryMetric(cat, bN.metrics) : '-'}</td>
-								<td class="right mono {diffN.cls}">{diffN.text}</td>
-							</tr>
-						{/each}
-					</tbody>
-				</table>
+
+			<div class="compare-legend">
+				{#each compareBenchmarks as cb, i}
+					<div class="compare-legend-item">
+						<span class="compare-label">#{i + 1}{i === 0 ? ' (baseline)' : ''}</span>
+						<strong>{cb.benchmark.pg_server_name}</strong>
+						<span class="compare-date">{fmtDate(cb.benchmark.created_at)} — {cb.benchmark.preset}</span>
+						<span class="compare-spec">
+							{cb.benchmark.cpu_cores} vCPU, {cb.benchmark.ram_mb >= 1024 ? `${Math.round(cb.benchmark.ram_mb / 1024)} GB` : `${cb.benchmark.ram_mb} MB`} RAM, {cb.benchmark.storage_type}
+						</span>
+					</div>
+				{/each}
 			</div>
-			<button class="btn" onclick={() => { showCompare = false; compareIds = new Set(); }}>Close Compare</button>
+
+			<div class="metric-toggles">
+				{#each COMPARE_METRICS as m}
+					<label class="metric-toggle" class:active={selectedCompareMetrics.has(m.key)}>
+						<input type="checkbox" checked={selectedCompareMetrics.has(m.key)} onchange={() => toggleCompareMetric(m.key)} />
+						{m.label}
+					</label>
+				{/each}
+			</div>
+
+			{#each COMPARE_METRICS.filter(m => selectedCompareMetrics.has(m.key)) as metric}
+				<div class="compare-table-section">
+					<h3>{metric.label}</h3>
+					<div class="table-wrap">
+						<table>
+							<thead>
+								<tr>
+									<th>#</th>
+									<th>Server</th>
+									{#each CATEGORIES as cat}
+										<th class="right">{CATEGORY_LABELS[cat]}</th>
+									{/each}
+								</tr>
+							</thead>
+							<tbody>
+								{#each compareBenchmarks as cb, i}
+									{@const map = maps[i]}
+									<tr>
+										<td class="row-num">{i + 1}</td>
+										<td class="cat-label">{cb.benchmark.pg_server_name}</td>
+										{#each CATEGORIES as cat}
+											{@const val = compareMetricValue(metric.key, cat, map, cb.results)}
+											{@const allValues = compareBenchmarks.map((_, j) => compareMetricValue(metric.key, cat, maps[j], compareBenchmarks[j].results).value)}
+											<td class="right mono" class:best-value={isBestValue(metric.key, val.value, allValues)}>{val.display}</td>
+										{/each}
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
+				</div>
+			{/each}
 		</section>
 	{/if}
 
@@ -584,9 +646,9 @@
 	{#if benchmarks.length > 0}
 		<section class="card">
 			<h2>History</h2>
-			{#if compareIds.size === 2}
+			{#if compareIds.size >= 2}
 				<div class="compare-actions">
-					<button class="btn primary" onclick={loadCompare}>Compare Selected</button>
+					<button class="btn primary" onclick={loadCompare}>Compare {compareIds.size} Selected</button>
 					<button class="btn" onclick={() => { compareIds = new Set(); }}>Clear</button>
 				</div>
 			{/if}
@@ -611,7 +673,6 @@
 									<input
 										type="checkbox"
 										checked={compareIds.has(bm.id)}
-										disabled={!compareIds.has(bm.id) && compareIds.size >= 2}
 										onchange={() => toggleCompare(bm.id)}
 									/>
 								</td>
@@ -827,29 +888,87 @@
 	.cat-desc { font-size: 12px; color: #888; }
 
 	/* Compare */
-	.compare-header {
+	.compare-top-bar {
 		display: flex;
-		gap: 16px;
-		align-items: flex-start;
+		justify-content: space-between;
+		align-items: center;
 		margin-bottom: 12px;
 	}
 
-	.compare-col {
-		flex: 1;
+	.compare-top-bar h2 { margin-bottom: 0; }
+
+	.compare-legend {
 		display: flex;
-		flex-direction: column;
-		gap: 2px;
+		gap: 16px;
+		flex-wrap: wrap;
+		margin-bottom: 12px;
 	}
 
-	.compare-vs {
-		padding-top: 6px;
-		font-weight: 700;
-		color: #999;
+	.compare-legend-item {
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+		padding: 6px 10px;
+		border: 1px solid #e0e0e0;
+		border-radius: 4px;
+		background: #fafafa;
+		min-width: 160px;
+	}
+
+	.compare-label {
+		font-size: 11px;
+		font-weight: 600;
+		color: #0066cc;
+		text-transform: uppercase;
 	}
 
 	.compare-date, .compare-spec {
 		font-size: 12px;
 		color: #888;
+	}
+
+	.metric-toggles {
+		display: flex;
+		gap: 6px;
+		margin-bottom: 16px;
+		flex-wrap: wrap;
+	}
+
+	.metric-toggle {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		padding: 5px 10px;
+		border: 1px solid #d8d8d8;
+		border-radius: 4px;
+		background: #fafafa;
+		color: #444;
+		cursor: pointer;
+		margin: 0;
+		font-size: 13px;
+	}
+
+	.metric-toggle.active {
+		border-color: #0066cc;
+		background: #e8f4fd;
+		color: #004f9e;
+	}
+
+	.metric-toggle input { width: auto; margin: 0; }
+
+	.compare-table-section {
+		margin-bottom: 16px;
+	}
+
+	.compare-table-section h3 {
+		font-size: 14px;
+		margin-bottom: 6px;
+		color: #555;
+	}
+
+	.best-value {
+		font-weight: 700;
+		color: #27ae60;
 	}
 
 	.compare-actions {

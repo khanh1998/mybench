@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
 import type { Client } from 'ssh2';
-import { connectSsh, exec } from '$lib/server/ec2-runner';
+import { connectSsh, exec, shellQuote } from '$lib/server/ec2-runner';
 import { getPgServer } from '$lib/server/services/pg-servers';
 import type { PgServer } from '$lib/types';
 import getDb from '$lib/server/db';
@@ -336,13 +336,27 @@ export function startPresetBenchmark(pgServerId: number, preset: PresetProfile):
 
 	activeBenchmarks.set(benchmarkId, { emitter });
 
-	runPresetBenchmarkAsync(benchmarkId, sshTarget, preset, emitter).catch(() => {});
+	runPresetBenchmarkAsync(benchmarkId, server, sshTarget, preset, emitter).catch(() => {});
 
 	return { id: benchmarkId, emitter };
 }
 
+async function detectPgMountPoint(conn: Client, server: PgServer): Promise<string | null> {
+	const pgHost = server.private_host || server.host;
+	const cmd = `PGPASSWORD=${shellQuote(server.password)} psql -h ${shellQuote(pgHost)} -p ${server.port} -U ${shellQuote(server.username)} -d postgres -tAc "SHOW data_directory" 2>/dev/null`;
+	const result = await exec(conn, cmd);
+	const dataDir = result.stdout.trim();
+	if (result.code !== 0 || !dataDir) return null;
+
+	// Get the mount point of the PG data directory — same disk, but outside PGDATA
+	const mountResult = await exec(conn, `df --output=target ${shellQuote(dataDir)} 2>/dev/null | tail -1`);
+	const mountPoint = mountResult.stdout.trim();
+	return (mountResult.code === 0 && mountPoint && mountPoint.startsWith('/')) ? mountPoint : null;
+}
+
 async function runPresetBenchmarkAsync(
 	benchmarkId: number,
+	server: PgServer,
 	sshTarget: ReturnType<typeof buildSshTarget>,
 	preset: PresetProfile,
 	emitter: EventEmitter
@@ -365,12 +379,16 @@ async function runPresetBenchmarkAsync(
 
 		emitter.emit('spec', spec);
 
+		// Detect PG data directory's mount point to run fileio tests on the same disk
+		const pgMountPoint = await detectPgMountPoint(conn, server);
+		const fileioBaseDir = pgMountPoint ?? '/tmp';
+
 		// Build and execute test plan
 		const config = PRESET_CONFIG[preset];
 		const plan = buildTestPlan(spec.cpu_cores, preset);
 		const total = plan.length;
 		const hasFileio = plan.some(t => t.isFileio);
-		const fileioTmpDir = `/tmp/sysbench-preset-${Date.now()}`;
+		const fileioTmpDir = `${fileioBaseDir}/sysbench-preset-${Date.now()}`;
 
 		// Prepare fileio files once
 		if (hasFileio) {
