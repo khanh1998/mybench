@@ -45,6 +45,40 @@ type PerfResult struct {
 	TopFunctions   []PerfTopFunction `json:"top_functions,omitempty"`
 	ScriptOutput   string            `json:"script_output,omitempty"`
 	SyscallSummary []SyscallEntry    `json:"syscall_summary,omitempty"`
+	// c2c fields
+	C2cReport   string      `json:"c2c_report,omitempty"`
+	C2cSummary  *C2cSummary `json:"c2c_summary,omitempty"`
+	SharedLines []C2cLine   `json:"shared_lines,omitempty"`
+}
+
+// C2cSummary holds high-level false-sharing metrics from perf c2c.
+type C2cSummary struct {
+	TotalRecords     int `json:"total_records"`
+	TotalHitm        int `json:"total_hitm"`
+	LclHitm          int `json:"lcl_hitm"`
+	RmtHitm          int `json:"rmt_hitm"`
+	SharedCacheLines int `json:"shared_cache_lines"`
+	StoreL1dMiss     int `json:"store_l1d_miss"`
+}
+
+// C2cLine describes one contested cache line identified by perf c2c.
+type C2cLine struct {
+	Address  string      `json:"address"`
+	LclHitm  int         `json:"lcl_hitm"`
+	RmtHitm  int         `json:"rmt_hitm"`
+	Records  int         `json:"records"`
+	Accesses []C2cAccess `json:"accesses,omitempty"`
+}
+
+// C2cAccess is one instruction touching a contested cache line.
+type C2cAccess struct {
+	Symbol     string  `json:"symbol"`
+	Object     string  `json:"object"`
+	SourceLine string  `json:"source_line"`
+	Offset     string  `json:"offset"`
+	LclHitmPct float64 `json:"lcl_hitm_pct"`
+	RmtHitmPct float64 `json:"rmt_hitm_pct"`
+	LclCycles  int     `json:"lcl_cycles"`
 }
 
 type PerfEvent struct {

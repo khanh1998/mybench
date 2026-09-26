@@ -109,7 +109,7 @@ export interface RunnerPerfEvent {
 }
 
 export interface RunnerPerfResult {
-	mode?: 'stat' | 'record' | 'trace';
+	mode?: 'stat' | 'record' | 'trace' | 'c2c';
 	status: string;
 	scope: string;
 	cgroup?: string;
@@ -123,6 +123,10 @@ export interface RunnerPerfResult {
 	top_functions?: Array<{ overhead?: number; symbol?: string; dso?: string }>;
 	script_output?: string;
 	syscall_summary?: Array<Record<string, unknown>>;
+	// c2c mode fields
+	c2c_report?: string;
+	c2c_summary?: Record<string, unknown> | null;
+	shared_lines?: Array<Record<string, unknown>>;
 }
 
 export interface RunnerResult {
@@ -251,7 +255,9 @@ export function importResultIntoRun(runId: number, result: RunnerResult): void {
 						? JSON.stringify({ top_functions: perf.top_functions ?? [] })
 						: mode === 'trace'
 							? JSON.stringify({ syscall_summary: perf.syscall_summary ?? [] })
-							: '';
+							: mode === 'c2c'
+								? JSON.stringify({ c2c_summary: perf.c2c_summary ?? null, shared_lines: perf.shared_lines ?? [], c2c_report: perf.c2c_report ?? '' })
+								: '';
 					insPerf.run(
 						runId,
 						s.step_id,

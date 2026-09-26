@@ -111,6 +111,10 @@ type Step struct {
 	PerfStatDelay      string          `json:"perf_stat_delay,omitempty"`
 	PerfRecordDelay    string          `json:"perf_record_delay,omitempty"`
 	PerfTraceDelay     string          `json:"perf_trace_delay,omitempty"`
+	PerfC2cEnabled     bool            `json:"perf_c2c_enabled,omitempty"`
+	PerfC2cDuration    string          `json:"perf_c2c_duration,omitempty"`
+	PerfC2cDelay       string          `json:"perf_c2c_delay,omitempty"`
+	PerfLdlat          string          `json:"perf_ldlat,omitempty"`
 	PerfCgroup         string          `json:"perf_cgroup,omitempty"`
 	PgbenchOptions string          `json:"pgbench_options,omitempty"`
 	PgbenchScripts []PgbenchScript `json:"pgbench_scripts,omitempty"`

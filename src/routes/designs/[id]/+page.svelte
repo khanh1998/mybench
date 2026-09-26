@@ -51,6 +51,10 @@
     perf_stat_delay: string;
     perf_record_delay: string;
     perf_trace_delay: string;
+    perf_c2c_enabled: number;
+    perf_c2c_duration: string;
+    perf_c2c_delay: string;
+    perf_ldlat: string;
     perf_cgroup: string;
     perf_events: string;
     perf_repeat: string;
@@ -83,8 +87,8 @@
   interface Profile { id: number; design_id: number; name: string; values: { param_name: string; value: string }[]; }
   interface DecisionParam { id: number; decision_id: number; position: number; name: string; value: string; }
   interface DecisionProfile { id: number; decision_id: number; name: string; values: { param_name: string; value: string }[]; }
-  type PerfMode = 'stat' | 'record' | 'trace';
-  const PERF_MODES: PerfMode[] = ['stat', 'record', 'trace'];
+  type PerfMode = 'stat' | 'record' | 'trace' | 'c2c';
+  const PERF_MODES: PerfMode[] = ['stat', 'record', 'trace', 'c2c'];
 
   let design = $state<Design | null>(null);
   let servers = $state<Server[]>([]);
@@ -222,36 +226,42 @@
   function getModeDuration(step: Step, mode: PerfMode): string {
     if (mode === 'stat') return step.perf_stat_duration || step.perf_duration || '';
     if (mode === 'record') return step.perf_record_duration || step.perf_duration || '';
+    if (mode === 'c2c') return step.perf_c2c_duration || step.perf_duration || '';
     return step.perf_trace_duration || step.perf_duration || '';
   }
 
   function setModeDuration(step: Step, mode: PerfMode, value: string) {
     if (mode === 'stat') step.perf_stat_duration = value;
     else if (mode === 'record') step.perf_record_duration = value;
+    else if (mode === 'c2c') step.perf_c2c_duration = value;
     else step.perf_trace_duration = value;
   }
 
   function getModeDelay(step: Step, mode: PerfMode): string {
     if (mode === 'stat') return step.perf_stat_delay || step.perf_delay || '';
     if (mode === 'record') return step.perf_record_delay || step.perf_delay || '';
+    if (mode === 'c2c') return step.perf_c2c_delay || step.perf_delay || '';
     return step.perf_trace_delay || step.perf_delay || '';
   }
 
   function setModeDelay(step: Step, mode: PerfMode, value: string) {
     if (mode === 'stat') step.perf_stat_delay = value;
     else if (mode === 'record') step.perf_record_delay = value;
+    else if (mode === 'c2c') step.perf_c2c_delay = value;
     else step.perf_trace_delay = value;
   }
 
   function getModeEnabled(step: Step, mode: PerfMode): number {
     if (mode === 'stat') return step.perf_stat_enabled ?? 0;
     if (mode === 'record') return step.perf_record_enabled ?? 0;
+    if (mode === 'c2c') return step.perf_c2c_enabled ?? 0;
     return step.perf_trace_enabled ?? 0;
   }
 
   function setModeEnabled(step: Step, mode: PerfMode, enabled: boolean) {
     if (mode === 'stat') step.perf_stat_enabled = enabled ? 1 : 0;
     else if (mode === 'record') step.perf_record_enabled = enabled ? 1 : 0;
+    else if (mode === 'c2c') step.perf_c2c_enabled = enabled ? 1 : 0;
     else step.perf_trace_enabled = enabled ? 1 : 0;
   }
 
@@ -465,7 +475,7 @@
   const perfStepValidationErrors = $derived((design?.steps ?? []).flatMap((step: Step) => {
     if (step.type !== 'perf') return [];
     const errors: string[] = [];
-    for (const mode of ['stat', 'record', 'trace'] as const) {
+    for (const mode of ['stat', 'record', 'trace', 'c2c'] as const) {
       const rawDuration = getModeDuration(step, mode);
       const duration = getModeEnabled(step, mode)
         ? parseRequiredPerfDurationField(rawDuration)
@@ -476,10 +486,12 @@
     if (repeat.error) errors.push(`${step.name}: repeat must be a number or {{PARAM_NAME}}`);
     const freq = parsePerfDurationField(step.perf_freq ?? '');
     if (freq.error) errors.push(`${step.name}: frequency must be a number or {{PARAM_NAME}}`);
-    for (const mode of ['stat', 'record', 'trace'] as const) {
+    for (const mode of ['stat', 'record', 'trace', 'c2c'] as const) {
       const delay = parsePerfDurationField(getModeDelay(step, mode));
       if (delay.error) errors.push(`${step.name}: ${mode} delay must be a number or {{PARAM_NAME}}`);
     }
+    const ldlat = parsePerfDurationField(step.perf_ldlat ?? '');
+    if (ldlat.error) errors.push(`${step.name}: c2c ldlat must be a number or {{PARAM_NAME}}`);
     return errors;
   }));
   const hasPerfDurationErrors = $derived(Object.keys(perfDurationErrors).length > 0 || perfStepValidationErrors.length > 0);
@@ -618,6 +630,10 @@
       perf_stat_enabled: 1,
       perf_record_enabled: 0,
       perf_trace_enabled: 0,
+      perf_c2c_enabled: 0,
+      perf_c2c_duration: '',
+      perf_c2c_delay: '',
+      perf_ldlat: '',
       perf_delay: '',
       perf_stat_delay: '',
       perf_record_delay: '',
@@ -1493,6 +1509,33 @@
                     {/if}
                   </label>
                 </div>
+              {:else if mode === 'c2c'}
+                <div class="perf-grid">
+                  <label title="Minimum load latency threshold in CPU cycles to sample (default 30). Lower = more samples but higher overhead. Supports {'{{PARAM}}'} substitution.">
+                    Load latency (--ldlat)
+                    <input
+                      value={selectedStep.perf_ldlat}
+                      oninput={(e) => {
+                        const val = (e.currentTarget as HTMLInputElement).value;
+                        selectedStep!.perf_ldlat = val;
+                        const result = parsePerfDurationField(val);
+                        if (result.error) perfDurationErrors[selectedStep!.id] = result.error;
+                        else delete perfDurationErrors[selectedStep!.id];
+                      }}
+                      placeholder={'30 or {{LDLAT}}'}
+                      spellcheck="false"
+                    />
+                    {#if resolveParamPreview(selectedStep.perf_ldlat)}
+                      {@const preview = resolveParamPreview(selectedStep.perf_ldlat)!}
+                      <span class="param-preview" class:param-preview-error={preview.unresolved.length > 0}>
+                        {preview.unresolved.length > 0 ? `unresolved: ${preview.unresolved.join(', ')}` : `→ ${preview.text}`}
+                      </span>
+                    {/if}
+                  </label>
+                </div>
+                <p class="perf-c2c-note">
+                  ⚠ Requires bare-metal (PEBS). Fails silently with a warning on VMs. Targets the configured cgroup or system-wide if no cgroup is set.
+                </p>
               {/if}
             </section>
           {/each}
@@ -2180,6 +2223,12 @@
     margin: 0;
     color: #f0c36d;
     font-size: 12px;
+  }
+  .perf-c2c-note {
+    margin: 6px 0 0;
+    color: #a6adc8;
+    font-size: 11px;
+    line-height: 1.4;
   }
   .param-preview {
     color: #a6e3a1;

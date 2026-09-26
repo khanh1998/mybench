@@ -396,7 +396,8 @@
   let sqlCrossPage   = $state(0);
   let waitFilterType  = $state('');   // '' = no filter → show bar
   let waitFilterEvent = $state('');   // '' = aggregate all events for the type
-  let waitFilterValue = $state<'pct' | 'seconds'>('pct');
+  let waitFilterValue = $state<'pct' | 'seconds' | 'both'>('pct');
+  let waitBothOrder   = $state<'s-first' | 'pct-first'>('s-first');
   // cross-run table is always sorted by total calls desc, then queryid — no user-controlled sort
   let expandedLockNodes       = $state<Set<string>>(new Set());
   let activeLockNode          = $state<ActiveLockNode | null>(null);
@@ -2142,7 +2143,13 @@
               <div class="mode-toggle">
                 <button class:active={waitFilterValue === 'pct'} onclick={() => waitFilterValue = 'pct'}>%</button>
                 <button class:active={waitFilterValue === 'seconds'} onclick={() => waitFilterValue = 'seconds'}>s</button>
+                <button class:active={waitFilterValue === 'both'} onclick={() => waitFilterValue = 'both'}>%+s</button>
               </div>
+              {#if waitFilterValue === 'both'}
+                <button class="wait-swap-btn" onclick={() => waitBothOrder = waitBothOrder === 's-first' ? 'pct-first' : 's-first'} title="swap order">
+                  {waitBothOrder === 's-first' ? 's(%) ⇄ %' : '%(s) ⇄ s'}
+                </button>
+              {/if}
             {/if}
           </div>
         {/if}
@@ -2158,6 +2165,27 @@
         {/if}
 
         <!-- Pivot table -->
+        {#if activeCrossGroup.isWait && waitFilterType}
+          <div class="table-copy-header">
+            <CopyTableButton getMarkdown={() => {
+              const headers = ['Query', ...runs.map(r => r.label)];
+              const rows = sortedCrossRows.map(row => [
+                row.query_short,
+                ...runs.map(r => {
+                  const wItems = waitProfiles[r.id]?.[row.queryid] ?? [];
+                  const cv = waitCellValue(wItems);
+                  if (!cv || cv.seconds === 0) return '—';
+                  if (waitFilterValue === 'pct') return cv.pct.toFixed(1) + '%';
+                  if (waitFilterValue === 'seconds') return cv.seconds.toFixed(2) + 's';
+                  return waitBothOrder === 's-first'
+                    ? cv.seconds.toFixed(2) + 's (' + cv.pct.toFixed(1) + '%)'
+                    : cv.pct.toFixed(1) + '% (' + cv.seconds.toFixed(2) + 's)';
+                })
+              ]);
+              return markdownTable(headers, rows);
+            }} />
+          </div>
+        {/if}
         {#if !activeCrossGroup.isWait}
           <div class="table-copy-header">
             <CopyTableButton getMarkdown={() => {
@@ -2204,7 +2232,11 @@
                               title="View statement detail for {run.label}"
                               onclick={() => { const sr = row.byRun[run.id]; if (sr) openFlame(run, sr); }}
                               onkeydown={(e) => { if (e.key === 'Enter') { const sr = row.byRun[run.id]; if (sr) openFlame(run, sr); } }}>
-                              {waitFilterValue === 'pct' ? cellVal.pct.toFixed(1) + '%' : cellVal.seconds.toFixed(2) + 's'}
+                              {waitFilterValue === 'pct' ? cellVal.pct.toFixed(1) + '%'
+                                : waitFilterValue === 'seconds' ? cellVal.seconds.toFixed(2) + 's'
+                                : waitBothOrder === 's-first'
+                                  ? cellVal.seconds.toFixed(2) + 's (' + cellVal.pct.toFixed(1) + '%)'
+                                  : cellVal.pct.toFixed(1) + '% (' + cellVal.seconds.toFixed(2) + 's)'}
                             </span>
                           {:else}
                             <span class="cross-val-empty">—</span>
@@ -2971,6 +3003,8 @@
   .chart-group-tab.active { color: #0066cc; border-bottom-color: #0066cc; }
 
   .cross-metric-picker { display: flex; gap: 3px; margin: 8px 0 0; flex-wrap: wrap; }
+  .wait-swap-btn { background: none; border: 1px solid #e0e0e0; border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer; color: #555; white-space: nowrap; flex-shrink: 0; }
+  .wait-swap-btn:hover { background: #f0f0f0; }
   .mode-toggle-btn { background: #f5f5f5; border: 1px solid #ddd; border-radius: 4px; padding: 2px 10px; font-size: 11px; cursor: pointer; color: #555; }
   .mode-toggle-btn:hover { background: #e8eeff; border-color: #aac; }
   .mode-toggle-btn.active { background: #0066cc; border-color: #0055bb; color: #fff; }

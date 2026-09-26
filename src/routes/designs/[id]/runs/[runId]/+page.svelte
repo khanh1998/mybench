@@ -37,7 +37,7 @@
     derived_unit: string;
   }
   interface StepPerf {
-    mode: 'stat' | 'record' | 'trace';
+    mode: 'stat' | 'record' | 'trace' | 'c2c';
     status: string;
     scope: 'postgres_cgroup' | 'system' | 'disabled';
     cgroup: string;
@@ -48,6 +48,30 @@
     perf_script_output: string;
     warnings_json: string;
     events: StepPerfEvent[];
+  }
+  interface C2cSummary {
+    total_records: number;
+    total_hitm: number;
+    lcl_hitm: number;
+    rmt_hitm: number;
+    shared_cache_lines: number;
+    store_l1d_miss: number;
+  }
+  interface C2cAccess {
+    symbol: string;
+    object: string;
+    source_line: string;
+    offset: string;
+    lcl_hitm_pct: number;
+    rmt_hitm_pct: number;
+    lcl_cycles: number;
+  }
+  interface C2cLine {
+    address: string;
+    lcl_hitm: number;
+    rmt_hitm: number;
+    records: number;
+    accesses: C2cAccess[];
   }
   interface PerfTopFunction {
     overhead: number;
@@ -376,6 +400,21 @@
 
   function perfSyscalls(perf: StepPerf): SyscallEntry[] {
     return parseJson<{ syscall_summary?: SyscallEntry[] }>(perf.result_json)?.syscall_summary ?? [];
+  }
+  function perfC2cSummary(perf: StepPerf): C2cSummary | null {
+    return parseJson<{ c2c_summary?: C2cSummary }>(perf.result_json)?.c2c_summary ?? null;
+  }
+  function perfSharedLines(perf: StepPerf): C2cLine[] {
+    return parseJson<{ shared_lines?: C2cLine[] }>(perf.result_json)?.shared_lines ?? [];
+  }
+  function perfC2cReport(perf: StepPerf): string {
+    return parseJson<{ c2c_report?: string }>(perf.result_json)?.c2c_report ?? '';
+  }
+  let expandedC2cLines = $state(new Set<string>());
+  function toggleC2cLine(addr: string) {
+    if (expandedC2cLines.has(addr)) expandedC2cLines.delete(addr);
+    else expandedC2cLines.add(addr);
+    expandedC2cLines = new Set(expandedC2cLines);
   }
 
   function setSyscallSort(col: SyscallSortKey) {
@@ -1127,6 +1166,101 @@
                     </tbody>
                   </table>
                 </div>
+              {:else if perf.mode === 'c2c'}
+                {@const c2cSum = perfC2cSummary(perf)}
+                {@const sharedLines = perfSharedLines(perf)}
+                {@const c2cReport = perfC2cReport(perf)}
+                <div class="perf-events-wrap">
+                  {#if c2cSum}
+                    <div class="c2c-summary-grid">
+                      <div class="c2c-stat" class:c2c-stat-hot={c2cSum.total_hitm > 0}>
+                        <span class="c2c-stat-label">Total HITMs</span>
+                        <span class="c2c-stat-value">{c2cSum.total_hitm.toLocaleString()}</span>
+                      </div>
+                      <div class="c2c-stat" class:c2c-stat-warn={c2cSum.rmt_hitm > 0}>
+                        <span class="c2c-stat-label">Local HITM</span>
+                        <span class="c2c-stat-value">{c2cSum.lcl_hitm.toLocaleString()}</span>
+                      </div>
+                      <div class="c2c-stat" class:c2c-stat-hot={c2cSum.rmt_hitm > 0}>
+                        <span class="c2c-stat-label">Remote HITM <span class="unit">(NUMA)</span></span>
+                        <span class="c2c-stat-value">{c2cSum.rmt_hitm.toLocaleString()}</span>
+                      </div>
+                      <div class="c2c-stat">
+                        <span class="c2c-stat-label">Shared lines</span>
+                        <span class="c2c-stat-value">{c2cSum.shared_cache_lines.toLocaleString()}</span>
+                      </div>
+                      <div class="c2c-stat">
+                        <span class="c2c-stat-label">Store L1D miss</span>
+                        <span class="c2c-stat-value">{c2cSum.store_l1d_miss.toLocaleString()}</span>
+                      </div>
+                      <div class="c2c-stat">
+                        <span class="c2c-stat-label">Total records</span>
+                        <span class="c2c-stat-value">{c2cSum.total_records.toLocaleString()}</span>
+                      </div>
+                    </div>
+                  {/if}
+
+                  {#if sharedLines.length > 0}
+                    <table class="perf-events-table c2c-lines-table">
+                      <thead>
+                        <tr>
+                          <th class="col-expand"></th>
+                          <th>Cache line address</th>
+                          <th class="col-num">Lcl HITM</th>
+                          <th class="col-num">Rmt HITM</th>
+                          <th class="col-num">Records</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {#each sharedLines as line}
+                          {@const expanded = expandedC2cLines.has(line.address)}
+                          {@const isHot = line.lcl_hitm + line.rmt_hitm > 0}
+                          <tr class="c2c-line-row" class:perf-hot={isHot}>
+                            <td class="col-expand">
+                              {#if line.accesses?.length > 0}
+                                <button class="expand-btn" onclick={() => toggleC2cLine(line.address)}>{expanded ? '▾' : '▸'}</button>
+                              {/if}
+                            </td>
+                            <td><code class="event-name">{line.address}</code></td>
+                            <td class="col-num">{line.lcl_hitm.toLocaleString()}</td>
+                            <td class="col-num">{line.rmt_hitm > 0 ? line.rmt_hitm.toLocaleString() : '—'}</td>
+                            <td class="col-num">{line.records.toLocaleString()}</td>
+                          </tr>
+                          {#if expanded && line.accesses?.length > 0}
+                            <tr class="c2c-accesses-row">
+                              <td colspan="5" class="c2c-accesses-cell">
+                                <table class="c2c-accesses-table">
+                                  <thead>
+                                    <tr>
+                                      <th>Symbol</th>
+                                      <th>Source line</th>
+                                      <th class="col-num">Offset</th>
+                                      <th class="col-num">Lcl HITM%</th>
+                                      <th class="col-num">Avg cycles</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {#each line.accesses as access}
+                                      <tr class:c2c-access-hot={access.lcl_hitm_pct > 10 || access.rmt_hitm_pct > 10}>
+                                        <td><code class="event-name">{access.symbol}</code><span class="unit"> {access.object}</span></td>
+                                        <td class="c2c-source-line">{access.source_line}</td>
+                                        <td class="col-num"><code>{access.offset}</code></td>
+                                        <td class="col-num">{access.lcl_hitm_pct.toFixed(1)}<span class="unit">%</span></td>
+                                        <td class="col-num">{access.lcl_cycles > 0 ? access.lcl_cycles : '—'}</td>
+                                      </tr>
+                                    {/each}
+                                  </tbody>
+                                </table>
+                              </td>
+                            </tr>
+                          {/if}
+                        {/each}
+                      </tbody>
+                    </table>
+                  {:else if c2cSum}
+                    <p class="c2c-no-sharing">No shared cache lines detected — no false sharing in this workload.</p>
+                  {/if}
+                </div>
               {/if}
 
               {#if perf.command}
@@ -1135,7 +1269,15 @@
                   <pre class="detail-pre perf-detail-pre">{perf.command}</pre>
                 </details>
               {/if}
-              {#if perf.raw_error}
+              {#if perf.mode === 'c2c'}
+                {@const c2cReport = perfC2cReport(perf)}
+                {#if c2cReport}
+                  <details class="perf-detail-toggle">
+                    <summary class="perf-detail-summary">Raw c2c report</summary>
+                    <pre class="detail-pre perf-detail-pre">{c2cReport}</pre>
+                  </details>
+                {/if}
+              {:else if perf.raw_error}
                 <details class="perf-detail-toggle">
                   <summary class="perf-detail-summary">Raw output</summary>
                   <pre class="detail-pre perf-detail-pre">{perf.raw_error}</pre>
@@ -1241,6 +1383,23 @@
   .perf-hot { background: #fffbf0 !important; }
   .perf-hot .col-event { border-left: 3px solid #f59e0b; padding-left: 7px; }
   .hot-badge { font-size: 10px; font-weight: 700; color: #b45309; background: #fef3c7; border: 1px solid #fcd34d; border-radius: 3px; padding: 0 4px; margin-left: 5px; vertical-align: middle; }
+  /* c2c display */
+  .c2c-summary-grid { display: flex; flex-wrap: wrap; gap: 10px; padding: 12px 14px; background: #fafafa; border-bottom: 1px solid #e8e8e8; }
+  .c2c-stat { display: flex; flex-direction: column; align-items: center; min-width: 100px; padding: 8px 12px; background: #fff; border: 1px solid #e8e8e8; border-radius: 6px; }
+  .c2c-stat-hot { border-color: #f59e0b; background: #fffbf0; }
+  .c2c-stat-warn { border-color: #f59e0b; }
+  .c2c-stat-label { font-size: 10px; color: #888; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px; text-align: center; }
+  .c2c-stat-value { font-size: 20px; font-weight: 700; color: #1a1a2e; font-variant-numeric: tabular-nums; }
+  .c2c-stat-hot .c2c-stat-value { color: #b45309; }
+  .c2c-lines-table { width: 100%; }
+  .c2c-line-row td { vertical-align: middle; }
+  .c2c-accesses-cell { padding: 0 !important; background: #f9f9ff; }
+  .c2c-accesses-table { width: 100%; font-size: 12px; border-collapse: collapse; }
+  .c2c-accesses-table th { background: #f0f0f8; font-size: 11px; font-weight: 600; color: #555; padding: 5px 10px; text-align: left; border-bottom: 1px solid #ddd; }
+  .c2c-accesses-table td { padding: 4px 10px; border-bottom: 1px solid #eee; color: #333; }
+  .c2c-access-hot td:first-child { border-left: 3px solid #f59e0b; }
+  .c2c-source-line { font-family: monospace; font-size: 11px; color: #555; }
+  .c2c-no-sharing { margin: 12px 14px; font-size: 13px; color: #555; }
   .cursor { animation: blink 1s step-end infinite; }
   @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
 

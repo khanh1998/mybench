@@ -72,6 +72,10 @@ func resolvePerfDurationForMode(step plan.Step, mode string, params []plan.Param
 		if strings.TrimSpace(step.PerfTraceDuration) != "" {
 			modeDuration = step.PerfTraceDuration
 		}
+	case "c2c":
+		if strings.TrimSpace(step.PerfC2cDuration) != "" {
+			modeDuration = step.PerfC2cDuration
+		}
 	}
 	return resolvePerfDurationValue(modeDuration, params)
 }

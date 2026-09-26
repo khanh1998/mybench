@@ -122,6 +122,10 @@ export interface DesignStep {
 	perf_stat_delay: string;
 	perf_record_delay: string;
 	perf_trace_delay: string;
+	perf_c2c_enabled: number;
+	perf_c2c_duration: string;
+	perf_c2c_delay: string;
+	perf_ldlat: string;
 	perf_mode: 'stat' | 'record' | 'trace';
 	perf_cgroup: string;
 	perf_events: string;

@@ -35,6 +35,10 @@ export interface CompareRunInfo {
   db_pg_config?: string | null;
   design_id?: number;
   design_name?: string | null;
+  series_id?: number | null;
+  series_name?: string | null;
+  suite_id?: number | null;
+  suite_name?: string | null;
   compare_label?: string;
   compare_short_label?: string;
   bench_step_name?: string | null;
