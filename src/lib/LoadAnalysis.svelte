@@ -386,6 +386,8 @@
   let locksData  = $state<Record<number, LockPairRow[]>>({});
   let hasSql     = $state<Record<number, boolean>>({});
   let hiddenSessionStates = $state<string[]>([]);
+  // Backend states included in Top Wait Events; empty = all states.
+  let waitStates = $state<string[]>(['active']);
 
   let sqlSort      = $state<{ col: keyof SqlRow; asc: boolean }>({ col: 'delta_exec_time', asc: false });
   let sqlMode      = $state<'total' | 'persec'>('total');
@@ -421,6 +423,22 @@
     const next = new Set(expandedLockNodes);
     if (next.has(key)) next.delete(key); else next.add(key);
     expandedLockNodes = next;
+  }
+
+  function waitStateClause(): { sql: string; params: string[] } {
+    if (waitStates.length === 0) return { sql: '', params: [] };
+    return {
+      sql: `AND COALESCE(state,'unknown') IN (${waitStates.map(() => '?').join(',')})`,
+      params: [...waitStates],
+    };
+  }
+
+  function toggleWaitState(state: string) {
+    waitStates = waitStates.includes(state) ? waitStates.filter(s => s !== state) : [...waitStates, state];
+  }
+
+  function waitStatesLabel(): string {
+    return waitStates.length === 0 ? 'All states' : waitStates.join(', ');
   }
 
   function toggleSessionState(state: string) {
@@ -639,6 +657,36 @@
     return new Date(iso).getTime() - org;
   }
 
+  // Wait events for the Top Wait Events section. `waitStates` empty = all states.
+  async function loadWaits(run: RunMeta) {
+    const rid = run.id;
+    const p = showPhaseFilter ? localPhases : phases;
+    const { clause, params: pParams } = phaseClause(p);
+    const { sql: stateSql, params: stateParams } = waitStateClause();
+    // Top waits — return both per-event and total snapshot counts so the caller can
+    // compute all three derived metrics:
+    //   AAS           = occurrences / total_snapshots   (Oracle-style; additive across events)
+    //   Frequency     = event_snapshots / total_snapshots (how often the event appears)
+    //   Avg Concurrency = occurrences / event_snapshots  (depth when it does appear)
+    const waitsRes = await queryApi(
+      `WITH total AS (
+         SELECT COUNT(DISTINCT _collected_at) AS total_snapshots
+         FROM snap_pg_stat_activity
+         WHERE _run_id = ? AND ${clause}
+       )
+       SELECT COALESCE(wait_event_type,'CPU') as wait_event_type,
+              COALESCE(wait_event,'running') as wait_event,
+              COUNT(*) as occurrences,
+              COUNT(DISTINCT _collected_at) as event_snapshots,
+              (SELECT total_snapshots FROM total) as total_snapshots
+       FROM snap_pg_stat_activity
+       WHERE _run_id = ? AND ${clause} ${stateSql}
+       GROUP BY 1,2 ORDER BY 3 DESC LIMIT 20`,
+      [rid, ...pParams, rid, ...pParams, ...stateParams]
+    );
+    waitsData = { ...waitsData, [rid]: waitsRes.error ? [] : (waitsRes.rows as unknown as WaitRow[]) };
+  }
+
   async function loadAll() {
     if (runs.length === 0) return;
     loading = true;
@@ -674,28 +722,7 @@
       );
       sessionData = { ...sessionData, [rid]: sessRes.error ? [] : (sessRes.rows as unknown as SessionRow[]) };
 
-      // Top waits — return both per-event and total snapshot counts so the caller can
-      // compute all three derived metrics:
-      //   AAS           = occurrences / total_snapshots   (Oracle-style; additive across events)
-      //   Frequency     = event_snapshots / total_snapshots (how often the event appears)
-      //   Avg Concurrency = occurrences / event_snapshots  (depth when it does appear)
-      const waitsRes = await queryApi(
-        `WITH total AS (
-           SELECT COUNT(DISTINCT _collected_at) AS total_snapshots
-           FROM snap_pg_stat_activity
-           WHERE _run_id = ? AND ${clause}
-         )
-         SELECT COALESCE(wait_event_type,'CPU') as wait_event_type,
-                COALESCE(wait_event,'running') as wait_event,
-                COUNT(*) as occurrences,
-                COUNT(DISTINCT _collected_at) as event_snapshots,
-                (SELECT total_snapshots FROM total) as total_snapshots
-         FROM snap_pg_stat_activity
-         WHERE _run_id = ? AND ${clause} AND state = 'active'
-         GROUP BY 1,2 ORDER BY 3 DESC LIMIT 20`,
-        [rid, ...pParams, rid, ...pParams]
-      );
-      waitsData = { ...waitsData, [rid]: waitsRes.error ? [] : (waitsRes.rows as unknown as WaitRow[]) };
+      await loadWaits(run);
 
       // Top SQL (no phase filter — step-based collection)
       // When only 1 snapshot exists (single collect step), use absolute MAX values.
@@ -1605,6 +1632,7 @@
     const p = showPhaseFilter ? localPhases : phases;
     const { clause, params: pParams } = phaseClause(p);
 
+    const { sql: stateSql, params: stateParams } = waitStateClause();
     const whereEvent = isBroad
       ? `AND COALESCE(wait_event_type,'CPU') = ?`
       : `AND COALESCE(wait_event_type,'CPU') = ? AND COALESCE(wait_event,'running') = ?`;
@@ -1615,10 +1643,10 @@
     const res = await queryApi(
       `SELECT COALESCE(CAST(query_id AS TEXT), '__null__') as queryid, COUNT(*) as samples
        FROM snap_pg_stat_activity
-       WHERE _run_id = ? AND ${clause} AND state = 'active'
+       WHERE _run_id = ? AND ${clause} ${stateSql}
          ${whereEvent}
        GROUP BY 1 ORDER BY 2 DESC LIMIT 10`,
-      [run.id, ...pParams, ...eventParams]
+      [run.id, ...pParams, ...stateParams, ...eventParams]
     );
 
     if (!activeEventQueries) return; // dismissed while loading
@@ -1823,6 +1851,17 @@
     loadAll();
   });
 
+  // Reload only the waits when the state selection changes (initial load is done by loadAll).
+  let lastWaitStates = 'active'; // matches the default selection
+  $effect(() => {
+    const key = waitStates.join('|');
+    if (key === lastWaitStates) return;
+    lastWaitStates = key;
+    waitsPage = 0;
+    hiddenWaitEventLabels = [];
+    for (const run of runs) loadWaits(run);
+  });
+
   $effect(() => {
     for (const run of runs) {
       if (hasSql[run.id] && sqlData[run.id]?.length && !waitProfilesLoaded.has(run.id)) {
@@ -1959,9 +1998,20 @@
         <button class:active={waitsView === 'broad'} onclick={() => { waitsView = 'broad'; waitsPage = 0; hiddenWaitEventLabels = []; }}>Broad</button>
       </div>
     {/if}
+    <details class="state-dropdown">
+      <summary title="Backend states included in the wait event samples. Deselect all to include every state.">State: {waitStatesLabel()}</summary>
+      <div class="state-dropdown-menu">
+        {#each STATE_ORDER as st}
+          <label class="phase-check">
+            <input type="checkbox" checked={waitStates.includes(st)} onchange={() => toggleWaitState(st)} />
+            {st}
+          </label>
+        {/each}
+      </div>
+    </details>
   </div>
   <div class="waits-header-row">
-    <p class="section-desc" style="margin:0">Wait events sampled from active sessions (<code>pg_stat_activity</code>, <code>state = 'active'</code>). Hover a column header for its formula. <b>CPU · running</b> = active with no wait event (on a CPU or queued for one).{waitsView === 'broad' && (!isCompare || waitsTab === 'list') ? ' Broad mode groups by wait type.' : ''}</p>
+    <p class="section-desc" style="margin:0">Wait events sampled from {waitStates.length === 0 ? 'sessions in any state' : `sessions in state ${waitStates.map(x => `'${x}'`).join(', ')}`} (<code>pg_stat_activity</code>). Hover a column header for its formula. <b>CPU · running</b> = active with no wait event (on a CPU or queued for one).{waitsView === 'broad' && (!isCompare || waitsTab === 'list') ? ' Broad mode groups by wait type.' : ''}</p>
   </div>
   {#if !isCompare || waitsTab === 'list'}
     <div class="waits-grid" style="margin-top:10px">
@@ -2938,6 +2988,13 @@
   .waits-header-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 
   /* SQL mode toggle */
+  .state-dropdown { position: relative; font-size: 12px; }
+  .state-dropdown summary { cursor: pointer; border: 1px solid #e0e0e0; border-radius: 4px; padding: 3px 10px; color: #666; list-style: none; user-select: none; }
+  .state-dropdown summary::after { content: ' ▾'; }
+  .state-dropdown[open] summary { background: #f5f5f5; }
+  .state-dropdown-menu { position: absolute; z-index: 20; top: calc(100% + 2px); left: 0; background: #fff; border: 1px solid #e0e0e0; border-radius: 4px; padding: 6px 10px; display: flex; flex-direction: column; gap: 4px; min-width: 220px; box-shadow: 0 2px 8px rgba(0,0,0,.12); }
+  .state-dropdown-menu label { display: flex; align-items: center; gap: 8px; margin: 0; padding: 2px 0; font-size: 12px; font-weight: normal; color: #333; white-space: nowrap; }
+  .state-dropdown-menu input[type="checkbox"] { width: auto; padding: 0; margin: 0; flex-shrink: 0; }
   .mode-toggle { display: flex; border: 1px solid #e0e0e0; border-radius: 4px; overflow: hidden; flex-shrink: 0; }
   .mode-toggle button { background: none; border: none; padding: 3px 10px; font-size: 12px; cursor: pointer; color: #666; }
   .mode-toggle button:hover { background: #f5f5f5; }
