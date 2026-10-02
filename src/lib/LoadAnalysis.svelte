@@ -389,6 +389,8 @@
 
   let sqlSort      = $state<{ col: keyof SqlRow; asc: boolean }>({ col: 'delta_exec_time', asc: false });
   let sqlMode      = $state<'total' | 'persec'>('total');
+  /** Digits after the decimal point for Top SQL numbers. */
+  let sqlDigits    = $state(1);
   let showPlanCols = $state(false);
   let showPerRunSqlTables = $state(false);
   let sqlCrossGroup  = $state('Execution Time');
@@ -1205,14 +1207,14 @@
     });
   }
 
-  function fmtMs(ms: number): string {
-    if (ms >= 1000) return (ms / 1000).toFixed(1) + 's';
-    return ms.toFixed(1) + 'ms';
+  function fmtMs(ms: number, d = sqlDigits): string {
+    if (ms >= 1000) return (ms / 1000).toFixed(d) + 's';
+    return ms.toFixed(d) + 'ms';
   }
-  function fmtNum(n: number): string {
-    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
-    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
-    return String(Math.round(n));
+  function fmtNum(n: number, d = sqlDigits): string {
+    if (n >= 1e6) return (n / 1e6).toFixed(d) + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(d) + 'K';
+    return d > 0 && !Number.isInteger(n) ? n.toFixed(d) : String(Math.round(n));
   }
   function fmtExact(n: number, maxFractionDigits = 2): string {
     return n.toLocaleString(undefined, {
@@ -1220,18 +1222,18 @@
       maximumFractionDigits: maxFractionDigits
     });
   }
-  function fmtBytes(b: number): string {
-    if (b >= 1073741824) return (b / 1073741824).toFixed(1) + ' GB';
-    if (b >= 1048576) return (b / 1048576).toFixed(1) + ' MB';
-    if (b >= 1024) return (b / 1024).toFixed(1) + ' KB';
+  function fmtBytes(b: number, d = sqlDigits): string {
+    if (b >= 1073741824) return (b / 1073741824).toFixed(d) + ' GB';
+    if (b >= 1048576) return (b / 1048576).toFixed(d) + ' MB';
+    if (b >= 1024) return (b / 1024).toFixed(d) + ' KB';
     return String(Math.round(b)) + ' B';
   }
   function perSec(val: number, secs: number): string {
     if (!secs) return '—';
     const v = val / secs;
-    if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M/s';
-    if (v >= 1e3) return (v / 1e3).toFixed(1) + 'K/s';
-    return v.toFixed(1) + '/s';
+    if (v >= 1e6) return (v / 1e6).toFixed(sqlDigits) + 'M/s';
+    if (v >= 1e3) return (v / 1e3).toFixed(sqlDigits) + 'K/s';
+    return v.toFixed(sqlDigits) + '/s';
   }
   /** Derive bench duration from RunMeta timestamps (more reliable than SQL delta for single-snapshot runs). */
   function runBenchSecs(run: RunMeta): number {
@@ -1261,11 +1263,11 @@
     if (!secs) return '—';
     const v = n / secs;
     if (format === 'ms') {
-      if (v >= 1000) return `${(v / 1000).toFixed(3)}s/s`;
-      return `${fmtExact(v, 1)}ms/s`;
+      if (v >= 1000) return `${(v / 1000).toFixed(sqlDigits)}s/s`;
+      return `${fmtExact(v, sqlDigits)}ms/s`;
     }
     if (format === 'bytes') return `${fmtBytes(v)}/s`;
-    return `${fmtExact(v, 2)}/s`;
+    return `${fmtExact(v, sqlDigits)}/s`;
   }
   function metricNumber(value: unknown): number | null {
     if (value == null || value === '') return null;
@@ -1334,7 +1336,7 @@
     }
     if (format === 'ms') return fmtMs(n);
     if (format === 'bytes') return fmtBytes(n);
-    if (format === 'decimal') return fmtExact(n, 2);
+    if (format === 'decimal') return fmtExact(n, sqlDigits);
     return fmtExact(n, 0);
   }
   function statementSnapshotNote(metrics: StatementMetrics): string {
@@ -1452,7 +1454,7 @@
     if (!Number.isFinite(n)) return '—';
     if (format === 'ms') return fmtMs(n);
     if (format === 'bytes') return fmtBytes(n);
-    if (format === 'decimal') return n === 0 ? '—' : fmtExact(n, 1) + '%';
+    if (format === 'decimal') return n === 0 ? '—' : fmtExact(n, sqlDigits) + '%';
     return fmtNum(n);
   }
 
@@ -1992,7 +1994,7 @@
                   const aasPct = totalOccurrences > 0 ? occ / totalOccurrences * 100 : 0;
                   const cells: (string | number | null)[] = [row.wait_event_type];
                   if (waitsView === 'detail') cells.push(row.wait_event);
-                  cells.push(fmtNum(occ), aasPct.toFixed(1) + '%', aas.toFixed(2), freq.toFixed(0) + '%', concurrency.toFixed(2));
+                  cells.push(fmtNum(occ, 1), aasPct.toFixed(1) + '%', aas.toFixed(2), freq.toFixed(0) + '%', concurrency.toFixed(2));
                   return cells;
                 });
                 return markdownTable(headers, rows);
@@ -2028,7 +2030,7 @@
                     tabindex="0" role="button">
                     <td><span class="wait-badge" style="background:{color}20;color:{color}">{row.wait_event_type}</span></td>
                     {#if waitsView === 'detail'}<td style="font-family:monospace;font-size:11px">{row.wait_event}</td>{/if}
-                    <td style="text-align:right;font-variant-numeric:tabular-nums">{fmtNum(occ)}</td>
+                    <td style="text-align:right;font-variant-numeric:tabular-nums">{fmtNum(occ, 1)}</td>
                     <td style="text-align:right;font-variant-numeric:tabular-nums;color:#9ca3af">{aasPct.toFixed(1)}%</td>
                     <td style="text-align:right;font-variant-numeric:tabular-nums;color:#555">{aas.toFixed(2)}</td>
                     <td style="text-align:right;font-variant-numeric:tabular-nums;color:#9ca3af">{freq.toFixed(0)}%</td>
@@ -2095,6 +2097,12 @@
         Show planning time
       </label>
     {/if}
+    <label class="plan-cols-toggle">
+      Decimals
+      <select bind:value={sqlDigits}>
+        {#each [0, 1, 2, 3, 4] as d}<option value={d}>{d}</option>{/each}
+      </select>
+    </label>
     {#if isCompare && anySql}
       <button class="per-run-toggle-btn" onclick={() => showPerRunSqlTables = !showPerRunSqlTables}>
         {showPerRunSqlTables ? 'Show aggregated table' : 'Show per-run tables'}
