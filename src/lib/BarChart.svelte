@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { formatCompact as fmtVal } from '$lib/telemetry/format';
+
   interface ChartSeries { label: string; color: string; points: { t: number; v: number }[]; }
 
   let {
@@ -33,13 +35,6 @@
   const vRange = $derived(vMax || 1);
 
   function by(v: number) { return IH - (v / vRange) * IH; }
-
-  function fmtVal(v: number) {
-    if (Math.abs(v) >= 1e9) return (v / 1e9).toFixed(1) + 'G';
-    if (Math.abs(v) >= 1e6) return (v / 1e6).toFixed(1) + 'M';
-    if (Math.abs(v) >= 1e3) return (v / 1e3).toFixed(1) + 'K';
-    return Number.isInteger(v) ? String(v) : v.toFixed(2);
-  }
 
   function truncLabel(s: string, maxChars: number): string {
     return s.length > maxChars ? s.slice(0, maxChars - 1) + '…' : s;

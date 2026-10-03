@@ -1,6 +1,9 @@
 <script lang="ts">
   import LineChart from '$lib/LineChart.svelte';
   import BarChart from '$lib/BarChart.svelte';
+  import StackedAvgChart from '$lib/StackedAvgChart.svelte';
+  import StackSeriesPicker from '$lib/telemetry/StackSeriesPicker.svelte';
+  import { seriesSegment, type StackBar } from '$lib/telemetry/stack';
   import type { TelemetryChartMetric, TelemetrySection, TelemetrySeries } from '$lib/telemetry/types';
 
   interface CompareRun {
@@ -35,6 +38,8 @@
   let selectedMetricEntity = $state<string | null>(null);
   let selectedSeriesLabel = $state<string | null>(null);
   let selectedValueView = $state<'rate' | 'raw' | 'avg'>('rate');
+  let avgLayout = $state<'bars' | 'stacked'>('bars');
+  let hiddenStackLabels = $state<Record<string, string[]>>({});
   let selectedProcessKey = $state<string | null>(null);
   let selectedProcessMetricType = $state<ProcessMetricTypeKey>('cpu');
 
@@ -279,18 +284,22 @@
   }
 
   function sourceSeriesForSelection(section: TelemetrySection | null | undefined): TelemetrySeries | null {
-    if (!section || section.status !== 'ok' || !selectedSeriesLabel) return null;
+    return sourceSeriesForLabel(section, selectedSeriesLabel);
+  }
+
+  function sourceSeriesForLabel(section: TelemetrySection | null | undefined, seriesLabel: string | null): TelemetrySeries | null {
+    if (!section || section.status !== 'ok' || !seriesLabel) return null;
 
     if (isHostProcessesSection) {
       if (!activeProcessOption || !activeProcessMetricType) return null;
       const pids = pidsForProcessSelection(section, activeProcessOption.key);
       return metricSeriesForView(getAggregatedProcessMetric(section, pids, activeProcessMetricType.key))
-        .find((series) => series.label === selectedSeriesLabel) ?? null;
+        .find((series) => series.label === seriesLabel) ?? null;
     }
 
     return activeMetric
-      ? metricSeriesForView(findComparableMetric(section, activeMetric)).find((series) => series.label === selectedSeriesLabel) ?? null
-      : section.chartSeries.find((series) => series.label === selectedSeriesLabel) ?? null;
+      ? metricSeriesForView(findComparableMetric(section, activeMetric)).find((series) => series.label === seriesLabel) ?? null
+      : section.chartSeries.find((series) => series.label === seriesLabel) ?? null;
   }
 
   const seriesOptions = $derived.by(() => {
@@ -315,6 +324,49 @@
 
     return [...labels];
   });
+
+  const stackLabels = $derived(isHostProcessesSection ? [] : (activeMetric?.stackLabels ?? []));
+  const canStack = $derived(activeValueView === 'avg' && stackLabels.length >= 2);
+  const isStacked = $derived(canStack && avgLayout === 'stacked');
+  const hiddenStack = $derived(activeMetric ? (hiddenStackLabels[activeMetric.key] ?? []) : []);
+  const stackOptions = $derived.by(() => {
+    const options: { label: string; color: string }[] = [];
+    for (const stackLabel of stackLabels) {
+      for (const run of runs) {
+        const series = sourceSeriesForLabel(sectionsByRun[run.id], stackLabel);
+        if (series) {
+          options.push({ label: stackLabel, color: series.color });
+          break;
+        }
+      }
+    }
+    return options;
+  });
+  // One stacked bar per run; segments are the picked series, coloured by series (not by run).
+  const stackBars = $derived.by((): StackBar[] => {
+    const visible = stackOptions.filter((option) => !hiddenStack.includes(option.label));
+    return runs
+      .map((run): StackBar | null => {
+        const section = sectionsByRun[run.id];
+        const segments = visible
+          .map((option) => {
+            const series = sourceSeriesForLabel(section, option.label);
+            return series ? seriesSegment(series, option.color) : null;
+          })
+          .filter((segment): segment is NonNullable<typeof segment> => segment !== null);
+        return segments.length ? { label: run.label, segments } : null;
+      })
+      .filter((bar): bar is StackBar => bar !== null);
+  });
+  function toggleStackLabel(label: string) {
+    const key = activeMetric?.key;
+    if (!key) return;
+    const current = hiddenStackLabels[key] ?? [];
+    hiddenStackLabels = {
+      ...hiddenStackLabels,
+      [key]: current.includes(label) ? current.filter((item) => item !== label) : [...current, label]
+    };
+  }
 
   const mergedSeries = $derived.by(() => {
     if (!selectedSeriesLabel) return [];
@@ -355,9 +407,10 @@
       return `${label} — ${processLabel} · ${metricLabel}${viewSuffix}`;
     }
     const entity = activeMetric?.entity ? ` · ${activeMetric.entity}` : '';
-    const viewSuffix = activeValueView === 'avg' ? ' · Avg'
+    const viewSuffix = activeValueView === 'avg' ? (isStacked ? ' · Avg (stacked)' : ' · Avg')
       : activeMetricHasRaw ? ` · ${activeValueView === 'raw' ? 'Raw' : 'Rate/s'}`
       : '';
+    if (isStacked && activeMetric) return `${label} — ${activeMetric.label}${entity}${viewSuffix}`;
     if (activeMetric && selectedSeriesLabel) return `${label} — ${activeMetric.label}${entity}${viewSuffix} · ${selectedSeriesLabel}`;
     if (selectedSeriesLabel) return `${label} — ${selectedSeriesLabel}`;
     return label;
@@ -536,7 +589,17 @@
         </div>
       </div>
 
-      {#if seriesOptions.length > 1}
+      {#if canStack}
+        <div class="value-view-control" aria-label="Avg chart layout">
+          <span class="value-view-label">Layout</span>
+          <div class="value-view-toggle">
+            <button type="button" class:active={!isStacked} onclick={() => avgLayout = 'bars'}>Bars</button>
+            <button type="button" class:active={isStacked} onclick={() => avgLayout = 'stacked'}>Stacked</button>
+          </div>
+        </div>
+      {/if}
+
+      {#if seriesOptions.length > 1 && !isStacked}
         <label>
           Series
           <select bind:value={selectedSeriesLabel}>
@@ -549,18 +612,24 @@
     </div>
   {/if}
 
+  {#if isStacked}
+    <StackSeriesPicker options={stackOptions} hidden={hiddenStack} ontoggle={toggleStackLabel} />
+  {/if}
+
   {#if activeValueView !== 'avg'}
     <div class="alignment-note">Lines are aligned to each run&apos;s first selected telemetry sample.</div>
   {/if}
 
-  {#if selectedSeriesDescription}
+  {#if selectedSeriesDescription && !isStacked}
     <div class="series-description">
       <span>{selectedSeriesLabel ?? 'Series'}</span>
       {selectedSeriesDescription}
     </div>
   {/if}
 
-  {#if mergedSeries.length > 0}
+  {#if isStacked}
+    <StackedAvgChart title={chartTitle} stacks={stackBars} />
+  {:else if mergedSeries.length > 0}
     {#if activeValueView === 'avg'}
       <BarChart title={chartTitle} series={mergedSeries} />
     {:else}

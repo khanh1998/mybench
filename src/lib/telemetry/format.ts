@@ -36,3 +36,11 @@ export function formatValue(value: unknown, kind: TelemetryValueKind = 'text'): 
   if (kind === 'tps') return `${formatNumber(numeric, 2)} TPS`;
   return formatNumber(numeric, 2);
 }
+
+/** Short axis/label format: 1.2K, 3.4M, 5.6G; small values keep two decimals. */
+export function formatCompact(v: number): string {
+  if (Math.abs(v) >= 1e9) return (v / 1e9).toFixed(1) + 'G';
+  if (Math.abs(v) >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+  if (Math.abs(v) >= 1e3) return (v / 1e3).toFixed(1) + 'K';
+  return Number.isInteger(v) ? String(v) : v.toFixed(2);
+}

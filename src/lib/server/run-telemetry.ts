@@ -43,6 +43,8 @@ export interface TelemetryChartMetric {
 	group?: string;
 	entity?: string;
 	category?: 'raw' | 'derived';
+	/** Labels of `series` that are disjoint parts of a whole and can be shown as a stacked bar of averages. */
+	stackLabels?: string[];
 }
 
 export interface TelemetryMarker {
@@ -4289,6 +4291,7 @@ function buildHostSystemSection(db: Database.Database, runId: number, runStartMs
 			{ label: 'System %',  description: 'CPU time in kernel-space (syscalls, drivers)', valueFn: cpuPct(['cpu_system']) },
 			{ label: 'IO Wait %', description: 'CPU time idle while waiting for I/O to complete', valueFn: cpuPct(['cpu_iowait']) },
 			{ label: 'Stolen %',  description: 'CPU time stolen by the hypervisor for other VMs (cloud environments)', valueFn: cpuPct(['cpu_steal']) },
+			{ label: 'IRQ %',     description: 'CPU time servicing hardware and software interrupts (irq + softirq)', valueFn: cpuPct(['cpu_irq', 'cpu_softirq']) },
 			{ label: 'Idle %',    description: 'CPU time truly idle', valueFn: cpuPct(['cpu_idle']) },
 		], 'percent', runStartMs);
 		pushChartMetric(chartMetrics, withChartGroup(cpuPctGroup, 'CPU'));
@@ -5193,6 +5196,33 @@ function buildHostProcessesSection(db: Database.Database, runId: number, runStar
 	};
 }
 
+// Metrics whose series are disjoint parts of a whole, so a stacked bar of their averages is meaningful.
+// Keyed by `<section key>:<metric key>`; null = every series, otherwise only the listed series labels
+// (e.g. "total/s" is excluded because it already is the sum of the others).
+const STACKABLE_METRICS: Record<string, string[] | null> = {
+	'database:transactions': ['commits/s', 'rollbacks/s'],
+	'database:block_access': null,
+	'database:row_writes': null,
+	'database:session_time': ['active time/s', 'idle in transaction time/s'],
+	'io:io_time_mix': null,
+	'host_system:stat_cpu_pct': null,
+	'host_system:stat_cpu': null,
+	'host_system:mem_used': null,
+	'host_system:swap_space': null,
+	'host_system:mem_active_inactive': null
+};
+
+function markStackableMetrics(sections: TelemetrySection[]): void {
+	for (const section of sections) {
+		section.chartMetrics = section.chartMetrics?.map((metric) => {
+			const allowed = STACKABLE_METRICS[`${section.key}:${metric.key}`];
+			if (allowed === undefined) return metric;
+			const labels = metric.series.map((series) => series.label).filter((label) => !allowed || allowed.includes(label));
+			return labels.length >= 2 ? { ...metric, stackLabels: labels } : metric;
+		});
+	}
+}
+
 export function buildRunTelemetry(db: Database.Database, runId: number, phases?: string[]): RunTelemetry {
 	const selectedPhases = parsePhases(phases);
 	const run = db.prepare(`
@@ -5242,6 +5272,8 @@ export function buildRunTelemetry(db: Database.Database, runId: number, phases?:
 		buildHostSystemSection(db, runId, runStartMs, selectedPhases, run.bench_started_at, run.post_started_at, databaseRows),
 		buildHostProcessesSection(db, runId, runStartMs, selectedPhases, run.bench_started_at, run.post_started_at)
 	];
+
+	markStackableMetrics(sections);
 
 	const markers: TelemetryMarker[] = [];
 	const benchMarker = toMs(run.bench_started_at);
