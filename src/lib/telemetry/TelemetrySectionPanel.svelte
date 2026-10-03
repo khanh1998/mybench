@@ -430,7 +430,7 @@
                   )
                 )
               );
-              return markdownTable(headers, rows);
+              return markdownTable(headers, rows, section.tableTitle);
             }} />
             <button
               type="button"

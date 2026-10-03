@@ -2047,7 +2047,7 @@
                   cells.push(fmtNum(occ, 1), aasPct.toFixed(1) + '%', aas.toFixed(2), freq.toFixed(0) + '%', concurrency.toFixed(2));
                   return cells;
                 });
-                return markdownTable(headers, rows);
+                return markdownTable(headers, rows, `Top Wait Events${isCompare ? ` — ${run.label}` : ''}`);
               }} />
             </div>
             <table class="data-table">
@@ -2249,7 +2249,7 @@
                     : cv.pct.toFixed(1) + '% (' + cv.seconds.toFixed(2) + 's)';
                 })
               ]);
-              return markdownTable(headers, rows);
+              return markdownTable(headers, rows, `Top SQL — ${activeCrossGroup.title} (${waitFilterType})`);
             }} />
           </div>
         {/if}
@@ -2262,7 +2262,7 @@
                 row.query_short,
                 ...runs.map(r => fmtCrossMetric(row.byRun[r.id], m.key, m.format))
               ]);
-              return markdownTable(headers, rows);
+              return markdownTable(headers, rows, `Top SQL — ${activeCrossGroup.title} · ${m.label}`);
             }} />
           </div>
         {/if}
@@ -2382,7 +2382,7 @@
                     if (showPlanCols) cells.push(row.mean_plan_time > 0 ? fmtMs(Number(row.mean_plan_time)) : '—');
                     return cells;
                   });
-                  return markdownTable(headers, rows);
+                  return markdownTable(headers, rows, `Top SQL${isCompare ? ` — ${run.label}` : ''}`);
                 }} />
               </div>
               <table class="data-table sql-table">
@@ -2598,7 +2598,7 @@
                         cells.push(r.lock_wait, r.lock_block, r.pid_wait, r.pid_block);
                         return cells;
                       });
-                      return markdownTable(headers, rows);
+                      return markdownTable(headers, rows, 'Lock Analysis — Contention');
                     }} />
                   </div>
                   <div class="ct-table">

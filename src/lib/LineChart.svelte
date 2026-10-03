@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { markdownTable } from '$lib/utils';
   interface ChartPoint { t: number; v: number; }
   interface ChartSeries { label: string; description?: string; color: string; points: ChartPoint[]; }
   interface Marker { t: number; label: string; color?: string; }
@@ -186,20 +187,6 @@
     headerCopyTimer = setTimeout(() => { headerCopied = null; }, 1600);
   }
 
-  function markdownCell(value: string | number | null): string {
-    if (value === null) return '';
-    if (typeof value === 'number') return Number.isFinite(value) ? String(+value.toFixed(4)) : '';
-    return value.replace(/\|/g, '\\|').replace(/\n/g, '<br>');
-  }
-
-  function markdownTable(headers: string[], rows: (string | number | null)[][]): string {
-    return [
-      `| ${headers.map(markdownCell).join(' | ')} |`,
-      `| ${headers.map(() => '---').join(' | ')} |`,
-      ...rows.map((row) => `| ${row.map(markdownCell).join(' | ')} |`)
-    ].join('\n');
-  }
-
   function colorToRgba(color: string, alpha: number): string {
     if (color.startsWith('#')) {
       const r = parseInt(color.slice(1, 3), 16);
@@ -242,7 +229,8 @@
         interaction: { mode: 'index', intersect: false },
         scales: {
           x: { type: 'linear', title: { display: true, text: 'time (s)' } }
-        }
+        },
+        plugins: { title: { display: true, text: title } }
       }
     };
     navigator.clipboard.writeText(JSON.stringify(config, null, 2));
@@ -256,7 +244,7 @@
       +(time / 1000).toFixed(1),
       ...valueMaps.map((values) => values.get(time) ?? null)
     ]);
-    navigator.clipboard.writeText(markdownTable(['time_s', ...visibleSeries.map((s) => s.label)], rows));
+    navigator.clipboard.writeText(markdownTable(['time_s', ...visibleSeries.map((s) => s.label)], rows, title));
     markHeaderCopied('markdown');
   }
 

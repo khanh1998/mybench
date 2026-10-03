@@ -796,7 +796,10 @@
       },
       options: {
         interaction: { mode: 'index', intersect: false },
-        plugins: { legend: { display: false } }
+        plugins: {
+          title: { display: true, text: `${summaryTitle} — ${metric.label}` },
+          legend: { display: false }
+        }
       }
     };
     navigator.clipboard.writeText(JSON.stringify(config, null, 2));
@@ -808,7 +811,7 @@
     if (!metric) return;
     const vals = summaryChartValues();
     const rows = vals.map(d => [d.label, d.value !== null ? +d.value.toFixed(metric.decimals) : '—']);
-    navigator.clipboard.writeText(markdownTable(['Run', metric.label], rows));
+    navigator.clipboard.writeText(markdownTable(['Run', metric.label], rows, `${summaryTitle} — ${metric.label}`));
     markSummaryCopied('markdown');
   }
 </script>
@@ -941,7 +944,7 @@
             });
             return [metric.label, ...values];
           });
-          return markdownTable(headers, rows);
+          return markdownTable(headers, rows, summaryTitle);
         }} />
       </div>
       <div class="table-wrap">
@@ -996,7 +999,7 @@
                 }
                 return [row.label, ...row.values.map(v => v ?? '—')];
               });
-              return markdownTable(headers, rows);
+              return markdownTable(headers, rows, 'Run context');
             }} />
           </div>
           <div class="table-wrap">
@@ -1043,7 +1046,7 @@
           <CopyTableButton getMarkdown={() => {
             const headers = ['Parameter', ...selectedRunIds.map(id => getRunLabel(id, true))];
             const rows = paramDiffRows().map(row => [row.name, ...row.values.map(v => v ?? '—')]);
-            return markdownTable(headers, rows);
+            return markdownTable(headers, rows, 'Parameters');
           }} />
         </div>
         <div class="table-wrap">
@@ -1109,7 +1112,7 @@
               });
               return [scriptName, weight ?? '—', ...values];
             });
-            return markdownTable(headers, rows);
+            return markdownTable(headers, rows, `Benchmark Scripts — ${scriptMetric.label}`);
           }} />
         </div>
         <div class="table-wrap">
@@ -1247,7 +1250,7 @@
                     rows.push([label, ...row.values.map(v => v !== null ? v : null)]);
                   }
                 }
-                return markdownTable(headers, rows);
+                return markdownTable(headers, rows, `Perf Compare — ${step.stepLabel}`);
               }} />
             </div>
             <div class="table-wrap">
@@ -1331,7 +1334,7 @@
               <CopyTableButton getMarkdown={() => {
                 const headers = ['Symbol', 'DSO', ...correctedRunsWithPerf.map(e => e.label)];
                 const rows = step.rows.map(row => [row.symbol, row.dso, ...row.values.map(v => v !== null ? `${v.toFixed(2)}%` : '—')]);
-                return markdownTable(headers, rows);
+                return markdownTable(headers, rows, `Perf Record — Top Symbols — ${step.stepLabel}`);
               }} />
             </div>
             <div class="table-wrap">
@@ -1395,7 +1398,7 @@
                   const vals = perfTraceMetric === 'calls' ? row.callsPerRun : perfTraceMetric === 'errors' ? row.errorsPerRun : perfTraceMetric === 'avg_ms' ? row.avgMsPerRun : row.maxMsPerRun;
                   return [row.syscall, ...vals.map(v => v !== null ? (perfTraceMetric === 'calls' || perfTraceMetric === 'errors' ? v.toLocaleString() : `${v.toFixed(3)} ms`) : '—')];
                 });
-                return markdownTable(headers, rows);
+                return markdownTable(headers, rows, `Perf Trace — Top Syscalls (${metricLabel}) — ${step.stepLabel}`);
               }} />
             </div>
             <div class="table-wrap">

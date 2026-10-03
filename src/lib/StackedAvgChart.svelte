@@ -102,7 +102,7 @@
       })
     ]);
     rows.push(['total', ...stacks.flatMap((_, si) => [totals[si], 100])]);
-    navigator.clipboard.writeText(markdownTable(headers, rows));
+    navigator.clipboard.writeText(markdownTable(headers, rows, title));
     markCopied('markdown');
   }
 

@@ -1057,7 +1057,7 @@
                           ]);
                         }
                       }
-                      return markdownTable(['Event', 'Total', 'Per Tx', 'Derived', 'Coverage'], rows);
+                      return markdownTable(['Event', 'Total', 'Per Tx', 'Derived', 'Coverage'], rows, `Perf Stat — ${s.name}`);
                     }} />
                   </div>
                   <table class="perf-events-table">
@@ -1101,7 +1101,7 @@
                     <div class="table-copy-header">
                       <CopyTableButton getMarkdown={() => {
                         const rows = topFunctions.map(row => [`${fmtMetric(row.overhead, 2)}%`, row.symbol, row.dso]);
-                        return markdownTable(['Overhead', 'Symbol', 'DSO'], rows);
+                        return markdownTable(['Overhead', 'Symbol', 'DSO'], rows, `Perf Record — ${s.name}`);
                       }} />
                     </div>
                   </div>
@@ -1132,7 +1132,7 @@
                   <div class="table-copy-header">
                     <CopyTableButton getMarkdown={() => {
                       const rows = syscallGroups.map(g => [g.syscall, fmtMetric(g.calls, 0), fmtMetric(g.errors, 0), fmtMetric(g.avg_ms, 3), fmtMetric(g.max_ms, 3)]);
-                      return markdownTable(['Syscall', 'Calls', 'Errors', 'Avg ms', 'Max ms'], rows);
+                      return markdownTable(['Syscall', 'Calls', 'Errors', 'Avg ms', 'Max ms'], rows, `Perf Trace — ${s.name}`);
                     }} />
                   </div>
                   <table class="perf-events-table">

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { markdownTable } from '$lib/utils';
   import { formatCompact as fmtVal } from '$lib/telemetry/format';
 
   interface ChartSeries { label: string; color: string; points: { t: number; v: number }[]; }
@@ -57,19 +58,6 @@
     headerCopyTimer = setTimeout(() => { headerCopied = null; }, 1600);
   }
 
-  function markdownCell(value: string | number): string {
-    if (typeof value === 'number') return Number.isFinite(value) ? String(+value.toFixed(4)) : '';
-    return value.replace(/\|/g, '\\|').replace(/\n/g, '<br>');
-  }
-
-  function markdownTable(headers: string[], rows: (string | number)[][]): string {
-    return [
-      `| ${headers.map(markdownCell).join(' | ')} |`,
-      `| ${headers.map(() => '---').join(' | ')} |`,
-      ...rows.map((row) => `| ${row.map(markdownCell).join(' | ')} |`)
-    ].join('\n');
-  }
-
   function colorToRgba(color: string, alpha: number): string {
     if (color.startsWith('#')) {
       const r = parseInt(color.slice(1, 3), 16);
@@ -112,6 +100,7 @@
       options: {
         interaction: { mode: 'index', intersect: false },
         plugins: {
+          title: { display: true, text: title },
           legend: { display: false }
         }
       }
@@ -122,7 +111,7 @@
 
   function copyMarkdownTable() {
     const rows = bars.map((bar) => [bar.label, bar.mean, bar.min, bar.max]);
-    navigator.clipboard.writeText(markdownTable(['label', 'avg', 'min', 'max'], rows));
+    navigator.clipboard.writeText(markdownTable(['label', 'avg', 'min', 'max'], rows, title));
     markHeaderCopied('markdown');
   }
 </script>
