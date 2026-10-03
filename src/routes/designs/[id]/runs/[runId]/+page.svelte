@@ -8,6 +8,7 @@
   import DatabaseTelemetry from '$lib/DatabaseTelemetry.svelte';
   import PgbenchOverview from '$lib/PgbenchOverview.svelte';
   import SysbenchOverview from '$lib/SysbenchOverview.svelte';
+  import { formatPingLatency, formatSelect1Latency, parseNetLatency } from '$lib/net-latency';
   import type { PageData } from './$types';
   import { fmtTs, fmtTime, markdownTable } from '$lib/utils';
   import { correctPerfEvent } from '$lib/perf-utils';
@@ -107,6 +108,7 @@
     is_imported?: number;
     name: string; notes: string; profile_name: string; run_params: string;
     host_config?: string | null;
+    net_latency?: string | null;
     runner_spec?: string | null;
     db_spec?: string | null;
     db_pg_config?: string | null;
@@ -182,6 +184,7 @@
   }
 
   const hostConfig = $derived(parseJson<HostConfig>(run?.host_config ?? null));
+  const netLatency = $derived(parseNetLatency(run?.net_latency));
 
   function fmtMemKb(kb: number): string {
     if (kb >= 1024 * 1024) return `${(kb / 1024 / 1024).toFixed(1)} GB`;
@@ -707,6 +710,16 @@
         <div class="stat-label">Transactions</div>
         <div class="stat-value">{run.transactions?.toLocaleString() ?? '—'}</div>
       </div>
+      {#if netLatency}
+        <div class="stat" title={netLatency.select1 ? `${netLatency.select1.samples} samples · min ${netLatency.select1.min_ms.toFixed(3)} · avg ${netLatency.select1.avg_ms.toFixed(3)} · max ${netLatency.select1.max_ms.toFixed(3)} ms` : (netLatency.select1_error ?? '')}>
+          <div class="stat-label">Net RTT (SELECT 1)</div>
+          <div class="stat-value">{formatSelect1Latency(netLatency) ?? '—'}</div>
+        </div>
+        <div class="stat" title={netLatency.ping ? `${netLatency.ping.received}/${netLatency.ping.sent} replies · min ${netLatency.ping.min_ms.toFixed(3)} · mdev ${netLatency.ping.mdev_ms.toFixed(3)} ms` : (netLatency.ping_error ?? '')}>
+          <div class="stat-label">Net RTT (ping)</div>
+          <div class="stat-value">{formatPingLatency(netLatency) ?? '—'}</div>
+        </div>
+      {/if}
       <div class="stat">
         <div class="stat-label">Started</div>
         <div class="stat-value">{fmtTs(run.started_at)}</div>

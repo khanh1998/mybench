@@ -4,6 +4,7 @@
   import CopyTableButton from '$lib/CopyTableButton.svelte';
   import { RUN_COMPARE_COLORS } from '$lib/compare/colors';
   import type { CompareRunInfo, CompareStepPerf } from '$lib/compare/types';
+  import { formatPingLatency, formatSelect1Latency, parseNetLatency } from '$lib/net-latency';
   import { correctPerfEvent } from '$lib/perf-utils';
   import type { PgbenchScriptResult } from '$lib/pgbench-results';
   import { markdownTable } from '$lib/utils';
@@ -597,6 +598,14 @@
       {
         label: 'Total runtime',
         values: runs.map((run) => formatDuration(durationSecondsBetween(run?.started_at ?? null, run?.finished_at ?? null)))
+      },
+      {
+        label: 'Network latency (SELECT 1 p50)',
+        values: runs.map((run) => formatSelect1Latency(parseNetLatency(run?.net_latency)))
+      },
+      {
+        label: 'Network latency (ping avg)',
+        values: runs.map((run) => formatPingLatency(parseNetLatency(run?.net_latency)))
       },
       ...(isSysbench ? [
         {

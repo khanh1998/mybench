@@ -1119,6 +1119,11 @@ FROM snap_pg_stat_bgwriter WHERE _run_id = ? ORDER BY _collected_at DESC LIMIT 1
 		db.exec(`ALTER TABLE benchmark_runs ADD COLUMN host_config TEXT`);
 	}
 
+	// net_latency column on benchmark_runs (pre-run SELECT 1 + ping latency probe as JSON)
+	if (!runColsHost.includes('net_latency')) {
+		db.exec(`ALTER TABLE benchmark_runs ADD COLUMN net_latency TEXT`);
+	}
+
 	// spec / pg_config fields on server tables; runner_spec/db_spec/db_pg_config snapshots on runs
 	const ec2Cols2 = (db.prepare(`PRAGMA table_info(ec2_servers)`).all() as { name: string }[]).map(c => c.name);
 	if (!ec2Cols2.includes('spec')) {

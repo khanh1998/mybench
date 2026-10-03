@@ -81,6 +81,7 @@ export const load: PageServerLoad = ({ params }) => {
 		post_started_at: string | null;
 		finished_at: string | null;
 		host_config: string | null;
+		net_latency: string | null;
 		runner_spec: string | null;
 		db_spec: string | null;
 		db_pg_config: string | null;
@@ -106,7 +107,7 @@ export const load: PageServerLoad = ({ params }) => {
 		.prepare(
 			`SELECT br.id, br.name, br.status, br.tps, br.latency_avg_ms, br.latency_stddev_ms, br.transactions,
 			        br.profile_name, br.run_params, br.started_at, br.bench_started_at, br.post_started_at, br.finished_at,
-			        br.host_config, br.runner_spec, br.db_spec, br.db_pg_config,
+			        br.host_config, br.net_latency, br.runner_spec, br.db_spec, br.db_pg_config,
 			        br.series_id, bs.name AS series_name, bs.suite_id, ds.name AS suite_name,
 			        rs.type AS bench_step_type,
 			        rs.pgbench_summary_json,
