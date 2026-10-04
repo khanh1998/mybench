@@ -969,6 +969,8 @@ function migrate(db: Database.Database) {
 	// proc step columns
 	if (!stepCols.includes('proc_groups')) db.exec(`ALTER TABLE design_steps ADD COLUMN proc_groups TEXT NOT NULL DEFAULT '[]'`);
 	if (!stepCols.includes('proc_interval_seconds')) db.exec(`ALTER TABLE design_steps ADD COLUMN proc_interval_seconds TEXT NOT NULL DEFAULT ''`);
+	// Also sample the runner host's own /proc (client-side saturation). On by default: overhead is negligible.
+	if (!stepCols.includes('proc_collect_runner')) db.exec(`ALTER TABLE design_steps ADD COLUMN proc_collect_runner INTEGER NOT NULL DEFAULT 1`);
 	const perfModeToggleMigrated = db.prepare(`SELECT id FROM schema_migrations WHERE id = 'perf_mode_toggles_v1'`).get();
 	if (!perfModeToggleMigrated) {
 		db.exec(`
@@ -1119,6 +1121,11 @@ FROM snap_pg_stat_bgwriter WHERE _run_id = ? ORDER BY _collected_at DESC LIMIT 1
 		db.exec(`ALTER TABLE benchmark_runs ADD COLUMN host_config TEXT`);
 	}
 
+	// runner_config column on benchmark_runs (one-time runner-host facts: nproc, cpu model, mem, kernel — JSON)
+	if (!runColsHost.includes('runner_config')) {
+		db.exec(`ALTER TABLE benchmark_runs ADD COLUMN runner_config TEXT`);
+	}
+
 	// net_latency column on benchmark_runs (pre-run SELECT 1 + ping latency probe as JSON)
 	if (!runColsHost.includes('net_latency')) {
 		db.exec(`ALTER TABLE benchmark_runs ADD COLUMN net_latency TEXT`);
@@ -1251,6 +1258,77 @@ FROM snap_pg_stat_bgwriter WHERE _run_id = ? ORDER BY _collected_at DESC LIMIT 1
       pid INTEGER
     );
   `);
+
+	// runner_snap_* timeseries tables — metrics of the runner host (where pgbench/sysbench run).
+	// Same dynamic-column pattern as host_snap_*; data columns are added by the importer.
+	db.exec(`
+    CREATE TABLE IF NOT EXISTS runner_snap_proc_stat (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS runner_snap_proc_stat_cpu (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL,
+      cpu_id TEXT
+    );
+    CREATE TABLE IF NOT EXISTS runner_snap_proc_loadavg (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS runner_snap_proc_meminfo (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS runner_snap_proc_psi (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS runner_snap_proc_netdev (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL,
+      iface TEXT
+    );
+    CREATE TABLE IF NOT EXISTS runner_snap_proc_snmp (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS runner_snap_proc_thread (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL,
+      pid INTEGER,
+      tid INTEGER,
+      proc TEXT,
+      comm TEXT,
+      state TEXT
+    );
+    CREATE TABLE IF NOT EXISTS runner_snap_collector (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL
+    );
+  `);
+	if (!db.prepare(`SELECT id FROM schema_migrations WHERE id = 'runner_snap_indexes_v1'`).get()) {
+		db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_runner_snap_proc_stat_run ON runner_snap_proc_stat(_run_id);
+      CREATE INDEX IF NOT EXISTS idx_runner_snap_proc_stat_cpu_run ON runner_snap_proc_stat_cpu(_run_id);
+      CREATE INDEX IF NOT EXISTS idx_runner_snap_proc_loadavg_run ON runner_snap_proc_loadavg(_run_id);
+      CREATE INDEX IF NOT EXISTS idx_runner_snap_proc_meminfo_run ON runner_snap_proc_meminfo(_run_id);
+      CREATE INDEX IF NOT EXISTS idx_runner_snap_proc_psi_run ON runner_snap_proc_psi(_run_id);
+      CREATE INDEX IF NOT EXISTS idx_runner_snap_proc_netdev_run ON runner_snap_proc_netdev(_run_id);
+      CREATE INDEX IF NOT EXISTS idx_runner_snap_proc_snmp_run ON runner_snap_proc_snmp(_run_id);
+      CREATE INDEX IF NOT EXISTS idx_runner_snap_proc_thread_run ON runner_snap_proc_thread(_run_id);
+      CREATE INDEX IF NOT EXISTS idx_runner_snap_collector_run ON runner_snap_collector(_run_id);
+    `);
+		db.prepare(`INSERT INTO schema_migrations (id) VALUES (?)`).run('runner_snap_indexes_v1');
+	}
 
 	// Migration: indexes on snap table _run_id columns for fast per-run queries
 	if (!db.prepare(`SELECT id FROM schema_migrations WHERE id = 'snap_table_indexes_v1'`).get()) {

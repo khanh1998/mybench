@@ -87,7 +87,7 @@ and the recommended workflow for creating and running a benchmark plan.`
 				},
 				step_types: {
 					proc: {
-						description: 'Collects Linux /proc host metrics from the database server via SSH during the benchmark. Configuration-only step — actual collection starts when the pgbench/sysbench step begins. Not supported for managed databases (RDS, Cloud SQL).',
+						description: 'Collects Linux /proc host metrics from the database server via SSH during the benchmark, and (proc_collect_runner, default on) from the runner host itself. Configuration-only step — actual collection starts when the pgbench/sysbench step begins. DB-host collection is not supported for managed databases (RDS, Cloud SQL); runner collection works everywhere.',
 						fields: {
 							type: '"proc"',
 							name: 'string',
@@ -116,9 +116,10 @@ and the recommended workflow for creating and running a benchmark plan.`
 								'Placeholder example: \'["loadavg","meminfo","stat","diskstats","pid_stat","pid_io"]\''
 							],
 							proc_interval_seconds: 'Collection interval in seconds. Supports {{PARAM}}. Empty = falls back to the design\'s snapshot_interval_seconds (configure_design, default 30). Use "1" for high-resolution CPU/disk sampling; "5"–"10" for lighter overhead. Placeholder example: "{{INTERVAL}}"',
+							proc_collect_runner: 'boolean, default true. Also sample the runner host (the machine running pgbench/sysbench) from its own /proc — per-core CPU, steal, PSI, per-thread pgbench/sysbench CPU and run-queue wait, TCP retransmits — into runner_snap_* tables. Answers "is the client the bottleneck?" when ClientRead waits are high. No SSH needed; overhead is negligible. Uses the same proc_interval_seconds (minimum 1s).',
 							enabled: 'boolean'
 						},
-						note: 'Requires ssh_enabled=true and SSH credentials on the PostgreSQL server record (Settings → PG Servers). Results stored in host_snap_* tables (one per group) queryable via query_run_data.'
+						note: 'DB-host metrics require ssh_enabled=true and SSH credentials on the PostgreSQL server record (Settings → PG Servers). Results stored in host_snap_* tables (one per group) queryable via query_run_data. Runner-host results are in runner_snap_* tables.'
 					},
 					sql: {
 						description: 'Runs a SQL script via psql. Use for CREATE TABLE, INSERT seed data, DROP TABLE, etc.',
@@ -648,7 +649,7 @@ Step types:
   "sysbench" — provide pgbench_options as "testname command [flags]" (e.g. "oltp_read_write run --tables=10 --threads=4 --time=60") or script (custom Lua content).
   "pg_stat"  — CONFIGURATION-ONLY step. Does NOT run in sequence. The runner automatically snapshots PostgreSQL stats before/during/after the bench regardless of this step's position — do NOT place it after pgbench to "collect after". One per design. Key fields: pg_stat_tables (JSON array of PG view names; empty = all), pg_stat_interval_seconds, pg_stat_reset_stats, pg_stat_reset_statements, pg_stat_collect_statements (set true to capture pg_stat_statements query data at bench end). Not the same as the pg_stat_statements extension — to collect query-level data use pg_stat_collect_statements=true.
   "perf"     — Linux perf profiling alongside the bench. Enable sub-modes independently: perf_stat_enabled (counter summary), perf_record_enabled (flame graph), perf_trace_enabled (syscall trace). Duration/delay fields all support {{PARAM}}. See step_types.perf in get_context for full field docs.
-  "proc"     — Linux /proc host metrics via SSH to the database server. Configuration-only; collection starts at bench time. proc_groups selects which /proc files to read; proc_interval_seconds supports {{PARAM}}. Requires SSH on the PG server record. See step_types.proc in get_context for group key descriptions.
+  "proc"     — Linux /proc host metrics via SSH to the database server, plus (proc_collect_runner, default true) the runner host's own /proc for client-side saturation analysis. Configuration-only; collection starts at bench time. proc_groups selects which /proc files to read on the DB host; proc_interval_seconds supports {{PARAM}}. DB-host collection requires SSH on the PG server record. See step_types.proc in get_context for group key descriptions.
 Use {{PARAM_NAME}} in scripts and pgbench_options — values come from set_params.`,
 			inputSchema: {
 				design_id: z.number().int(),
@@ -686,6 +687,7 @@ Use {{PARAM_NAME}} in scripts and pgbench_options — values come from set_param
 				perf_mmap_pages: z.string().optional().describe('[type=perf] Ring buffer size for perf record/trace in pages (must be power of 2). Supports {{PARAM}}. Default "4096" (16 MB). Increase if you see lost samples or dropped events. E.g. "4096 or {{MMAP_PAGES}}"'),
 				proc_groups: z.string().optional().describe('[type=proc] JSON array of /proc group keys to collect. Empty array or omit = all groups. System groups: "loadavg" (/proc/loadavg), "meminfo" (/proc/meminfo), "stat" (/proc/stat — per-CPU ticks), "vmstat" (/proc/vmstat), "diskstats" (/proc/diskstats), "net_dev" (/proc/net/dev), "schedstat" (/proc/schedstat), "pressure" (/proc/pressure/), "file_nr" (/proc/sys/fs/file-nr). Per-process groups (postgres PID): "pid_stat","pid_statm","pid_io","pid_schedstat","pid_wchan","pid_fd","pid_status". Recommended minimal set: \'["loadavg","meminfo","stat","diskstats","pid_stat","pid_io"]\''),
 				proc_interval_seconds: z.string().optional().describe('[type=proc] Collection interval in seconds. Supports {{PARAM}}. Empty = falls back to the design\'s snapshot_interval_seconds (configure_design, default 30). Use "1" for high-resolution sampling; "5"–"10" for lighter overhead. E.g. "{{INTERVAL}}".'),
+				proc_collect_runner: z.boolean().optional().describe('[type=proc] Also sample the RUNNER host\'s own /proc (per-CPU usage, steal, PSI, per-thread pgbench/sysbench CPU + run-queue wait, TCP retransmits) into runner_snap_* tables. Answers "is the client the bottleneck?" when you see ClientRead waits. Needs no SSH, works for managed databases, overhead is negligible (direct /proc reads, no forks). Defaults to true.'),
 				pg_stat_tables: z.string().optional().describe('[type=pg_stat] JSON array of PG view names to snapshot on each interval. Empty array = all supported tables (recommended). Available: "pg_stat_database","pg_stat_bgwriter","pg_stat_checkpointer","pg_stat_user_tables","pg_stat_user_indexes","pg_statio_user_tables","pg_statio_user_indexes","pg_statio_user_sequences","pg_stat_database_conflicts","pg_stat_archiver","pg_stat_slru","pg_stat_user_functions","pg_stat_wal","pg_stat_replication_slots","pg_stat_io","pg_stat_activity","pg_stat_replication","pg_stat_subscription","pg_stat_subscription_stats". Add "pg_stat_statements" to collect it once at bench end. Focused example: \'["pg_stat_database","pg_stat_user_tables","pg_stat_wal","pg_stat_io"]\''),
 				pg_stat_interval_seconds: z.string().optional().describe('[type=pg_stat] Snapshot interval in seconds. Supports {{PARAM}}. Empty = falls back to the design\'s snapshot_interval_seconds (configure_design, default 30). Lower values give finer resolution. E.g. "{{INTERVAL}}".'),
 				pg_stat_pg_locks_enabled: z.boolean().optional().describe('[type=pg_stat] Enable pg_locks collection on each interval. Captures active locks and waiting queries — useful for contention analysis but noisy under high concurrency. Defaults to false.'),
@@ -701,7 +703,7 @@ Use {{PARAM_NAME}} in scripts and pgbench_options — values come from set_param
 			perf_stat_duration, perf_record_duration, perf_trace_duration,
 			perf_delay, perf_stat_delay, perf_record_delay, perf_trace_delay,
 			perf_cgroup, perf_repeat, perf_freq, perf_call_graph, perf_mmap_pages,
-			proc_groups, proc_interval_seconds,
+			proc_groups, proc_interval_seconds, proc_collect_runner,
 			pg_stat_tables, pg_stat_interval_seconds, pg_stat_pg_locks_enabled, pg_stat_pg_locks_interval,
 			pg_stat_reset_stats, pg_stat_reset_statements, pg_stat_pss_track_planning, pg_stat_collect_statements }) => {
 			const db = getDb();
@@ -712,7 +714,7 @@ Use {{PARAM_NAME}} in scripts and pgbench_options — values come from set_param
 					perf_duration=?, perf_stat_duration=?, perf_record_duration=?, perf_trace_duration=?,
 					perf_delay=?, perf_stat_delay=?, perf_record_delay=?, perf_trace_delay=?,
 					perf_cgroup=?, perf_repeat=?, perf_freq=?, perf_call_graph=?, perf_mmap_pages=?,
-					proc_groups=?, proc_interval_seconds=?,
+					proc_groups=?, proc_interval_seconds=?, proc_collect_runner=?,
 					pg_stat_tables=?, pg_stat_interval_seconds=?, pg_stat_pg_locks_enabled=?, pg_stat_pg_locks_interval=?,
 					pg_stat_reset_stats=?, pg_stat_reset_statements=?, pg_stat_pss_track_planning=?, pg_stat_collect_statements=? WHERE id=?`)
 					.run(type, name, position, enabled ? 1 : 0, script ?? '', no_transaction ? 1 : 0, pgbench_options ?? '', duration_secs ?? 0,
@@ -720,7 +722,7 @@ Use {{PARAM_NAME}} in scripts and pgbench_options — values come from set_param
 						perf_duration ?? '', perf_stat_duration ?? '', perf_record_duration ?? '', perf_trace_duration ?? '',
 						perf_delay ?? '', perf_stat_delay ?? '', perf_record_delay ?? '', perf_trace_delay ?? '',
 						perf_cgroup ?? '', perf_repeat ?? '', perf_freq ?? '', perf_call_graph ?? 'dwarf', perf_mmap_pages ?? '',
-						proc_groups ?? '[]', proc_interval_seconds ?? '',
+						proc_groups ?? '[]', proc_interval_seconds ?? '', proc_collect_runner === false ? 0 : 1,
 						pg_stat_tables ?? '[]', pg_stat_interval_seconds ?? '',
 						pg_stat_pg_locks_enabled ? 1 : 0, pg_stat_pg_locks_interval ?? '',
 						pg_stat_reset_stats ? 1 : 0, pg_stat_reset_statements ? 1 : 0, pg_stat_pss_track_planning ? 1 : 0, pg_stat_collect_statements ? 1 : 0,
@@ -732,16 +734,16 @@ Use {{PARAM_NAME}} in scripts and pgbench_options — values come from set_param
 					perf_duration, perf_stat_duration, perf_record_duration, perf_trace_duration,
 					perf_delay, perf_stat_delay, perf_record_delay, perf_trace_delay,
 					perf_cgroup, perf_repeat, perf_freq, perf_call_graph, perf_mmap_pages,
-					proc_groups, proc_interval_seconds,
+					proc_groups, proc_interval_seconds, proc_collect_runner,
 					pg_stat_tables, pg_stat_interval_seconds, pg_stat_pg_locks_enabled, pg_stat_pg_locks_interval,
 					pg_stat_reset_stats, pg_stat_reset_statements, pg_stat_pss_track_planning, pg_stat_collect_statements)
-					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 					.run(design_id, type, name, position, enabled ? 1 : 0, script ?? '', no_transaction ? 1 : 0, pgbench_options ?? '', duration_secs ?? 0,
 						perf_stat_enabled ? 1 : 0, perf_record_enabled ? 1 : 0, perf_trace_enabled ? 1 : 0, perf_events ?? '',
 						perf_duration ?? '', perf_stat_duration ?? '', perf_record_duration ?? '', perf_trace_duration ?? '',
 						perf_delay ?? '', perf_stat_delay ?? '', perf_record_delay ?? '', perf_trace_delay ?? '',
 						perf_cgroup ?? '', perf_repeat ?? '', perf_freq ?? '', perf_call_graph ?? 'dwarf', perf_mmap_pages ?? '',
-						proc_groups ?? '[]', proc_interval_seconds ?? '',
+						proc_groups ?? '[]', proc_interval_seconds ?? '', proc_collect_runner === false ? 0 : 1,
 						pg_stat_tables ?? '[]', pg_stat_interval_seconds ?? '',
 						pg_stat_pg_locks_enabled ? 1 : 0, pg_stat_pg_locks_interval ?? '',
 						pg_stat_reset_stats ? 1 : 0, pg_stat_reset_statements ? 1 : 0, pg_stat_pss_track_planning ? 1 : 0, pg_stat_collect_statements ? 1 : 0);
@@ -1382,10 +1384,11 @@ Use this before writing queries with query_run_data to understand what columns a
 
 Includes:
 - snap_* tables: PostgreSQL statistics snapshots (pg_stat_database, pg_stat_user_tables, pg_stat_wal, pg_locks, pg_stat_statements, etc.)
-- host_snap_* tables: OS/host metrics (CPU, memory, disk I/O, network, per-process stats)
+- host_snap_* tables: OS/host metrics of the DATABASE host (CPU, memory, disk I/O, network, per-process stats)
+- runner_snap_* tables: OS metrics of the RUNNER host where pgbench/sysbench execute (runner_snap_proc_stat_cpu = per-core jiffies, runner_snap_proc_thread = per-thread CPU/run-queue wait of pgbench/sysbench, runner_snap_proc_psi, runner_snap_proc_snmp = TCP retransmits). Use these to decide whether the client is the bottleneck.
 - benchmark_runs, designs, decisions: core metadata for filtering by run/design/decision
 
-All snap_* and host_snap_* tables share these standard columns:
+All snap_*, host_snap_* and runner_snap_* tables share these standard columns:
 - _run_id: foreign key to benchmark_runs.id — use this to filter snapshots for a specific run
 - _collected_at: ISO timestamp of when the snapshot was taken
 - _phase: "pre" | "bench" | "post" — which collection phase this snapshot belongs to
@@ -1397,7 +1400,7 @@ Example: wal_bytes written during benchmark = MAX(wal_bytes) - MIN(wal_bytes) WH
 			const db = getDb();
 
 			const tableNames = (db.prepare(
-				`SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE 'snap_%' OR name LIKE 'host_snap_%') ORDER BY name`
+				`SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE 'snap_%' OR name LIKE 'host_snap_%' OR name LIKE 'runner_snap_%') ORDER BY name`
 			).all() as { name: string }[]).map(r => r.name);
 
 			const snapSchema: Record<string, { name: string; type: string }[]> = {};

@@ -61,8 +61,8 @@ export const PUT: RequestHandler = async ({ params: routeParams, request }) => {
 				 perf_cgroup, perf_events, perf_repeat, perf_freq, perf_call_graph, perf_mmap_pages,
 				 pg_stat_tables, pg_stat_interval_seconds, pg_stat_pg_locks_enabled,
 				 pg_stat_pg_locks_interval, pg_stat_reset_stats, pg_stat_reset_statements,
-				 pg_stat_collect_statements,
-				 proc_groups, proc_interval_seconds
+				 pg_stat_collect_statements, pg_stat_pss_track_planning,
+				 proc_groups, proc_interval_seconds, proc_collect_runner
 			 )
        VALUES (
 				 @id, @design_id, @position, @name, @type, @script, @pgbench_options, @enabled,
@@ -74,8 +74,8 @@ export const PUT: RequestHandler = async ({ params: routeParams, request }) => {
 				 @perf_cgroup, @perf_events, @perf_repeat, @perf_freq, @perf_call_graph, @perf_mmap_pages,
 				 @pg_stat_tables, @pg_stat_interval_seconds, @pg_stat_pg_locks_enabled,
 				 @pg_stat_pg_locks_interval, @pg_stat_reset_stats, @pg_stat_reset_statements,
-				 @pg_stat_collect_statements,
-				 @proc_groups, @proc_interval_seconds
+				 @pg_stat_collect_statements, @pg_stat_pss_track_planning,
+				 @proc_groups, @proc_interval_seconds, @proc_collect_runner
 			 )
        ON CONFLICT(id) DO UPDATE SET
          position=excluded.position, name=excluded.name, type=excluded.type,
@@ -107,8 +107,10 @@ export const PUT: RequestHandler = async ({ params: routeParams, request }) => {
          pg_stat_reset_stats=excluded.pg_stat_reset_stats,
          pg_stat_reset_statements=excluded.pg_stat_reset_statements,
          pg_stat_collect_statements=excluded.pg_stat_collect_statements,
+         pg_stat_pss_track_planning=excluded.pg_stat_pss_track_planning,
          proc_groups=excluded.proc_groups,
-         proc_interval_seconds=excluded.proc_interval_seconds`
+         proc_interval_seconds=excluded.proc_interval_seconds,
+         proc_collect_runner=excluded.proc_collect_runner`
 		);
 		const submittedStepIds = body.steps
 			.map((s: { id?: number }) => s.id)
@@ -161,6 +163,7 @@ export const PUT: RequestHandler = async ({ params: routeParams, request }) => {
 					pg_stat_collect_statements: s.pg_stat_collect_statements ?? 0,
 					proc_groups: s.proc_groups ?? '[]',
 					proc_interval_seconds: s.proc_interval_seconds ?? '',
+					proc_collect_runner: s.proc_collect_runner ?? 1,
 				});
 				const stepId = (s.id ?? result.lastInsertRowid) as number;
 				deleteScripts.run(stepId);

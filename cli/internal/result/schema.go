@@ -10,6 +10,10 @@ type Result struct {
 	Snapshots     map[string][]SnapshotRow `json:"snapshots"`
 	HostSnapshots map[string][]SnapshotRow `json:"host_snapshots,omitempty"`
 	HostConfig    map[string]any           `json:"host_config,omitempty"`
+	// RunnerSnapshots / RunnerConfig describe the runner host (where pgbench/sysbench run),
+	// as opposed to HostSnapshots / HostConfig which describe the database host.
+	RunnerSnapshots map[string][]SnapshotRow `json:"runner_snapshots,omitempty"`
+	RunnerConfig    map[string]any           `json:"runner_config,omitempty"`
 	NetLatency    *NetLatency              `json:"net_latency,omitempty"`
 }
 

@@ -97,6 +97,16 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 		hostCollector = NewHostMetricsCollector(opts.Plan.Server, intervalSecs, opts.Plan.ProcStep.Groups)
 	}
 
+	// Runner-host collector: independent of DB-host SSH, so it also works for managed databases.
+	var runnerCollector *LocalMetricsCollector
+	if opts.Plan.ProcStep != nil && opts.Plan.ProcStep.CollectRunner {
+		intervalSecs := opts.Plan.ProcStep.IntervalSeconds
+		if intervalSecs <= 0 {
+			intervalSecs = opts.Plan.RunSettings.SnapshotIntervalSeconds
+		}
+		runnerCollector = NewLocalMetricsCollector(intervalSecs)
+	}
+
 	// Sort enabled steps by position.
 	steps := make([]plan.Step, 0, len(opts.Plan.Steps))
 	for _, s := range opts.Plan.Steps {
@@ -295,6 +305,9 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 			if hostCollector != nil {
 				hostCollector.Start()
 			}
+			if runnerCollector != nil {
+				runnerCollector.Start()
+			}
 			snapTables, pgLocksEnabled, pgLocksIntervalSecs, snapIntervalSecs := resolvePgStatConfig(opts)
 			pbRes, err := runPgbenchStep(ctx, opts, step, pool, res.Snapshots, snapIntervalSecs, snapTables, pgLocksEnabled, pgLocksIntervalSecs)
 			benchEndTime = time.Now().UTC()
@@ -335,6 +348,9 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 			res.Run.BenchStartedAt = benchStartTime.Format(time.RFC3339)
 			if hostCollector != nil {
 				hostCollector.Start()
+			}
+			if runnerCollector != nil {
+				runnerCollector.Start()
 			}
 			snapTables, pgLocksEnabled, pgLocksIntervalSecs, snapIntervalSecs := resolvePgStatConfig(opts)
 			sbRes, err := runSysbenchStep(ctx, opts, step, pool, res.Snapshots, snapIntervalSecs, snapTables, pgLocksEnabled, pgLocksIntervalSecs)
@@ -425,6 +441,16 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 		}
 		if len(cfg) > 0 {
 			res.HostConfig = cfg
+		}
+	}
+
+	if runnerCollector != nil {
+		snaps, cfg := runnerCollector.Stop()
+		if len(snaps) > 0 {
+			res.RunnerSnapshots = snaps
+		}
+		if len(cfg) > 0 {
+			res.RunnerConfig = cfg
 		}
 	}
 

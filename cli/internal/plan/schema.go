@@ -22,6 +22,7 @@ type Plan struct {
 type ProcStepConfig struct {
 	Groups          []string `json:"groups"`           // empty = all groups
 	IntervalSeconds int      `json:"interval_seconds"` // 0 = use snapshot interval
+	CollectRunner   bool     `json:"collect_runner"`   // also sample the runner host's own /proc (client-side saturation)
 }
 
 // PgStatStepConfig holds resolved pg_stat collection config from the pg_stat step.

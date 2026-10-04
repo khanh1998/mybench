@@ -77,7 +77,7 @@
 
   let activeCompareTab = $state<'summary' | 'load' | 'telemetry' | 'perf' | 'host_metrics'>('summary');
   let selectedScriptMetricKey = $state<'tps' | 'latency_avg_ms' | 'latency_stddev_ms' | 'transactions'>('tps');
-  let hostMetricsTab = $state<'system' | 'processes'>('system');
+  let hostMetricsTab = $state<'system' | 'processes' | 'runner'>('system');
   let selectedPerfMetric = $state('');
   let selectedSummaryMetricKey = $state('');
 
@@ -1164,7 +1164,7 @@
     <DatabaseTelemetryCompare
       runs={selectedRuns}
       active={activeCompareTab === 'telemetry'}
-      excludeSectionKeys={['cloudwatch', 'host_system', 'host_processes']}
+      excludeSectionKeys={['cloudwatch', 'host_system', 'host_processes', 'runner_system']}
     />
   {:else if activeCompareTab === 'perf'}
     {#if hasPerfData}
@@ -1446,21 +1446,29 @@
         class="host-sub-btn"
         class:active={hostMetricsTab === 'system'}
         onclick={() => hostMetricsTab = 'system'}
-      >System</button>
+      >DB System</button>
       <button
         class="host-sub-btn"
         class:active={hostMetricsTab === 'processes'}
         onclick={() => hostMetricsTab = 'processes'}
-      >Processes</button>
+      >DB Processes</button>
+      <button
+        class="host-sub-btn"
+        class:active={hostMetricsTab === 'runner'}
+        title="Metrics of the machine running pgbench/sysbench — tells you whether the client is the bottleneck"
+        onclick={() => hostMetricsTab = 'runner'}
+      >Runner (client)</button>
     </div>
     <DatabaseTelemetryCompare
       runs={selectedRuns}
       active={activeCompareTab === 'host_metrics'}
-      title={hostMetricsTab === 'system' ? 'System Metrics' : 'Process Metrics'}
+      title={hostMetricsTab === 'system' ? 'System Metrics' : hostMetricsTab === 'processes' ? 'Process Metrics' : 'Runner (Client) Metrics'}
       subtitle={hostMetricsTab === 'system'
         ? 'Compare self-hosted machine CPU, memory, disk, and network telemetry across the selected runs.'
-        : 'Compare self-hosted PostgreSQL process telemetry across the selected runs.'}
-      includeSectionKeys={hostMetricsTab === 'system' ? ['host_system'] : ['host_processes']}
+        : hostMetricsTab === 'processes'
+          ? 'Compare self-hosted PostgreSQL process telemetry across the selected runs.'
+          : 'Compare the benchmark runner host (client) CPU, steal, per-thread load, and network telemetry across the selected runs.'}
+      includeSectionKeys={hostMetricsTab === 'system' ? ['host_system'] : hostMetricsTab === 'processes' ? ['host_processes'] : ['runner_system']}
     />
   {/if}
 {:else if !canCompare}

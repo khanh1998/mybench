@@ -282,6 +282,7 @@ export function generatePlan(designId: number, overrides: PlanRunSettingsOverrid
 		procStepConfig = {
 			groups,          // empty = all groups
 			interval_seconds: intervalSecs, // 0 = use snapshot interval
+			collect_runner: procStep.proc_collect_runner !== 0, // sample the runner host's own /proc
 		};
 	}
 
