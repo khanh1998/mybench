@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { markdownTable } from '$lib/utils';
   interface BarSegment { label: string; color: string; value: number; }
   interface BarGroup { label: string; segments: BarSegment[]; }
 
@@ -76,19 +77,6 @@
     headerCopyTimer = setTimeout(() => { headerCopied = null; }, 1600);
   }
 
-  function markdownCell(value: string | number): string {
-    if (typeof value === 'number') return Number.isFinite(value) ? String(+value.toFixed(4)) : '';
-    return value.replace(/\|/g, '\\|').replace(/\n/g, '<br>');
-  }
-
-  function markdownTable(headers: string[], rows: (string | number)[][]): string {
-    return [
-      `| ${headers.map(markdownCell).join(' | ')} |`,
-      `| ${headers.map(() => '---').join(' | ')} |`,
-      ...rows.map((row) => `| ${row.map(markdownCell).join(' | ')} |`)
-    ].join('\n');
-  }
-
   function colorToRgba(color: string, alpha: number): string {
     if (color.startsWith('#')) {
       const r = parseInt(color.slice(1, 3), 16);
@@ -129,7 +117,8 @@
       },
       options: {
         interaction: { mode: 'index', intersect: false },
-        scales: { x: { stacked: true }, y: { stacked: true } }
+        scales: { x: { stacked: true }, y: { stacked: true } },
+        plugins: { title: { display: true, text: title } }
       }
     };
     navigator.clipboard.writeText(JSON.stringify(config, null, 2));
@@ -142,7 +131,7 @@
       const values = segLabels.map((label) => group.segments.find((segment) => segment.label === label)?.value ?? 0);
       return [group.label, ...values, values.reduce((sum, value) => sum + value, 0)];
     });
-    navigator.clipboard.writeText(markdownTable(['group', ...segLabels, 'total'], rows));
+    navigator.clipboard.writeText(markdownTable(['group', ...segLabels, 'total'], rows, title));
     markHeaderCopied('markdown');
   }
 

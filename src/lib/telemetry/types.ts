@@ -40,6 +40,8 @@ export interface TelemetryChartMetric {
   group?: string;
   entity?: string;
   category?: 'raw' | 'derived';
+  /** Labels of `series` that are disjoint parts of a whole and can be shown as a stacked bar of averages. */
+  stackLabels?: string[];
 }
 
 export interface TelemetryMarker {

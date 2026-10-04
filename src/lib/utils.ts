@@ -46,10 +46,15 @@ export function markdownCell(value: string | number | null | undefined): string 
 	return value.replace(/\|/g, '\\|').replace(/\n/g, '<br>');
 }
 
-export function markdownTable(headers: string[], rows: (string | number | null | undefined)[][]): string {
-	return [
+export function markdownTable(
+	headers: string[],
+	rows: (string | number | null | undefined)[][],
+	title?: string
+): string {
+	const table = [
 		`| ${headers.map(markdownCell).join(' | ')} |`,
 		`| ${headers.map(() => '---').join(' | ')} |`,
 		...rows.map((row) => `| ${row.map(markdownCell).join(' | ')} |`)
 	].join('\n');
+	return title ? `**${markdownCell(title)}**\n\n${table}` : table;
 }

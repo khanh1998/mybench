@@ -135,6 +135,7 @@ export interface RunnerResult {
 	snapshots?: Record<string, Record<string, unknown>[]>;
 	host_snapshots?: Record<string, Record<string, unknown>[]>;
 	host_config?: Record<string, unknown>;
+	net_latency?: Record<string, unknown>;
 }
 
 function normalizeSqliteValue(value: unknown): unknown {
@@ -418,6 +419,12 @@ export function importResultIntoRun(runId: number, result: RunnerResult): void {
 	if (result.host_config && Object.keys(result.host_config).length > 0) {
 		db.prepare(`UPDATE benchmark_runs SET host_config = ? WHERE id = ?`)
 			.run(JSON.stringify(result.host_config), runId);
+	}
+
+	// Import the pre-run client→DB latency probe (SELECT 1 + ping) as JSON.
+	if (result.net_latency && Object.keys(result.net_latency).length > 0) {
+		db.prepare(`UPDATE benchmark_runs SET net_latency = ? WHERE id = ?`)
+			.run(JSON.stringify(result.net_latency), runId);
 	}
 }
 

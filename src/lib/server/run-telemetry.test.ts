@@ -347,6 +347,18 @@ describe('buildRunTelemetry', () => {
 		expect(database?.tableRows.find((row) => row.metric === 'Temp files')?.value).toBe(2);
 	});
 
+	it('marks only additive series as stackable and leaves other metrics alone', () => {
+		const telemetry = buildRunTelemetry(db, 1, ['bench']);
+		const database = telemetry.sections.find((section) => section.key === 'database');
+		const metric = (key: string) => database?.chartMetrics?.find((item) => item.key === key);
+
+		expect(metric('transactions')?.stackLabels).toEqual(['commits/s', 'rollbacks/s']);
+		expect(metric('session_time')?.stackLabels).toEqual(['active time/s', 'idle in transaction time/s']);
+		expect(metric('block_access')?.stackLabels).toEqual(['hits/s', 'reads/s']);
+		expect(metric('cache_hit_rate')?.stackLabels).toBeUndefined();
+		expect(metric('sessions')?.stackLabels).toBeUndefined();
+	});
+
 	it('exposes session behavior and parallel worker metrics as rate and raw delta views', () => {
 		const telemetry = buildRunTelemetry(db, 1, ['bench']);
 		const database = telemetry.sections.find((section) => section.key === 'database');

@@ -1,6 +1,9 @@
 <script lang="ts">
   import LineChart from '$lib/LineChart.svelte';
   import BarChart from '$lib/BarChart.svelte';
+  import StackedAvgChart from '$lib/StackedAvgChart.svelte';
+  import StackSeriesPicker from '$lib/telemetry/StackSeriesPicker.svelte';
+  import { seriesSegment, type StackBar } from '$lib/telemetry/stack';
   import CopyTableButton from '$lib/CopyTableButton.svelte';
   import { formatValue } from '$lib/telemetry/format';
   import TelemetryValueCard from '$lib/telemetry/TelemetryValueCard.svelte';
@@ -32,6 +35,8 @@
   let lastSectionKey = $state('');
   let selectedValueView = $state<'rate' | 'raw' | 'avg'>('rate');
   let showAllEntries = $state(false);
+  let avgLayout = $state<'bars' | 'stacked'>('bars');
+  let hiddenStackLabels = $state<Record<string, string[]>>({});
 
   const chartMetricGroups = $derived.by(() => {
     const groups: string[] = [];
@@ -106,9 +111,34 @@
     if (showAllEntries && activeChartMetric.allSeries?.length) return activeChartMetric.allSeries;
     return activeChartMetric.series;
   });
+  const stackLabels = $derived(activeChartMetric?.stackLabels ?? []);
+  const canStack = $derived(activeValueView === 'avg' && stackLabels.length >= 2);
+  const isStacked = $derived(canStack && avgLayout === 'stacked');
+  const hiddenStack = $derived(activeChartMetric ? (hiddenStackLabels[activeChartMetric.key] ?? []) : []);
+  const stackOptions = $derived(
+    (activeChartMetric?.series ?? [])
+      .filter((series) => stackLabels.includes(series.label))
+      .map((series) => ({ label: series.label, color: series.color }))
+  );
+  const stackBars = $derived.by((): StackBar[] => {
+    const segments = (activeChartMetric?.series ?? [])
+      .filter((series) => stackLabels.includes(series.label) && !hiddenStack.includes(series.label))
+      .map((series) => seriesSegment(series))
+      .filter((segment): segment is NonNullable<typeof segment> => segment !== null);
+    return segments.length ? [{ label: runLabel || activeChartMetric?.label || 'Avg', segments }] : [];
+  });
+  function toggleStackLabel(label: string) {
+    const key = activeChartMetric?.key;
+    if (!key) return;
+    const current = hiddenStackLabels[key] ?? [];
+    hiddenStackLabels = {
+      ...hiddenStackLabels,
+      [key]: current.includes(label) ? current.filter((item) => item !== label) : [...current, label]
+    };
+  }
   const activeChartTitle = $derived.by(() => {
     const title = activeChartMetric?.title ?? section.chartTitle;
-    if (activeValueView === 'avg') return `${title} · Avg`;
+    if (activeValueView === 'avg') return `${title} · Avg${isStacked ? ' (stacked)' : ''}`;
     if (!activeMetricHasRaw) return title;
     return `${title} · ${activeValueView === 'raw' ? 'Raw' : 'Rate/s'}`;
   });
@@ -341,10 +371,24 @@
             >Avg</button>
           </div>
         </div>
+        {#if canStack}
+          <div class="value-view-control" aria-label="Avg chart layout">
+            <span class="value-view-label">Layout</span>
+            <div class="value-view-toggle">
+              <button type="button" class:active={!isStacked} onclick={() => avgLayout = 'bars'}>Bars</button>
+              <button type="button" class:active={isStacked} onclick={() => avgLayout = 'stacked'}>Stacked</button>
+            </div>
+          </div>
+        {/if}
       </div>
+      {#if isStacked}
+        <StackSeriesPicker options={stackOptions} hidden={hiddenStack} ontoggle={toggleStackLabel} />
+      {/if}
     {/if}
 
-    {#if activeValueView === 'avg'}
+    {#if isStacked}
+      <StackedAvgChart title={activeChartTitle} stacks={stackBars} />
+    {:else if activeValueView === 'avg'}
       <BarChart
         title={activeChartTitle}
         series={activeChartSeries}
@@ -386,7 +430,7 @@
                   )
                 )
               );
-              return markdownTable(headers, rows);
+              return markdownTable(headers, rows, section.tableTitle);
             }} />
             <button
               type="button"

@@ -10,6 +10,37 @@ type Result struct {
 	Snapshots     map[string][]SnapshotRow `json:"snapshots"`
 	HostSnapshots map[string][]SnapshotRow `json:"host_snapshots,omitempty"`
 	HostConfig    map[string]any           `json:"host_config,omitempty"`
+	NetLatency    *NetLatency              `json:"net_latency,omitempty"`
+}
+
+// NetLatency is the pre-run client→database latency measurement taken from the runner host.
+type NetLatency struct {
+	Select1      *LatencyStats `json:"select1,omitempty"`
+	Select1Error string        `json:"select1_error,omitempty"`
+	Ping         *PingStats    `json:"ping,omitempty"`
+	PingError    string        `json:"ping_error,omitempty"`
+}
+
+// LatencyStats summarises SELECT 1 round-trip times in milliseconds.
+type LatencyStats struct {
+	Samples  int     `json:"samples"`
+	MinMs    float64 `json:"min_ms"`
+	AvgMs    float64 `json:"avg_ms"`
+	P50Ms    float64 `json:"p50_ms"`
+	P95Ms    float64 `json:"p95_ms"`
+	MaxMs    float64 `json:"max_ms"`
+	StddevMs float64 `json:"stddev_ms"`
+}
+
+// PingStats summarises an ICMP ping run (RTT in milliseconds).
+type PingStats struct {
+	Sent     int     `json:"sent"`
+	Received int     `json:"received"`
+	LossPct  float64 `json:"loss_pct"`
+	MinMs    float64 `json:"min_ms"`
+	AvgMs    float64 `json:"avg_ms"`
+	MaxMs    float64 `json:"max_ms"`
+	MdevMs   float64 `json:"mdev_ms"`
 }
 
 // StepResult records execution metadata for a single step.

@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { markdownTable } from '$lib/utils';
+  import { formatCompact as fmtVal } from '$lib/telemetry/format';
+
   interface ChartSeries { label: string; color: string; points: { t: number; v: number }[]; }
 
   let {
@@ -34,13 +37,6 @@
 
   function by(v: number) { return IH - (v / vRange) * IH; }
 
-  function fmtVal(v: number) {
-    if (Math.abs(v) >= 1e9) return (v / 1e9).toFixed(1) + 'G';
-    if (Math.abs(v) >= 1e6) return (v / 1e6).toFixed(1) + 'M';
-    if (Math.abs(v) >= 1e3) return (v / 1e3).toFixed(1) + 'K';
-    return Number.isInteger(v) ? String(v) : v.toFixed(2);
-  }
-
   function truncLabel(s: string, maxChars: number): string {
     return s.length > maxChars ? s.slice(0, maxChars - 1) + '…' : s;
   }
@@ -60,19 +56,6 @@
     headerCopied = kind;
     if (headerCopyTimer) clearTimeout(headerCopyTimer);
     headerCopyTimer = setTimeout(() => { headerCopied = null; }, 1600);
-  }
-
-  function markdownCell(value: string | number): string {
-    if (typeof value === 'number') return Number.isFinite(value) ? String(+value.toFixed(4)) : '';
-    return value.replace(/\|/g, '\\|').replace(/\n/g, '<br>');
-  }
-
-  function markdownTable(headers: string[], rows: (string | number)[][]): string {
-    return [
-      `| ${headers.map(markdownCell).join(' | ')} |`,
-      `| ${headers.map(() => '---').join(' | ')} |`,
-      ...rows.map((row) => `| ${row.map(markdownCell).join(' | ')} |`)
-    ].join('\n');
   }
 
   function colorToRgba(color: string, alpha: number): string {
@@ -117,6 +100,7 @@
       options: {
         interaction: { mode: 'index', intersect: false },
         plugins: {
+          title: { display: true, text: title },
           legend: { display: false }
         }
       }
@@ -127,7 +111,7 @@
 
   function copyMarkdownTable() {
     const rows = bars.map((bar) => [bar.label, bar.mean, bar.min, bar.max]);
-    navigator.clipboard.writeText(markdownTable(['label', 'avg', 'min', 'max'], rows));
+    navigator.clipboard.writeText(markdownTable(['label', 'avg', 'min', 'max'], rows, title));
     markHeaderCopied('markdown');
   }
 </script>

@@ -80,6 +80,12 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 		Snapshots: make(map[string][]result.SnapshotRow),
 	}
 
+	// Measure client→DB latency before anything else touches the database.
+	// Failures are recorded in the result but never abort the run.
+	opts.logInfo("[net_probe] measuring latency to %s", opts.Plan.Server.Host)
+	res.NetLatency = ProbeNetwork(ctx, pool, opts.Plan.Server.Host)
+	opts.logInfo("[net_probe] %s", summarizeNetLatency(res.NetLatency))
+
 	// Prepare host metrics collector only when a proc step is present in the plan.
 	// Start() is called just before the bench step so ticks align with bench start.
 	var hostCollector *HostMetricsCollector
