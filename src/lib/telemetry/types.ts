@@ -7,6 +7,8 @@ export interface TelemetryCard {
   kind: TelemetryValueKind;
   value: number | string | boolean | null;
   infoText?: string;
+  /** Severity for cards that carry a verdict (rendered as a tinted banner). */
+  tone?: 'ok' | 'warn' | 'bad';
 }
 
 export interface TelemetryTableColumn {

@@ -828,4 +828,63 @@ describe('buildRunTelemetry', () => {
 			{ t: 39000, v: 16 }
 		]);
 	});
+	it('builds a runner section that flags a saturated pgbench thread as client-bound', () => {
+		db.exec(`
+			ALTER TABLE benchmark_runs ADD COLUMN runner_config TEXT;
+			CREATE TABLE runner_snap_proc_stat (
+				_id INTEGER PRIMARY KEY AUTOINCREMENT, _run_id INTEGER NOT NULL, _collected_at TEXT NOT NULL,
+				cpu_user INTEGER, cpu_nice INTEGER, cpu_system INTEGER, cpu_idle INTEGER,
+				cpu_iowait INTEGER, cpu_irq INTEGER, cpu_softirq INTEGER, cpu_steal INTEGER, ctxt INTEGER, intr INTEGER
+			);
+			CREATE TABLE runner_snap_proc_thread (
+				_id INTEGER PRIMARY KEY AUTOINCREMENT, _run_id INTEGER NOT NULL, _collected_at TEXT NOT NULL,
+				pid INTEGER, tid INTEGER, proc TEXT, comm TEXT, state TEXT,
+				utime INTEGER, stime INTEGER, wait_time_ns INTEGER, nvol_ctxt_sw INTEGER
+			);
+			CREATE TABLE runner_snap_collector (
+				_id INTEGER PRIMARY KEY AUTOINCREMENT, _run_id INTEGER NOT NULL, _collected_at TEXT NOT NULL,
+				sample_us INTEGER, threads INTEGER
+			);
+		`);
+		db.prepare(`UPDATE benchmark_runs SET runner_config = ? WHERE id = 1`)
+			.run(JSON.stringify({ nproc: 8, clk_tck: 100, mem_total_kb: 16000000 }));
+
+		const t1 = '2026-03-30T05:57:59.000Z';
+		const t2 = '2026-03-30T05:58:09.000Z';
+		// 8 cores over 10s = 8000 jiffies; whole host ~14% busy, but one pgbench thread uses 98% of a core.
+		const insStat = db.prepare(`INSERT INTO runner_snap_proc_stat (_run_id, _collected_at, cpu_user, cpu_nice, cpu_system, cpu_idle, cpu_iowait, cpu_irq, cpu_softirq, cpu_steal, ctxt, intr) VALUES (1, ?, ?, 0, 0, ?, 0, 0, 0, 0, ?, 0)`);
+		insStat.run(t1, 0, 0, 0);
+		insStat.run(t2, 1120, 6880, 5000);
+		const insThread = db.prepare(`INSERT INTO runner_snap_proc_thread (_run_id, _collected_at, pid, tid, proc, comm, state, utime, stime, wait_time_ns, nvol_ctxt_sw) VALUES (1, ?, 700, 700, 'pgbench', 'pgbench', 'R', ?, 0, ?, ?)`);
+		insThread.run(t1, 0, 0, 0);
+		insThread.run(t2, 980, 500_000_000, 12);
+		const insSelf = db.prepare(`INSERT INTO runner_snap_proc_thread (_run_id, _collected_at, pid, tid, proc, comm, state, utime, stime, wait_time_ns, nvol_ctxt_sw) VALUES (1, ?, 600, 600, 'mybench-runner', 'mybench-runner', 'S', ?, 0, 0, 0)`);
+		insSelf.run(t1, 0);
+		insSelf.run(t2, 20);
+		const insCol = db.prepare(`INSERT INTO runner_snap_collector (_run_id, _collected_at, sample_us, threads) VALUES (1, ?, ?, 2)`);
+		insCol.run(t1, 180);
+		insCol.run(t2, 220);
+
+		const telemetry = buildRunTelemetry(db, 1);
+		const runner = telemetry.sections.find((section) => section.key === 'runner_system');
+
+		expect(runner?.status).toBe('ok');
+		const card = (key: string) => runner?.summary.find((c) => c.key === key);
+		expect(String(card('runner_verdict')?.value)).toMatch(/Client-bound/);
+		expect(card('runner_nproc')?.value).toBe(8);
+		expect(Number(card('runner_hottest_thread')?.value)).toBeCloseTo(0.98, 2);
+		expect(Number(card('runner_cpu_avg')?.value)).toBeCloseTo(0.14, 2);
+		expect(Number(card('runner_self_cpu')?.value)).toBeCloseTo(0.02, 2);
+		expect(Number(card('runner_sample_us')?.value)).toBeCloseTo(0.2, 2); // 200µs mean, in ms
+		const keys = runner?.chartMetrics?.map((m) => m.key) ?? [];
+		expect(keys).toEqual(expect.arrayContaining(['thread_cpu_summary', 'thread_cpu', 'thread_runq', 'cpu_pct', 'self_cpu', 'collector_sample']));
+		const summary = runner?.chartMetrics?.find((m) => m.key === 'thread_cpu_summary');
+		expect(summary?.series.find((s) => s.label === 'Hottest thread %')?.points[0].v).toBeCloseTo(98, 0);
+	});
+
+	it('reports no_data for the runner section when nothing was collected', () => {
+		const telemetry = buildRunTelemetry(db, 1);
+		const runner = telemetry.sections.find((section) => section.key === 'runner_system');
+		expect(runner?.status).toBe('no_data');
+	});
 });

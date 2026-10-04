@@ -1,4 +1,8 @@
 import type Database from 'better-sqlite3';
+import {
+	computeRunnerHealth, coreAggregates, cpuIntervals, isBenchProc, isSelfProc, maxOf, meanOf,
+	perCoreIntervals, reduceByTime, sumOf, tcpIntervals, threadSeries, weightedMean
+} from './runner-health';
 
 export type TelemetryPhase = 'pre' | 'bench' | 'post';
 export type TelemetryValueKind = 'count' | 'bytes' | 'percent' | 'duration_ms' | 'tps' | 'text' | 'flag';
@@ -10,6 +14,8 @@ export interface TelemetryCard {
 	kind: TelemetryValueKind;
 	value: number | string | boolean | null;
 	infoText?: string;
+	/** Severity for cards that carry a verdict (rendered as a tinted banner). */
+	tone?: 'ok' | 'warn' | 'bad';
 }
 
 export interface TelemetryTableColumn {
@@ -5196,6 +5202,242 @@ function buildHostProcessesSection(db: Database.Database, runId: number, runStar
 	};
 }
 
+// Runner host (where pgbench/sysbench run): answers "is the client the bottleneck?".
+// Reads runner_snap_* tables written by mybench-runner's local /proc collector.
+function buildRunnerSection(db: Database.Database, runId: number, runStartMs: number, selectedPhases: TelemetryPhase[], benchStartedAt: string | null, postStartedAt: string | null): TelemetrySection {
+	const noData: TelemetrySection = {
+		key: 'runner_system',
+		label: 'Runner',
+		status: 'no_data',
+		reason: 'No runner host metrics collected. Enable "Collect runner metrics" on the proc step of this design.',
+		summary: [], chartTitle: '', chartSeries: [],
+		tableTitle: '', tableColumns: [], tableRows: [], tableSnapshots: []
+	};
+
+	const fetchR = (t: string) => fetchHostRows(db, t, runId, selectedPhases, benchStartedAt, postStartedAt);
+	const statRows = fetchR('runner_snap_proc_stat');
+	const cpuRows = fetchR('runner_snap_proc_stat_cpu');
+	const loadavgRows = fetchR('runner_snap_proc_loadavg');
+	const meminfoRows = fetchR('runner_snap_proc_meminfo');
+	const psiRows = fetchR('runner_snap_proc_psi');
+	const netdevRows = fetchR('runner_snap_proc_netdev');
+	const snmpRows = fetchR('runner_snap_proc_snmp');
+	const threadRows = fetchR('runner_snap_proc_thread');
+	const collectorRows = fetchR('runner_snap_collector');
+
+	let config: Record<string, unknown> = {};
+	if (tableHasColumn(db, 'benchmark_runs', 'runner_config')) {
+		const json = (db.prepare(`SELECT runner_config FROM benchmark_runs WHERE id = ?`).get(runId) as { runner_config?: string | null } | undefined)?.runner_config;
+		if (json) {
+			try {
+				const parsed = JSON.parse(json);
+				if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) config = parsed as Record<string, unknown>;
+			} catch { config = {}; }
+		}
+	}
+
+	if (statRows.length === 0 && threadRows.length === 0 && Object.keys(config).length === 0) return noData;
+
+	const nproc = toNumber(config.nproc);
+	const clkTck = toNumber(config.clk_tck) ?? 100;
+	const statIv = cpuIntervals(statRows);
+	const perCore = perCoreIntervals(cpuRows);
+	const coreAgg = coreAggregates(perCore);
+	const allThreads = threadSeries(threadRows, clkTck);
+	const benchThreads = allThreads.filter(isBenchProc);
+	const selfThreads = allThreads.filter(isSelfProc);
+	const tcpIv = tcpIntervals(snmpRows);
+	const health = computeRunnerHealth({ stat: statIv, cores: coreAgg, benchThreads, selfThreads, psiRows, tcp: tcpIv, nproc });
+
+	const rel = (t: number) => t - runStartMs;
+	const metricOf = (
+		key: string, label: string, title: string, kind: TelemetryValueKind, group: string,
+		defs: Array<{ label: string; description?: string; points: { t: number; v: number }[] }>,
+		entity?: string
+	): TelemetryChartMetric | null => {
+		const series: TelemetrySeries[] = [];
+		for (const d of defs) {
+			if (d.points.length === 0) continue;
+			series.push({
+				label: d.label,
+				description: d.description,
+				color: COLORS[series.length % COLORS.length],
+				points: d.points.map((p) => ({ t: rel(p.t), v: p.v }))
+			});
+		}
+		if (series.length === 0) return null;
+		return { key, label, kind, title, series, group, entity };
+	};
+	const chartMetrics: TelemetryChartMetric[] = [];
+	const add = (m: TelemetryChartMetric | null) => { if (m) chartMetrics.push(m); };
+
+	// ── Benchmark threads: the most direct client-saturation signal ──
+	if (benchThreads.length > 0) {
+		const hottest = reduceByTime(benchThreads, (p) => p.cpuPct, maxOf);
+		const mean = reduceByTime(benchThreads, (p) => p.cpuPct, meanOf);
+		add(metricOf('thread_cpu_summary', 'Hottest Thread', 'Benchmark Threads — CPU % of one core', 'percent', 'Benchmark Threads', [
+			{ label: 'Hottest thread %', description: '100 = one core fully used. A benchmark thread pinned near 100% cannot send queries any faster — the client is the limit, and Postgres backends show ClientRead.', points: hottest },
+			{ label: 'Mean thread %', description: 'Average CPU of all pgbench/sysbench threads.', points: mean }
+		]));
+
+		// Per-thread series for the busiest threads (cap keeps charts readable with large -j).
+		const ranked = [...benchThreads]
+			.map((t) => ({ t, avg: weightedMean(t.points, (p) => p.cpuPct) }))
+			.sort((a, b) => b.avg - a.avg)
+			.slice(0, 12);
+		add(metricOf('thread_cpu', 'Per-thread CPU', `Benchmark Threads — CPU % per thread (top ${ranked.length})`, 'percent', 'Benchmark Threads',
+			ranked.map(({ t }) => ({ label: t.label, points: t.points.map((p) => ({ t: p.t, v: p.cpuPct })) }))));
+
+		add(metricOf('thread_runq', 'Run-Queue Wait', 'Benchmark Threads — time runnable but waiting for a CPU', 'count', 'Benchmark Threads', [
+			{ label: 'Waiting (cores)', description: 'Per second, how many cores-worth of time benchmark threads were ready to run but not on a CPU (schedstat). Non-zero while the host looks idle means the VM is being starved.', points: reduceByTime(benchThreads, (p) => p.waitCores, sumOf) },
+			{ label: 'Running (cores)', description: 'Cores-worth of CPU time the benchmark threads actually used.', points: reduceByTime(benchThreads, (p) => p.cpuPct / 100, sumOf) }
+		]));
+		add(metricOf('thread_preempt', 'Preemption', 'Benchmark Threads — involuntary context switches /s', 'count', 'Benchmark Threads', [
+			{ label: 'Preempted /s', description: 'Times the scheduler took a benchmark thread off the CPU while it still wanted to run.', points: reduceByTime(benchThreads, (p) => p.nvolPerSec, sumOf) }
+		]));
+	}
+
+	// ── CPU ──
+	if (statIv.length > 0) {
+		add(metricOf('cpu_pct', 'CPU %', 'Runner CPU Usage % (all cores)', 'percent', 'CPU', [
+			{ label: 'User %', points: statIv.map((i) => ({ t: i.t, v: i.user })) },
+			{ label: 'System %', points: statIv.map((i) => ({ t: i.t, v: i.system })) },
+			{ label: 'IO Wait %', points: statIv.map((i) => ({ t: i.t, v: i.iowait })) },
+			{ label: 'Stolen %', description: 'CPU time taken by the hypervisor for other VMs. High on an oversold shared VPS.', points: statIv.map((i) => ({ t: i.t, v: i.steal })) },
+			{ label: 'IRQ %', points: statIv.map((i) => ({ t: i.t, v: i.irq })) },
+			{ label: 'Idle %', points: statIv.map((i) => ({ t: i.t, v: i.idle })) }
+		]));
+		add(metricOf('cpu_steal', 'Steal %', 'Runner CPU Steal %', 'percent', 'CPU', [
+			{ label: 'Stolen %', points: statIv.map((i) => ({ t: i.t, v: i.steal })) }
+		]));
+	}
+	if (coreAgg.length > 0) {
+		add(metricOf('cpu_cores_spread', 'Core Spread', 'Busiest vs Median vs Mean Core %', 'percent', 'CPU', [
+			{ label: 'Busiest core %', description: 'A single hot core with a low mean is the signature of a single-threaded client.', points: coreAgg.map((c) => ({ t: c.t, v: c.max })) },
+			{ label: 'Median core %', points: coreAgg.map((c) => ({ t: c.t, v: c.median })) },
+			{ label: 'Mean core %', points: coreAgg.map((c) => ({ t: c.t, v: c.mean })) }
+		]));
+		const coreEntries = [...perCore.entries()].slice(0, 64);
+		add(metricOf('cpu_per_core', 'Per-Core', 'Runner Per-Core Busy %', 'percent', 'CPU',
+			coreEntries.map(([id, ivs]) => ({ label: `cpu${id}`, points: ivs.map((i) => ({ t: i.t, v: i.busy })) }))));
+	}
+	if (loadavgRows.length > 0) {
+		const pts = (fn: (r: Record<string, unknown>) => number | null) => loadavgRows
+			.map((r) => { const t = toMs(r._collected_at as string | null); const v = fn(r); return t === null || v === null ? null : { t, v }; })
+			.filter((p): p is { t: number; v: number } => p !== null);
+		add(metricOf('load_vs_cores', 'Load vs Cores', 'Runner Load vs Core Count', 'count', 'CPU', [
+			{ label: 'Load 1m', points: pts((r) => toNumber(r.load1)) },
+			{ label: 'Runnable threads', description: 'Threads in the run queue right now (running + waiting).', points: pts((r) => toNumber(r.running_threads)) },
+			...(nproc !== null ? [{ label: 'Cores', description: 'Logical CPUs on the runner. Sustained load above this means oversubscription.', points: pts(() => nproc) }] : [])
+		]));
+	}
+	if (statRows.length > 0) {
+		const statPts = (col: string) => statRows
+			.map((r) => { const t = toMs(r._collected_at as string | null); const v = toNumber(r[col]); return t === null || v === null ? null : { t, v }; })
+			.filter((p): p is { t: number; v: number } => p !== null);
+		add(metricOf('run_queue', 'Run Queue', 'Runner Run Queue — runnable / blocked processes vs cores', 'count', 'CPU', [
+			{ label: 'Running + runnable', description: 'procs_running from /proc/stat: tasks on a CPU or waiting for one, at the instant of each sample. Sustained values above the core count mean tasks queue for CPU. It is a point sample, so read it with the run-queue wait and CPU pressure charts.', points: statPts('procs_running') },
+			{ label: 'Blocked on I/O', description: 'procs_blocked from /proc/stat: tasks in uninterruptible sleep waiting for I/O.', points: statPts('procs_blocked') },
+			...(nproc !== null ? [{ label: 'Cores', description: 'Logical CPUs on the runner.', points: statPts('procs_running').map((p) => ({ t: p.t, v: nproc })) }] : [])
+		]));
+	}
+	if (statRows.length > 1) {
+		add(withChartGroup(buildRateGroup('ctx_switches', 'Ctx Switches', 'Runner Context Switches & Interrupts /s', statRows,
+			['ctxt', 'intr'], 'count', runStartMs, 1,
+			{ ctxt: 'Ctx switches/s', intr: 'Interrupts/s' }), 'CPU'));
+	}
+
+	// ── Pressure ──
+	if (psiRows.length > 0) {
+		add(withChartGroup(buildInstantGroup('psi', 'Pressure (PSI)', 'Runner Pressure Stall — avg10 %', psiRows,
+			['cpu_some_avg10', 'memory_some_avg10', 'io_some_avg10'], 'percent', runStartMs, 1,
+			{ cpu_some_avg10: 'CPU some %', memory_some_avg10: 'Memory some %', io_some_avg10: 'IO some %' },
+			{ cpu_some_avg10: 'Share of the last 10s in which at least one runnable task was waiting for a CPU.' }), 'Pressure'));
+	}
+
+	// ── Memory ──
+	if (meminfoRows.length > 0) {
+		add(withChartGroup(buildHostDerivedInstantGroup('mem_used', 'Memory Used', 'Runner Memory Used / Available', meminfoRows, [
+			{ label: 'Used', description: 'mem_total - mem_available', valueFn: (r) => { const t = toNumber(r.mem_total); const a = toNumber(r.mem_available); return t !== null && a !== null ? (t - a) * 1024 : null; } },
+			{ label: 'Available', valueFn: (r) => { const a = toNumber(r.mem_available); return a === null ? null : a * 1024; } }
+		], 'bytes', runStartMs), 'Memory'));
+	}
+
+	// ── Network ──
+	const ifaces = [...new Set(netdevRows.map((r) => r.iface as string).filter(Boolean))];
+	for (const iface of ifaces) {
+		const rows = netdevRows.filter((r) => r.iface === iface);
+		if (rows.length < 2) continue;
+		add(withChartGroup(buildRateGroup(`net_${iface}`, 'Bandwidth', `Runner ${iface} — Bandwidth (KB/s)`, rows,
+			['rx_bytes', 'tx_bytes'], 'bytes', runStartMs, 1 / 1024, HOST_COL_LABELS, HOST_COL_DESCS), 'Network', iface));
+		add(withChartGroup(buildRateGroup(`net_${iface}_pkts`, 'Packets', `Runner ${iface} — Packets /s`, rows,
+			['rx_packets', 'tx_packets', 'rx_errs', 'tx_errs', 'rx_drop', 'tx_drop'], 'count', runStartMs, 1, HOST_COL_LABELS, HOST_COL_DESCS), 'Network', iface));
+	}
+	if (tcpIv.length > 0) {
+		add(metricOf('tcp_retrans', 'TCP Retransmits', 'Runner TCP Retransmitted Segments /s', 'count', 'Network', [
+			{ label: 'Retransmits/s', description: 'Segments TCP had to send again. Sustained non-zero values mean packet loss on the path to the database.', points: tcpIv.map((i) => ({ t: i.t, v: i.retransPerSec })) }
+		]));
+		add(metricOf('tcp_retrans_pct', 'Retransmit %', 'Runner TCP Retransmit % of Segments Sent', 'percent', 'Network', [
+			{ label: 'Retransmit %', points: tcpIv.filter((i) => i.retransPct !== null).map((i) => ({ t: i.t, v: i.retransPct as number })) }
+		]));
+	}
+
+	// ── Observer effect: what the collector itself costs ──
+	if (selfThreads.length > 0) {
+		add(metricOf('self_cpu', 'Runner Process CPU', 'mybench-runner process CPU % of one core (upper bound of collector overhead)', 'percent', 'Collector Overhead', [
+			{ label: 'mybench-runner %', description: 'All threads of the mybench-runner process, which also parses benchmark output and snapshots Postgres. The /proc collector is a small fraction of this.', points: reduceByTime(selfThreads, (p) => p.cpuPct, sumOf) }
+		]));
+	}
+	if (collectorRows.length > 0) {
+		add(metricOf('collector_sample', 'Sample Time', 'Runner collector — time to take one sample (µs)', 'count', 'Collector Overhead', [
+			{ label: 'Sample µs', description: 'Wall time of one /proc sampling pass.', points: collectorRows.map((r) => { const t = toMs(r._collected_at as string | null); const v = toNumber(r.sample_us); return t === null || v === null ? null : { t, v }; }).filter((p): p is { t: number; v: number } => p !== null) }
+		]));
+	}
+
+	// ── Summary cards (verdict first) ──
+	const summary: TelemetryCard[] = [];
+	summary.push({ ...metricCard('runner_verdict', 'Client verdict', 'text', health.headline), tone: health.level });
+	if (nproc !== null) summary.push(metricCard('runner_nproc', 'Runner vCPU', 'count', nproc));
+	const memTotalKb = toNumber(config.mem_total_kb);
+	if (memTotalKb !== null) summary.push(metricCard('runner_mem_total', 'Runner Memory', 'bytes', memTotalKb * 1024));
+	if (health.hottestThreadAvgPct !== null) summary.push(metricCard('runner_hottest_thread', 'Hottest Thread (avg)', 'percent', health.hottestThreadAvgPct / 100));
+	if (health.hottestThreadPeakPct !== null) summary.push(metricCard('runner_hottest_thread_peak', 'Hottest Thread (peak)', 'percent', health.hottestThreadPeakPct / 100));
+	if (health.avgBusyPct !== null) summary.push(metricCard('runner_cpu_avg', 'Avg CPU', 'percent', health.avgBusyPct / 100));
+	if (health.busiestCoreAvgPct !== null) summary.push(metricCard('runner_busiest_core', 'Busiest Core (avg)', 'percent', health.busiestCoreAvgPct / 100));
+	if (health.avgStealPct !== null) summary.push(metricCard('runner_steal_avg', 'Avg Steal', 'percent', health.avgStealPct / 100));
+	if (health.cpuPsiPeak !== null) summary.push(metricCard('runner_psi_cpu_peak', 'Peak CPU PSI', 'percent', health.cpuPsiPeak / 100));
+	if (health.retransPct !== null) summary.push(metricCard('runner_retrans', 'TCP Retransmit', 'percent', health.retransPct / 100));
+	if (health.runnerSelfCpuAvgPct !== null) summary.push(metricCard('runner_self_cpu', 'Runner Process CPU', 'percent', health.runnerSelfCpuAvgPct / 100));
+	const sampleUs = collectorRows.map((r) => toNumber(r.sample_us)).filter((v): v is number => v !== null);
+	if (sampleUs.length > 0) summary.push(metricCard('runner_sample_us', 'Collector Sample', 'duration_ms', meanOf(sampleUs) / 1000));
+
+	// ── Table: findings + config ──
+	const tableRows: Record<string, unknown>[] = [];
+	health.findings.forEach((f, i) => tableRows.push({ source: 'verdict', metric: `Finding ${i + 1}`, value: f, value_kind: 'text' }));
+	for (const [k, v] of Object.entries(config)) {
+		tableRows.push({ source: 'runner config', metric: k, value: v, value_kind: typeof v === 'number' ? 'count' : 'text' });
+	}
+
+	return {
+		key: 'runner_system',
+		label: 'Runner',
+		status: 'ok',
+		summary,
+		chartTitle: 'Runner metrics',
+		chartSeries: chartMetrics[0]?.series ?? [],
+		chartMetrics,
+		defaultChartMetricKey: chartMetrics[0]?.key,
+		tableTitle: 'Verdict & runner config',
+		tableColumns: [
+			{ key: 'source', label: 'Source', kind: 'text' },
+			{ key: 'metric', label: 'Metric', kind: 'text' },
+			{ key: 'value', label: 'Value', kind: 'text' }
+		],
+		tableRows,
+		tableSnapshots: []
+	};
+}
+
 // Metrics whose series are disjoint parts of a whole, so a stacked bar of their averages is meaningful.
 // Keyed by `<section key>:<metric key>`; null = every series, otherwise only the listed series labels
 // (e.g. "total/s" is excluded because it already is the sum of the others).
@@ -5209,7 +5451,9 @@ const STACKABLE_METRICS: Record<string, string[] | null> = {
 	'host_system:stat_cpu': null,
 	'host_system:mem_used': null,
 	'host_system:swap_space': null,
-	'host_system:mem_active_inactive': null
+	'host_system:mem_active_inactive': null,
+	'runner_system:cpu_pct': null,
+	'runner_system:mem_used': null
 };
 
 function markStackableMetrics(sections: TelemetrySection[]): void {
@@ -5270,7 +5514,8 @@ export function buildRunTelemetry(db: Database.Database, runId: number, phases?:
 		buildStatioUserIndexesSection(statioUserIndexRows, runStartMs),
 		buildStatioUserSequencesSection(statioUserSequenceRows, runStartMs),
 		buildHostSystemSection(db, runId, runStartMs, selectedPhases, run.bench_started_at, run.post_started_at, databaseRows),
-		buildHostProcessesSection(db, runId, runStartMs, selectedPhases, run.bench_started_at, run.post_started_at)
+		buildHostProcessesSection(db, runId, runStartMs, selectedPhases, run.bench_started_at, run.post_started_at),
+		buildRunnerSection(db, runId, runStartMs, selectedPhases, run.bench_started_at, run.post_started_at)
 	];
 
 	markStackableMetrics(sections);

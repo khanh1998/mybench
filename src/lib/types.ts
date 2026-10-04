@@ -147,6 +147,7 @@ export interface DesignStep {
 	// proc step fields
 	proc_groups: string;           // JSON array of group names, '' or '[]' = all groups
 	proc_interval_seconds: string; // TEXT, supports {{PARAM}}, empty = use snapshot interval
+	proc_collect_runner: number;   // 0 | 1 — also sample the runner host's own /proc (client-side saturation)
 }
 
 export type RunStatus = 'running' | 'completed' | 'failed' | 'stopped' | 'pending';

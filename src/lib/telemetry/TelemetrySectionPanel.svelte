@@ -258,9 +258,19 @@
   </div>
 
   {#if section.status === 'ok'}
-    {#if section.summary.length > 0}
+    {#each section.summary.filter((card) => card.tone) as card}
+      <div class="verdict-banner {card.tone}" role="status">
+        <span class="verdict-label">{card.label}</span>
+        <span class="verdict-text">{card.value}</span>
+        <!-- the headline is the first finding; list the rest underneath -->
+        {#each section.tableRows.filter((r) => r.source === 'verdict').slice(1) as f}
+          <span class="verdict-extra">+ {f.value}</span>
+        {/each}
+      </div>
+    {/each}
+    {#if section.summary.some((card) => !card.tone)}
       <div class="summary-grid">
-        {#each section.summary as card}
+        {#each section.summary.filter((card) => !card.tone) as card}
           <TelemetryValueCard {card} variant="summary" />
         {/each}
       </div>
@@ -547,6 +557,47 @@
     margin-top: 4px;
     color: #777;
     font-size: 12px;
+  }
+
+  .verdict-banner {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    border: 1px solid #cfe8d8;
+    border-left-width: 4px;
+    border-radius: 8px;
+    padding: 8px 12px;
+    background: #f3faf6;
+    color: #14532d;
+    font-size: 13px;
+  }
+
+  .verdict-banner.warn {
+    border-color: #f1dca0;
+    background: #fffaf0;
+    color: #7a4b00;
+  }
+
+  .verdict-banner.bad {
+    border-color: #f0b8b8;
+    background: #fff5f5;
+    color: #8a1c1c;
+  }
+
+  .verdict-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    opacity: 0.75;
+  }
+
+  .verdict-text {
+    font-weight: 600;
+  }
+
+  .verdict-extra {
+    font-size: 12px;
+    opacity: 0.9;
   }
 
   .summary-grid {

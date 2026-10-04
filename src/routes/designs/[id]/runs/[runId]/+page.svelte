@@ -146,7 +146,7 @@
   let scrollPending = false;
   let phases: PhaseState[] = $state([]);
   let activeTab = $state<'overview' | 'load' | 'telemetry' | 'host_metrics' | 'perf'>('overview');
-  let hostSubTab = $state<'system' | 'processes'>('system');
+  let hostSubTab = $state<'system' | 'processes' | 'runner'>('system');
   let nameInput = $state<HTMLInputElement | null>(null);
   let ec2StatusLoading = $state(false);
   let ec2Status = $state<Ec2Status | null>(null);
@@ -1001,7 +1001,7 @@
   <DatabaseTelemetry
     {runId}
     active={activeTab === 'telemetry' && done}
-    excludeSectionKeys={['host_system', 'host_processes']}
+    excludeSectionKeys={['host_system', 'host_processes', 'runner_system']}
   />
 {:else if activeTab === 'perf'}
   {#if perfSteps.length > 0}
@@ -1313,18 +1313,24 @@
       class="host-sub-btn"
       class:active={hostSubTab === 'system'}
       onclick={() => hostSubTab = 'system'}
-    >System</button>
+    >DB System</button>
     <button
       class="host-sub-btn"
       class:active={hostSubTab === 'processes'}
       onclick={() => hostSubTab = 'processes'}
-    >Processes</button>
+    >DB Processes</button>
+    <button
+      class="host-sub-btn"
+      class:active={hostSubTab === 'runner'}
+      title="Metrics of the machine running pgbench/sysbench — tells you whether the client is the bottleneck"
+      onclick={() => hostSubTab = 'runner'}
+    >Runner (client)</button>
   </div>
   <DatabaseTelemetry
     {runId}
     active={activeTab === 'host_metrics' && done}
-    title={hostSubTab === 'system' ? 'System Metrics' : 'Process Metrics'}
-    includeSectionKeys={hostSubTab === 'system' ? ['host_system'] : ['host_processes']}
+    title={hostSubTab === 'system' ? 'System Metrics' : hostSubTab === 'processes' ? 'Process Metrics' : 'Runner (Client) Metrics'}
+    includeSectionKeys={hostSubTab === 'system' ? ['host_system'] : hostSubTab === 'processes' ? ['host_processes'] : ['runner_system']}
     showHeroCards={false}
   />
 {/if}

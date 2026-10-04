@@ -75,6 +75,7 @@
     // proc step fields
     proc_groups: string;
     proc_interval_seconds: string;
+    proc_collect_runner: number;
   }
   interface Design {
     id: number; decision_id: number; name: string; description: string;
@@ -654,6 +655,7 @@
       pg_stat_pss_track_planning: 0,
       proc_groups: '[]',
       proc_interval_seconds: '',
+      proc_collect_runner: 1,
       enabled: 1,
       pgbench_scripts: []
     };
@@ -1724,8 +1726,27 @@
 
           <!-- SSH requirement note -->
           <p class="pg-stat-table-hint" style="margin-bottom:10px">
-            SSH to database server required · not supported for RDS/Cloud SQL · collection starts at bench step
+            Database-host files below need SSH to the database server · not supported for RDS/Cloud SQL · collection starts at bench step
           </p>
+
+          <!-- Runner host collection -->
+          <div class="perf-mode-section">
+            <div class="pg-stat-section-header">
+              Runner host
+              <span class="pg-stat-section-hint">the machine running pgbench/sysbench · no SSH needed · works for RDS/Cloud SQL</span>
+            </div>
+            <label class="snap-table-item" title="Per-core CPU, steal, PSI, per-thread pgbench/sysbench CPU and run-queue wait, TCP retransmits, read directly from the runner's /proc (no forked processes, negligible overhead).">
+              <input
+                type="checkbox"
+                checked={!!selectedStep.proc_collect_runner}
+                onchange={(e) => { selectedStep!.proc_collect_runner = (e.currentTarget as HTMLInputElement).checked ? 1 : 0; }}
+              />
+              Collect runner metrics (client saturation check)
+            </label>
+            <p class="pg-stat-table-hint">
+              Use when you see ClientRead waits and need to know if the client needs more CPU. Uses the interval below (minimum 1s).
+            </p>
+          </div>
 
           <!-- Metric groups -->
           <div class="perf-mode-section">

@@ -135,6 +135,8 @@ export interface RunnerResult {
 	snapshots?: Record<string, Record<string, unknown>[]>;
 	host_snapshots?: Record<string, Record<string, unknown>[]>;
 	host_config?: Record<string, unknown>;
+	runner_snapshots?: Record<string, Record<string, unknown>[]>;
+	runner_config?: Record<string, unknown>;
 	net_latency?: Record<string, unknown>;
 }
 
@@ -361,57 +363,63 @@ export function importResultIntoRun(runId: number, result: RunnerResult): void {
 		}
 	}
 
-	// Import host_snapshots into host_snap_* tables (same dynamic-column pattern as snapshots).
-	const hostSnapshots = result.host_snapshots;
-	if (hostSnapshots) {
-		for (const [tableName, rows] of Object.entries(hostSnapshots)) {
-			if (!Array.isArray(rows) || rows.length === 0) continue;
-			if (!tableName.startsWith('host_snap_')) continue;
+	// Import host_snapshots (DB host) into host_snap_* and runner_snapshots (runner host)
+	// into runner_snap_* tables — same dynamic-column pattern as snapshots.
+	const timeseriesGroups: [Record<string, Record<string, unknown>[]> | undefined, string][] = [
+		[result.host_snapshots, 'host_snap_'],
+		[result.runner_snapshots, 'runner_snap_']
+	];
+	for (const [hostSnapshots, tablePrefix] of timeseriesGroups) {
+		if (hostSnapshots) {
+			for (const [tableName, rows] of Object.entries(hostSnapshots)) {
+				if (!Array.isArray(rows) || rows.length === 0) continue;
+				if (!tableName.startsWith(tablePrefix)) continue;
 
-			db.exec(`CREATE TABLE IF NOT EXISTS ${tableName} (
-				_id INTEGER PRIMARY KEY AUTOINCREMENT,
-				_run_id INTEGER
-			)`);
+				db.exec(`CREATE TABLE IF NOT EXISTS ${tableName} (
+					_id INTEGER PRIMARY KEY AUTOINCREMENT,
+					_run_id INTEGER
+				)`);
 
-			// Idempotent: clear any existing rows for this run before inserting.
-			db.prepare(`DELETE FROM ${tableName} WHERE _run_id = ?`).run(runId);
+				// Idempotent: clear any existing rows for this run before inserting.
+				db.prepare(`DELETE FROM ${tableName} WHERE _run_id = ?`).run(runId);
 
-			const existingCols = new Set(
-				(db.prepare(`PRAGMA table_info(${tableName})`).all() as { name: string }[]).map(r => r.name)
-			);
+				const existingCols = new Set(
+					(db.prepare(`PRAGMA table_info(${tableName})`).all() as { name: string }[]).map(r => r.name)
+				);
 
-			const metaCols = new Set(['_collected_at']);
-			const firstRow = rows[0];
-			const dataCols = Object.keys(firstRow).filter(k => k !== '_collected_at' && !metaCols.has(k));
+				const metaCols = new Set(['_collected_at']);
+				const firstRow = rows[0];
+				const dataCols = Object.keys(firstRow).filter(k => k !== '_collected_at' && !metaCols.has(k));
 
-			if (!existingCols.has('_collected_at')) {
-				db.exec(`ALTER TABLE ${tableName} ADD COLUMN _collected_at TEXT`);
-			}
-
-			for (const col of dataCols) {
-				if (existingCols.has(col)) continue;
-				const colType = hostSnapColumnType(tableName, col);
-				db.exec(`ALTER TABLE ${tableName} ADD COLUMN "${col}" ${colType}`);
-			}
-
-			const insertCols = ['_run_id', '_collected_at', ...dataCols];
-			const placeholders = insertCols.map((_, i) => `@p${i}`).join(', ');
-			const stmt = db.prepare(
-				`INSERT INTO ${tableName} (${insertCols.map(c => `"${c}"`).join(', ')}) VALUES (${placeholders})`
-			);
-
-			db.transaction((rowsToInsert: Record<string, unknown>[]) => {
-				for (const row of rowsToInsert) {
-					const params: Record<string, unknown> = {
-						p0: runId,
-						p1: normalizeSqliteValue(row['_collected_at'] ?? new Date().toISOString())
-					};
-					dataCols.forEach((col, i) => {
-						params[`p${i + 2}`] = normalizeSqliteValue(row[col]);
-					});
-					stmt.run(params);
+				if (!existingCols.has('_collected_at')) {
+					db.exec(`ALTER TABLE ${tableName} ADD COLUMN _collected_at TEXT`);
 				}
-			})(rows);
+
+				for (const col of dataCols) {
+					if (existingCols.has(col)) continue;
+					const colType = hostSnapColumnType(tableName, col);
+					db.exec(`ALTER TABLE ${tableName} ADD COLUMN "${col}" ${colType}`);
+				}
+
+				const insertCols = ['_run_id', '_collected_at', ...dataCols];
+				const placeholders = insertCols.map((_, i) => `@p${i}`).join(', ');
+				const stmt = db.prepare(
+					`INSERT INTO ${tableName} (${insertCols.map(c => `"${c}"`).join(', ')}) VALUES (${placeholders})`
+				);
+
+				db.transaction((rowsToInsert: Record<string, unknown>[]) => {
+					for (const row of rowsToInsert) {
+						const params: Record<string, unknown> = {
+							p0: runId,
+							p1: normalizeSqliteValue(row['_collected_at'] ?? new Date().toISOString())
+						};
+						dataCols.forEach((col, i) => {
+							params[`p${i + 2}`] = normalizeSqliteValue(row[col]);
+						});
+						stmt.run(params);
+					}
+				})(rows);
+			}
 		}
 	}
 
@@ -419,6 +427,12 @@ export function importResultIntoRun(runId: number, result: RunnerResult): void {
 	if (result.host_config && Object.keys(result.host_config).length > 0) {
 		db.prepare(`UPDATE benchmark_runs SET host_config = ? WHERE id = ?`)
 			.run(JSON.stringify(result.host_config), runId);
+	}
+
+	// Import runner_config (runner-host nproc / cpu model / memory / kernel) as JSON.
+	if (result.runner_config && Object.keys(result.runner_config).length > 0) {
+		db.prepare(`UPDATE benchmark_runs SET runner_config = ? WHERE id = ?`)
+			.run(JSON.stringify(result.runner_config), runId);
 	}
 
 	// Import the pre-run client→DB latency probe (SELECT 1 + ping) as JSON.
@@ -430,11 +444,11 @@ export function importResultIntoRun(runId: number, result: RunnerResult): void {
 
 function hostSnapColumnType(tableName: string, colName: string): string {
 	// Known text discriminator columns
-	const textCols = new Set(['device', 'iface', 'comm', 'state', 'name', 'cpu_id', 'wchan']);
+	const textCols = new Set(['device', 'iface', 'comm', 'state', 'name', 'cpu_id', 'wchan', 'proc']);
 	if (textCols.has(colName)) return 'TEXT';
 	// PSI values and load averages are REAL
-	if (tableName === 'host_snap_proc_psi') return 'REAL';
-	if (tableName === 'host_snap_proc_loadavg' && (colName === 'load1' || colName === 'load5' || colName === 'load15')) return 'REAL';
+	if (tableName.endsWith('_proc_psi')) return 'REAL';
+	if (tableName.endsWith('_proc_loadavg') && (colName === 'load1' || colName === 'load5' || colName === 'load15')) return 'REAL';
 	return 'INTEGER';
 }
 
