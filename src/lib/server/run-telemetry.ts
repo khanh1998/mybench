@@ -3933,6 +3933,33 @@ function pushChartMetric(metrics: TelemetryChartMetric[], metric: TelemetryChart
 	if (metric) metrics.push(metric);
 }
 
+/**
+ * Per-core charts from *_proc_stat_cpu rows: busy % and softirq % per core, plus the busiest
+ * softirq core over time. A single-queue NIC pins all packet processing to one core, which
+ * saturates while the all-core average looks idle.
+ */
+function buildPerCoreMetrics(cpuRows: Record<string, unknown>[], hostLabel: string, runStartMs: number): TelemetryChartMetric[] {
+	const perCore = [...perCoreIntervals(cpuRows).entries()].slice(0, 64);
+	if (perCore.length === 0) return [];
+	const toSeries = (field: 'busy' | 'softirq') => perCore.map(([id, ivs], i) => ({
+		label: `cpu${id}`,
+		color: COLORS[i % COLORS.length],
+		points: ivs.map((iv) => ({ t: iv.t - runStartMs, v: iv[field] }))
+	}));
+	const softirqMax = coreAggregates(new Map(perCore.map(([id, ivs]) => [id, ivs.map((iv) => ({ ...iv, busy: iv.softirq }))])));
+	return [
+		{ key: 'cpu_per_core', label: 'Per-Core', kind: 'percent', group: 'CPU', title: `${hostLabel} Per-Core Busy %`, series: toSeries('busy') },
+		{ key: 'cpu_per_core_softirq', label: 'Per-Core SoftIRQ', kind: 'percent', group: 'CPU', title: `${hostLabel} Per-Core SoftIRQ %`, series: toSeries('softirq') },
+		{
+			key: 'cpu_softirq_hot', label: 'Hottest SoftIRQ Core', kind: 'percent', group: 'CPU', title: `${hostLabel} SoftIRQ — Busiest Core vs Mean`,
+			series: [
+				{ label: 'Busiest core softirq %', description: 'Softirq time (mostly NET_RX/NET_TX packet processing) on the single busiest core. Near 100% means packet processing is serialized on one core (single-queue NIC, no RPS); the backlog shows up in Postgres as ClientRead.', color: COLORS[0], points: softirqMax.map((c) => ({ t: c.t - runStartMs, v: c.max })) },
+				{ label: 'Mean core softirq %', color: COLORS[1], points: softirqMax.map((c) => ({ t: c.t - runStartMs, v: c.mean })) }
+			]
+		}
+	];
+}
+
 function buildHostDerivedInstantGroup(
 	key: string,
 	label: string,
@@ -4179,6 +4206,7 @@ function buildHostSystemSection(db: Database.Database, runId: number, runStartMs
 	const loadavgRows    = fetchH('host_snap_proc_loadavg');
 	const meminfoRows    = fetchH('host_snap_proc_meminfo');
 	const statRows       = fetchH('host_snap_proc_stat');
+	const statCpuRows    = fetchH('host_snap_proc_stat_cpu');
 	const procVmstatRows = fetchH('host_snap_proc_vmstat');
 	const diskstatsRows  = fetchH('host_snap_proc_diskstats');
 	const netdevRows     = fetchH('host_snap_proc_netdev');
@@ -4199,7 +4227,7 @@ function buildHostSystemSection(db: Database.Database, runId: number, runStartMs
 	}
 
 	const hasData = loadavgRows.length > 0 || meminfoRows.length > 0
-		|| statRows.length > 0 || diskstatsRows.length > 0 || fileNrRows.length > 0
+		|| statRows.length > 0 || statCpuRows.length > 0 || diskstatsRows.length > 0 || fileNrRows.length > 0
 		|| Object.keys(hostConfig).length > 0;
 	if (!hasData) return noData;
 
@@ -4314,6 +4342,7 @@ function buildHostSystemSection(db: Database.Database, runId: number, runStartMs
 			['procs_running', 'procs_blocked'], 'count', runStartMs, 1, L, D);
 		pushChartMetric(chartMetrics, withChartGroup(g3, 'CPU'));
 	}
+	chartMetrics.push(...buildPerCoreMetrics(statCpuRows, 'DB Host', runStartMs));
 
 	// /proc/vmstat
 	if (procVmstatRows.length > 1) {
@@ -5317,9 +5346,7 @@ function buildRunnerSection(db: Database.Database, runId: number, runStartMs: nu
 			{ label: 'Median core %', points: coreAgg.map((c) => ({ t: c.t, v: c.median })) },
 			{ label: 'Mean core %', points: coreAgg.map((c) => ({ t: c.t, v: c.mean })) }
 		]));
-		const coreEntries = [...perCore.entries()].slice(0, 64);
-		add(metricOf('cpu_per_core', 'Per-Core', 'Runner Per-Core Busy %', 'percent', 'CPU',
-			coreEntries.map(([id, ivs]) => ({ label: `cpu${id}`, points: ivs.map((i) => ({ t: i.t, v: i.busy })) }))));
+		chartMetrics.push(...buildPerCoreMetrics(cpuRows, 'Runner', runStartMs));
 	}
 	if (loadavgRows.length > 0) {
 		const pts = (fn: (r: Record<string, unknown>) => number | null) => loadavgRows

@@ -1186,6 +1186,13 @@ FROM snap_pg_stat_bgwriter WHERE _run_id = ? ORDER BY _collected_at DESC LIMIT 1
       _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
       _collected_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS host_snap_proc_stat_cpu (
+      _id INTEGER PRIMARY KEY AUTOINCREMENT,
+      _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,
+      _collected_at TEXT NOT NULL,
+      cpu_id TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_host_snap_proc_stat_cpu_run ON host_snap_proc_stat_cpu(_run_id);
     CREATE TABLE IF NOT EXISTS host_snap_proc_schedstat (
       _id INTEGER PRIMARY KEY AUTOINCREMENT,
       _run_id INTEGER NOT NULL REFERENCES benchmark_runs(id) ON DELETE CASCADE,

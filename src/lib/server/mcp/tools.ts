@@ -1384,7 +1384,7 @@ Use this before writing queries with query_run_data to understand what columns a
 
 Includes:
 - snap_* tables: PostgreSQL statistics snapshots (pg_stat_database, pg_stat_user_tables, pg_stat_wal, pg_locks, pg_stat_statements, etc.)
-- host_snap_* tables: OS/host metrics of the DATABASE host (CPU, memory, disk I/O, network, per-process stats)
+- host_snap_* tables: OS/host metrics of the DATABASE host (CPU, memory, disk I/O, network, per-process stats; host_snap_proc_stat_cpu = per-core jiffies incl. cpu_softirq — a single core near 100% softirq means NIC packet processing is serialized and inflates ClientRead)
 - runner_snap_* tables: OS metrics of the RUNNER host where pgbench/sysbench execute (runner_snap_proc_stat_cpu = per-core jiffies, runner_snap_proc_thread = per-thread CPU/run-queue wait of pgbench/sysbench, runner_snap_proc_psi, runner_snap_proc_snmp = TCP retransmits). Use these to decide whether the client is the bottleneck.
 - benchmark_runs, designs, decisions: core metadata for filtering by run/design/decision
 
