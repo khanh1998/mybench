@@ -30,6 +30,7 @@ export interface CpuInterval {
 	iowait: number;
 	steal: number;
 	irq: number;
+	softirq: number;
 	idle: number;
 }
 
@@ -53,6 +54,7 @@ export function cpuIntervals(rows: Row[]): CpuInterval[] {
 			iowait: pct(d('cpu_iowait')),
 			steal: pct(d('cpu_steal')),
 			irq: pct(d('cpu_irq') + d('cpu_softirq')),
+			softirq: pct(d('cpu_softirq')),
 			idle: pct(d('cpu_idle'))
 		});
 	}

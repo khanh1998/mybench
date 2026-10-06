@@ -287,6 +287,9 @@ func (c *HostMetricsCollector) collectOnce() {
 			if row := parseProcStat(text); row != nil {
 				addRow("host_snap_proc_stat", row)
 			}
+			// Per-core jiffies: a single core saturated by NIC softirq (single-queue
+			// virtio) is invisible in the aggregate row.
+			addRows("host_snap_proc_stat_cpu", parseProcStatCPUs(text))
 		}
 	}
 	if c.shouldCollect("vmstat") {
