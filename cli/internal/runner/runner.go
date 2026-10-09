@@ -190,6 +190,7 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 			var logPath string
 			stepRes.Command, logPath, stepErr = runSQLStep(opts, step.Name, script, step.NoTransaction)
 			stepRes.Log = tailFile(logPath, opts.LogTailLines)
+			stepRes.ProcessedScript = script
 			if stepErr != nil {
 				stepRes.Status = "failed"
 				stepRes.FinishedAt = time.Now().UTC().Format(time.RFC3339)
@@ -262,6 +263,20 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 			}
 			stepRes.Command = "pg_stat"
 			stepRes.Log = strings.TrimSpace(pgStatLog)
+
+		case "proc":
+			// Host metrics collection is configured at plan level (Plan.ProcStep) and runs
+			// alongside the bench step; the step itself only marks where it sits in the plan.
+			if cfg := opts.Plan.ProcStep; cfg != nil {
+				groups := "all"
+				if len(cfg.Groups) > 0 {
+					groups = strings.Join(cfg.Groups, ",")
+				}
+				stepRes.Command = fmt.Sprintf("proc groups=%s interval=%ds collect_runner=%t", groups, cfg.IntervalSeconds, cfg.CollectRunner)
+			} else {
+				stepRes.Command = "proc"
+			}
+			opts.logInfo("[proc] %s (%s)", step.Name, stepRes.Command)
 
 		case "perf":
 			modes := enabledPerfModes(step)

@@ -204,7 +204,12 @@ export function importResultIntoRun(runId: number, result: RunnerResult): void {
 		runId
 	);
 
-	// Replace step results: delete placeholder(s), insert real ones
+	// Replace step results: delete placeholder(s), insert real ones.
+	// config_json is captured at launch (not part of the CLI result), so carry it over.
+	const configByStep = new Map(
+		(db.prepare("SELECT step_id, config_json FROM run_step_results WHERE run_id = ? AND config_json != ''").all(runId) as { step_id: number; config_json: string }[])
+			.map(r => [r.step_id, r.config_json])
+	);
 	db.prepare('DELETE FROM run_step_results WHERE run_id = ?').run(runId);
 	db.prepare('DELETE FROM run_step_perf WHERE run_id = ?').run(runId);
 	db.prepare('DELETE FROM run_step_perf_events WHERE run_id = ?').run(runId);
@@ -215,9 +220,9 @@ export function importResultIntoRun(runId: number, result: RunnerResult): void {
 			INSERT INTO run_step_results (
 				run_id, step_id, position, name, type, status, command, stdout,
 				processed_script, pgbench_summary_json, pgbench_scripts_json,
-				sysbench_summary_json, started_at, finished_at
+				sysbench_summary_json, started_at, finished_at, config_json
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`);
 		const insPerf = db.prepare(`
 			INSERT INTO run_step_perf (
@@ -249,7 +254,8 @@ export function importResultIntoRun(runId: number, result: RunnerResult): void {
 					s.pgbench_scripts ? JSON.stringify(s.pgbench_scripts) : '',
 					s.sysbench_summary ? JSON.stringify(s.sysbench_summary) : '',
 					s.started_at,
-					s.finished_at
+					s.finished_at,
+					configByStep.get(s.step_id) ?? ''
 				);
 				for (const perf of s.perfs ?? (s.perf ? [s.perf] : [])) {
 					const mode = perf.mode ?? 'stat';

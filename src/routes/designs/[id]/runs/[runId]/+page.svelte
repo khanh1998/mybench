@@ -7,6 +7,7 @@
   import LoadAnalysis from '$lib/LoadAnalysis.svelte';
   import DatabaseTelemetry from '$lib/DatabaseTelemetry.svelte';
   import PgbenchOverview from '$lib/PgbenchOverview.svelte';
+  import RunStepDetail from '$lib/RunStepDetail.svelte';
   import SysbenchOverview from '$lib/SysbenchOverview.svelte';
   import { formatPingLatency, formatSelect1Latency, parseNetLatency } from '$lib/net-latency';
   import type { PageData } from './$types';
@@ -22,7 +23,7 @@
   interface StepResult {
     id: number; step_id: number; name: string; type: string; status: string;
     stdout: string; stderr: string; started_at: string|null; finished_at: string|null;
-    command: string; processed_script: string;
+    command: string; processed_script: string; config_json: string;
     pgbench_summary_json: string; pgbench_scripts_json: string;
     sysbench_summary_json: string;
     perfs: StepPerf[];
@@ -798,25 +799,16 @@
               <td>{fmtTime(s.started_at)}</td>
               <td>{fmtTime(s.finished_at)}</td>
               <td>
-                {#if s.command}
+                {#if s.command || s.config_json || s.processed_script}
                   <button class="expand-btn" onclick={() => toggleStep(s.step_id)}>
                     {expandedStep === s.step_id ? '▲' : '▼'} details
                   </button>
                 {/if}
               </td>
             </tr>
-            {#if expandedStep === s.step_id && s.command}
+            {#if expandedStep === s.step_id}
               <tr class="detail-row">
-                <td colspan="6">
-                  <div class="detail-block">
-                    <div class="detail-label">Command</div>
-                    <pre class="detail-pre">{s.command}</pre>
-                    {#if s.processed_script}
-                      <div class="detail-label" style="margin-top:8px">Script</div>
-                      <pre class="detail-pre">{s.processed_script}</pre>
-                    {/if}
-                  </div>
-                </td>
+                <td colspan="6"><RunStepDetail step={s} /></td>
               </tr>
             {/if}
           {/each}

@@ -13,6 +13,7 @@ import {
 	shellQuote
 } from '$lib/server/ec2-runner';
 import { generatePlan } from '$lib/server/plan-generator';
+import { storeStepConfigs } from '$lib/server/step-config';
 import { importResultIntoRun } from '$lib/server/run-importer';
 import type { Ec2Server } from '$lib/types';
 
@@ -261,6 +262,7 @@ async function executeEc2SeriesAsync(
 			database: resolvedDatabase,
 			use_private_ip: usePrivateIp
 		});
+		for (const entry of entries) storeStepConfigs(entry.runId, plan, entry.cliProfileName);
 		const localPlanPath = `/tmp/mybench-series-${seriesToken}.json`;
 		writeFileSync(localPlanPath, JSON.stringify(plan));
 		const remotePlanPath = `${resolvedRemoteDir}/plan-${seriesToken}.json`;

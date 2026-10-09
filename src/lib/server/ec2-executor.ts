@@ -11,6 +11,7 @@ import {
 	shellQuote
 } from '$lib/server/ec2-runner';
 import { generatePlan } from '$lib/server/plan-generator';
+import { storeStepConfigs } from '$lib/server/step-config';
 import { importResultIntoRun } from '$lib/server/run-importer';
 import type { Ec2Server } from '$lib/types';
 import type { Client } from 'ssh2';
@@ -445,6 +446,7 @@ async function executeEc2RunAsync(
 			database: opts.database,
 			use_private_ip: opts.use_private_ip
 		});
+		storeStepConfigs(runId, plan, profileName);
 		writeFileSync(localPlanPath, JSON.stringify(plan));
 
 		emit(`Uploading plan to ${ec2Server.host}...`);

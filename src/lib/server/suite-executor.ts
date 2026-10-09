@@ -14,6 +14,7 @@ import {
 	shellQuote
 } from '$lib/server/ec2-runner';
 import { generatePlan } from '$lib/server/plan-generator';
+import { storeStepConfigs } from '$lib/server/step-config';
 import { importResultIntoRun } from '$lib/server/run-importer';
 import type { Ec2Server } from '$lib/types';
 
@@ -337,6 +338,7 @@ async function executeEc2SuiteAsync(
 				use_private_ip: !!opts.use_private_ip,
 				suiteMode: true
 			});
+			for (const r of de.runs) storeStepConfigs(r.runId, plan, r.cliProfileName);
 			const localPlanPath = `/tmp/mybench-suite-plan-${de.designToken}.json`;
 			writeFileSync(localPlanPath, JSON.stringify(plan));
 			const remotePlanPath = `${resolvedRemoteDir}/plan-${de.designToken}.json`;

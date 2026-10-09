@@ -853,6 +853,8 @@ function migrate(db: Database.Database) {
   // Add output_file to run_step_results to store per-step log file path emitted in step_start events
   const stepResultColsOutputFile = (db.prepare(`PRAGMA table_info(run_step_results)`).all() as { name: string }[]).map(c => c.name);
   if (!stepResultColsOutputFile.includes('output_file')) db.exec(`ALTER TABLE run_step_results ADD COLUMN output_file TEXT NOT NULL DEFAULT ''`);
+  // config_json: per-step config snapshot (params resolved) captured at launch — see step-config.ts
+  if (!stepResultColsOutputFile.includes('config_json')) db.exec(`ALTER TABLE run_step_results ADD COLUMN config_json TEXT NOT NULL DEFAULT ''`);
 
   // One-time backfill: migrate existing pgbench step scripts (idempotent)
   db.exec(`
