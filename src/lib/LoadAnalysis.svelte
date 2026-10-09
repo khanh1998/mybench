@@ -388,6 +388,8 @@
   let hiddenSessionStates = $state<string[]>([]);
   // Backend states included in Top Wait Events; empty = all states.
   let waitStates = $state<string[]>(['active']);
+  // Backend states included in the AAS chart; empty = all states.
+  let aasStates = $state<string[]>(['active']);
 
   let sqlSort      = $state<{ col: keyof SqlRow; asc: boolean }>({ col: 'delta_exec_time', asc: false });
   let sqlMode      = $state<'total' | 'persec'>('total');
@@ -425,16 +427,26 @@
     expandedLockNodes = next;
   }
 
-  function waitStateClause(): { sql: string; params: string[] } {
-    if (waitStates.length === 0) return { sql: '', params: [] };
+  function stateClause(states: string[]): { sql: string; params: string[] } {
+    if (states.length === 0) return { sql: '', params: [] };
     return {
-      sql: `AND COALESCE(state,'unknown') IN (${waitStates.map(() => '?').join(',')})`,
-      params: [...waitStates],
+      sql: `AND COALESCE(state,'unknown') IN (${states.map(() => '?').join(',')})`,
+      params: [...states],
     };
   }
 
+  function waitStateClause() { return stateClause(waitStates); }
+
   function toggleWaitState(state: string) {
     waitStates = waitStates.includes(state) ? waitStates.filter(s => s !== state) : [...waitStates, state];
+  }
+
+  function toggleAasState(state: string) {
+    aasStates = aasStates.includes(state) ? aasStates.filter(s => s !== state) : [...aasStates, state];
+  }
+
+  function aasStatesLabel(): string {
+    return aasStates.length === 0 ? 'All states' : aasStates.join(', ');
   }
 
   function waitStatesLabel(): string {
@@ -687,6 +699,28 @@
     waitsData = { ...waitsData, [rid]: waitsRes.error ? [] : (waitsRes.rows as unknown as WaitRow[]) };
   }
 
+  // AAS: group by type+event for detailed tooltip, aggregate to type for chart stacking.
+  // Defaults to active backends only: idle-in-transaction backends usually show
+  // Client:ClientRead while waiting for the client, which inflates load without showing
+  // backend work or meaningful resource pressure. `aasStates` empty = all states.
+  async function loadAas(run: RunMeta) {
+    const rid = run.id;
+    const p = showPhaseFilter ? localPhases : phases;
+    const { clause, params: pParams } = phaseClause(p);
+    const { sql: stateSql, params: stateParams } = stateClause(aasStates);
+    const aasRes = await queryApi(
+      `SELECT _collected_at,
+        COALESCE(wait_event_type, 'CPU') as wait_event_type,
+        COALESCE(wait_event, 'running') as wait_event,
+        COUNT(*) as n
+       FROM snap_pg_stat_activity
+       WHERE _run_id = ? AND ${clause} ${stateSql}
+       GROUP BY _collected_at, wait_event_type, wait_event ORDER BY _collected_at`,
+      [rid, ...pParams, ...stateParams]
+    );
+    aasData = { ...aasData, [rid]: aasRes.error ? [] : (aasRes.rows as unknown as AasRow[]) };
+  }
+
   async function loadAll() {
     if (runs.length === 0) return;
     loading = true;
@@ -696,21 +730,7 @@
     await Promise.all(runs.map(async (run) => {
       const rid = run.id;
 
-      // AAS: group by type+event for detailed tooltip, aggregate to type for chart stacking
-      // Only active backends count toward AAS. Idle-in-transaction backends usually show
-      // Client:ClientRead while waiting for the client, which inflates load without showing
-      // backend work or meaningful resource pressure.
-      const aasRes = await queryApi(
-        `SELECT _collected_at,
-          COALESCE(wait_event_type, 'CPU') as wait_event_type,
-          COALESCE(wait_event, 'running') as wait_event,
-          COUNT(*) as n
-         FROM snap_pg_stat_activity
-         WHERE _run_id = ? AND ${clause} AND state = 'active'
-         GROUP BY _collected_at, wait_event_type, wait_event ORDER BY _collected_at`,
-        [rid, ...pParams]
-      );
-      aasData = { ...aasData, [rid]: aasRes.error ? [] : (aasRes.rows as unknown as AasRow[]) };
+      await loadAas(run);
 
       // Session states
       const sessRes = await queryApi(
@@ -1862,6 +1882,15 @@
     for (const run of runs) loadWaits(run);
   });
 
+  // Reload only the AAS chart when its state selection changes.
+  let lastAasStates = 'active'; // matches the default selection
+  $effect(() => {
+    const key = aasStates.join('|');
+    if (key === lastAasStates) return;
+    lastAasStates = key;
+    for (const run of runs) loadAas(run);
+  });
+
   $effect(() => {
     for (const run of runs) {
       if (hasSql[run.id] && sqlData[run.id]?.length && !waitProfilesLoaded.has(run.id)) {
@@ -1909,8 +1938,19 @@
     {:else}
       <button class="per-run-toggle-btn" onclick={() => aasExpanded = true}>Show charts</button>
     {/if}
+    <details class="state-dropdown">
+      <summary title="Backend states counted in the chart. Deselect all to include every state.">State: {aasStatesLabel()}</summary>
+      <div class="state-dropdown-menu">
+        {#each STATE_ORDER as st}
+          <label class="phase-check">
+            <input type="checkbox" checked={aasStates.includes(st)} onchange={() => toggleAasState(st)} />
+            {st}
+          </label>
+        {/each}
+      </div>
+    </details>
   </div>
-  <p class="section-desc">Active sessions at each snapshot, stacked by wait event type. Higher = more database load.</p>
+  <p class="section-desc">{aasStates.length === 0 ? 'Sessions in any state' : `Sessions in state ${aasStates.map(x => `'${x}'`).join(', ')}`} at each snapshot, stacked by wait event type. Higher = more database load.</p>
 
   {#if aasExpanded}
     {#if isCompare}
