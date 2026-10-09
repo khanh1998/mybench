@@ -18,6 +18,17 @@ import {
 	savePgServer,
 	testPgServer
 } from '$lib/server/services/pg-servers';
+import {
+	listSharedSteps,
+	shareStep,
+	linkSharedStep,
+	detachStep,
+	unshareStep,
+	syncSharedStep,
+	sharedWith,
+	cleanupOrphanSharedSteps
+} from '$lib/server/shared-steps';
+import { referencedPlaceholders, designProfileNameConflict, decisionProfileNameConflict } from '$lib/server/param-sharing';
 
 const EXCLUDED_SNAP_COLS = new Set(['_id', '_run_id', '_collected_at', '_phase', '_is_baseline', '_step_id']);
 
@@ -82,6 +93,7 @@ and the recommended workflow for creating and running a benchmark plan.`
 					steps: 'Ordered list of actions: sql setup → pgbench or sysbench load test → sql teardown. Optionally add a pg_stat step (snapshot config, position irrelevant — see step_types.pg_stat) and a proc step (host metrics config, same). Add a proc step for OS host metrics.',
 					params: 'Named values (e.g. NUM_USERS=1000) substituted as {{NAME}} in step scripts and pgbench_options. Two levels — choose based on scope: DECISION-LEVEL (set_decision_params): use for any value that is the same across multiple designs, or that you may want to change in one place and have it affect all designs at once (e.g. NUM_CLIENTS, DURATION_SECS, NUM_ROWS, SNAPSHOT_INTERVAL, TRANSFER_WEIGHT). This is the default choice for most params. DESIGN-LEVEL (set_params): use only for values that intentionally differ between designs (e.g. a design-specific index hint or a table name that varies per candidate). Rule of thumb: if you find yourself setting the same param name to the same value in multiple designs, move it to the decision level.',
 					profiles: 'Named sets of param overrides (e.g. "small"=NUM_USERS:100, "large"=NUM_USERS:10000) for running the same design at different scales. Two levels: (1) decision-level profiles managed on the decision screen — used exclusively in suite runs; (2) design-level profiles managed with upsert_profile/list_profiles/delete_profile — used in single and series runs. Both levels are available in the profile picker for single/series runs (design wins).',
+					shared_steps: 'A step can be SHARED by several designs of the same decision (typical: one pg_stat, proc or perf config reused by every design). share_step marks a step shared; link_shared_step adds it to another design; list_shared_steps shows them. Editing a shared step with upsert_step updates it in every design using it — only position and enabled are per design. detach_step makes one design\'s copy local again; unshare_step leaves every design with its own copy. Prefer shared steps over copy-pasting identical steps across designs, and drive per-design differences through {{PARAM}}s.',
 					param_inheritance: 'Effective params for a design = decision params merged with design params (design wins on the same name). Practical implication: put shared config at the decision level so changing one value propagates to every design automatically — you never have to visit each design individually. Only put a param at the design level when that design genuinely needs a different value from the others. Suite runs use ONLY decision-level params and profiles (design-level params are ignored); single/series runs merge both levels.',
 					suite_vs_single: 'Suite run (POST /api/suites): uses ONLY decision-level params and decision-level profiles — pass decision_profile_ids per design. Single run (run_design / POST /api/runs): uses merged params; profile_id refers to a design-level profile by default, pass profile_source="decision" to use a decision-level profile.'
 				},
@@ -548,7 +560,7 @@ and the recommended workflow for creating and running a benchmark plan.`
 	server.registerTool(
 		'get_design',
 		{
-			description: 'Returns a design with all its steps, pgbench scripts, params, and inherited decision-level params. The `params` field contains design-local params; `decision_params` contains params inherited from the decision (read-only on the design, always used in suite runs). Use this to inspect an existing design before modifying it.',
+			description: 'Returns a design with all its steps, pgbench scripts, params, and inherited decision-level params. The `params` field contains design-local params (they override decision params for single runs and series only — suites ignore them); `decision_params` contains params shared by every design of the decision (the only params suites use). Steps with a non-null `shared_step_id` are SHARED steps: `shared_with` lists the other designs using the same step, and editing it with upsert_step changes it in all of them. Use this to inspect an existing design before modifying it.',
 			inputSchema: {
 				design_id: z.number().int().describe('Design ID from list_decisions')
 			}
@@ -570,7 +582,16 @@ and the recommended workflow for creating and running a benchmark plan.`
 				arr.push(ps);
 				scriptsByStep.set(ps.step_id, arr);
 			}
-			return text({ ...design, steps: steps.map(s => ({ ...s, pgbench_scripts: scriptsByStep.get(s.id) ?? [] })), params, decision_params: decisionParams });
+			return text({
+				...design,
+				steps: steps.map(s => ({
+					...s,
+					pgbench_scripts: scriptsByStep.get(s.id) ?? [],
+					...(s.shared_step_id ? { shared_with: sharedWith(s.id).map(d => d.design_name) } : {})
+				})),
+				params,
+				decision_params: decisionParams
+			});
 		}
 	);
 
@@ -650,7 +671,8 @@ Step types:
   "pg_stat"  — CONFIGURATION-ONLY step. Does NOT run in sequence. The runner automatically snapshots PostgreSQL stats before/during/after the bench regardless of this step's position — do NOT place it after pgbench to "collect after". One per design. Key fields: pg_stat_tables (JSON array of PG view names; empty = all), pg_stat_interval_seconds, pg_stat_reset_stats, pg_stat_reset_statements, pg_stat_collect_statements (set true to capture pg_stat_statements query data at bench end). Not the same as the pg_stat_statements extension — to collect query-level data use pg_stat_collect_statements=true.
   "perf"     — Linux perf profiling alongside the bench. Enable sub-modes independently: perf_stat_enabled (counter summary), perf_record_enabled (flame graph), perf_trace_enabled (syscall trace). Duration/delay fields all support {{PARAM}}. See step_types.perf in get_context for full field docs.
   "proc"     — Linux /proc host metrics via SSH to the database server, plus (proc_collect_runner, default true) the runner host's own /proc for client-side saturation analysis. Configuration-only; collection starts at bench time. proc_groups selects which /proc files to read on the DB host; proc_interval_seconds supports {{PARAM}}. DB-host collection requires SSH on the PG server record. See step_types.proc in get_context for group key descriptions.
-Use {{PARAM_NAME}} in scripts and pgbench_options — values come from set_params.`,
+Use {{PARAM_NAME}} in scripts and pgbench_options — values come from set_params.
+SHARED STEPS: if the step has a shared_step_id (see get_design), updating it changes the step's content (everything except position and enabled) in every design that uses it; the response lists them. Use detach_step first to change it for this design only.`,
 			inputSchema: {
 				design_id: z.number().int(),
 				step_id: z.number().int().optional().describe('Omit to insert a new step'),
@@ -754,6 +776,10 @@ Use {{PARAM_NAME}} in scripts and pgbench_options — values come from set_param
 				const ins = db.prepare('INSERT INTO pgbench_scripts (step_id, position, name, weight, weight_expr, script) VALUES (?, ?, ?, ?, ?, ?)');
 				pgbench_scripts.forEach((ps, i) => ins.run(resolvedStepId, i, ps.name, ps.weight, ps.weight_expr ?? null, ps.script));
 			}
+			if (step_id && syncSharedStep(resolvedStepId, db).length > 0) {
+				const others = sharedWith(resolvedStepId).map(d => d.design_name);
+				return text({ step_id: resolvedStepId, action: 'updated', shared: true, also_updated_in: others });
+			}
 			return text({ step_id: resolvedStepId, action: step_id ? 'updated' : 'created' });
 		}
 	);
@@ -764,15 +790,86 @@ Use {{PARAM_NAME}} in scripts and pgbench_options — values come from set_param
 	server.registerTool(
 		'delete_step',
 		{
-			description: 'Deletes a step and its associated pgbench scripts. Use get_design to find the step_id first.',
+			description: 'Deletes a step and its associated pgbench scripts. Use get_design to find the step_id first. For a shared step this removes it from this design only; other designs keep using it.',
 			inputSchema: { step_id: z.number().int() }
 		},
 		async ({ step_id }) => {
 			const db = getDb();
+			const others = sharedWith(step_id).map(d => d.design_name);
 			db.prepare('DELETE FROM pgbench_scripts WHERE step_id = ?').run(step_id);
 			db.prepare('DELETE FROM design_steps WHERE id = ?').run(step_id);
-			return text({ deleted: true, step_id });
+			cleanupOrphanSharedSteps(db);
+			return text({ deleted: true, step_id, ...(others.length ? { note: `Shared step removed from this design only; still used by: ${others.join(', ')}` } : {}) });
 		}
+	);
+
+	// ─────────────────────────────────────────────────────────────────────────
+	// Shared steps
+	// ─────────────────────────────────────────────────────────────────────────
+	server.registerTool(
+		'list_shared_steps',
+		{
+			description: 'Lists the shared steps of a decision: steps reused by several of its designs (e.g. a common pg_stat, proc or perf config). Each entry has the shared_step_id, step name/type and the designs using it (with their own step_id). Add one to another design with link_shared_step.',
+			inputSchema: { decision_id: z.number().int() }
+		},
+		async ({ decision_id }) => text(listSharedSteps(decision_id))
+	);
+
+	server.registerTool(
+		'share_step',
+		{
+			description: 'Marks an existing step as shared within its decision, so other designs of the same decision can reuse it with link_shared_step. After sharing, editing the step (upsert_step) from any design updates it everywhere; position and enabled stay per design. Returns the shared_step_id.',
+			inputSchema: { step_id: z.number().int().describe('design_steps id, from get_design') }
+		},
+		async ({ step_id }) => {
+			try {
+				return text({ step_id, shared_step_id: shareStep(step_id) });
+			} catch (e) {
+				return text({ error: (e as Error).message });
+			}
+		}
+	);
+
+	server.registerTool(
+		'link_shared_step',
+		{
+			description: 'Adds a shared step (from list_shared_steps) to a design of the same decision. The design gets its own step row (own step_id, position, enabled) whose content stays in sync with every other design using the shared step. Existing steps at or after `position` shift down.',
+			inputSchema: {
+				design_id: z.number().int(),
+				shared_step_id: z.number().int(),
+				position: z.number().int().optional().describe('0-based position; omit to append at the end')
+			}
+		},
+		async ({ design_id, shared_step_id, position }) => {
+			try {
+				const stepId = linkSharedStep(design_id, shared_step_id, position);
+				return text({ step_id: stepId, design_id, shared_step_id, shared_with: sharedWith(stepId).map(d => d.design_name) });
+			} catch (e) {
+				return text({ error: (e as Error).message });
+			}
+		}
+	);
+
+	server.registerTool(
+		'detach_step',
+		{
+			description: 'Detaches one design\'s copy of a shared step: this design keeps the step with its current content as a normal (local) step; other designs keep using the shared step. Use before upsert_step when a change should apply to this design only.',
+			inputSchema: { step_id: z.number().int().describe('This design\'s step_id of the shared step') }
+		},
+		async ({ step_id }) => {
+			const others = sharedWith(step_id).map(d => d.design_name);
+			detachStep(step_id);
+			return text({ step_id, detached: true, still_shared_by: others });
+		}
+	);
+
+	server.registerTool(
+		'unshare_step',
+		{
+			description: 'Stops sharing a step everywhere: every design that used it keeps its own copy of the current content (step ids unchanged), and later edits no longer sync. Returns the designs that were linked.',
+			inputSchema: { shared_step_id: z.number().int() }
+		},
+		async ({ shared_step_id }) => text({ shared_step_id, unshared: true, designs: unshareStep(shared_step_id) })
 	);
 
 	// ─────────────────────────────────────────────────────────────────────────
@@ -799,7 +896,7 @@ IMPORTANT: only use this for values that intentionally differ between designs (e
 				const ins = db.prepare('INSERT INTO design_params (design_id, position, name, value) VALUES (?, ?, ?, ?)');
 				params.forEach((p, i) => ins.run(design_id, i, p.name, p.value));
 			})();
-			return text({ set: params.length, design_id });
+			return text({ set: params.length, design_id, note: 'Design-level params apply to single runs and series only; suites use decision-level params exclusively.' });
 		}
 	);
 
@@ -855,6 +952,8 @@ Use set_params (design-level) only for values that intentionally differ between 
 			const db = getDb();
 			const decision = db.prepare('SELECT id FROM decisions WHERE id = ?').get(decision_id);
 			if (!decision) return text({ error: `Decision ${decision_id} not found` });
+			const conflict = decisionProfileNameConflict(decision_id, name, profile_id ?? -1);
+			if (conflict) return text({ error: `${conflict}. Profile names must be unique across shared and design profiles.` });
 			if (profile_id) {
 				const profile = db.prepare('SELECT id FROM decision_param_profiles WHERE id = ? AND decision_id = ?').get(profile_id, decision_id);
 				if (!profile) return text({ error: `Profile ${profile_id} not found for decision ${decision_id}` });
@@ -923,7 +1022,7 @@ Use set_params (design-level) only for values that intentionally differ between 
 	server.registerTool(
 		'upsert_profile',
 		{
-			description: 'Creates or updates a named parameter profile for a design. Profiles let you run the same design at different scales (e.g. small/medium/large). Omit profile_id to create; provide it to update.',
+			description: 'Creates or updates a named parameter profile for a design. Profiles let you run the same design at different scales (e.g. small/medium/large). Omit profile_id to create; provide it to update. Design profiles are used by single runs and series only — suites run decision profiles (upsert_decision_profile). Names must not collide with a decision profile.',
 			inputSchema: {
 				design_id: z.number().int(),
 				profile_id: z.number().int().optional().describe('Omit to create a new profile'),
@@ -936,6 +1035,8 @@ Use set_params (design-level) only for values that intentionally differ between 
 		},
 		async ({ design_id, profile_id, name, values }) => {
 			const db = getDb();
+			const conflict = designProfileNameConflict(design_id, name, profile_id ?? -1);
+			if (conflict) return text({ error: `${conflict}. Profile names must be unique across shared and design profiles.` });
 			if (profile_id) {
 				const profile = db.prepare('SELECT id FROM design_param_profiles WHERE id = ? AND design_id = ?').get(profile_id, design_id);
 				if (!profile) return text({ error: `Profile ${profile_id} not found for design ${design_id}` });
@@ -1017,6 +1118,7 @@ Checks performed:
   - perf duration/delay/repeat/freq fields with invalid values (must be integer or {{PARAM}})
   - {{PARAM}} placeholders used in scripts/options but not defined in design params or inherited decision params
   - Defined params with empty values
+  - {{PARAM}} placeholders defined only at design level (unresolved in suite runs)
 Call this before run_design or export_plan to catch problems early.`,
 			inputSchema: {
 				design_id: z.number().int().describe('Design ID to validate'),
@@ -1176,6 +1278,19 @@ Call this before run_design or export_plan to catch problems early.`,
 							});
 						}
 					}
+				}
+			}
+
+			// Suites use decision params only: placeholders only a design param defines stay unresolved there
+			const decisionNames = new Set(decisionParams.map(p => p.name));
+			const localNames = new Set(params.map(p => p.name));
+			for (const ph of referencedPlaceholders(design_id)) {
+				if (localNames.has(ph) && !decisionNames.has(ph)) {
+					issues.push({
+						severity: 'warning',
+						code: 'LOCAL_PARAM_IN_SUITE',
+						message: `{{${ph}}} is only defined as a design-level param. Single runs and series resolve it, but suites use decision params only, so it stays unresolved there. Move it to set_decision_params if this design will run in a suite.`
+					});
 				}
 			}
 

@@ -103,6 +103,8 @@ export interface DesignParam {
 export interface DesignStep {
 	id: number;
 	design_id: number;
+	/** Non-null when this step is a linked copy of a shared step (see shared-steps.ts). */
+	shared_step_id?: number | null;
 	position: number;
 	name: string;
 	type: DesignStepType;
