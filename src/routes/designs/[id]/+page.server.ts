@@ -1,5 +1,6 @@
 import getDb from '$lib/server/db';
 import { getSiblingUsage } from '$lib/server/param-sharing';
+import { listSharedSteps } from '$lib/server/shared-steps';
 import type { PageServerLoad } from './$types';
 import type { PgbenchScript, DesignParam, ParamProfile, DecisionParam, DecisionParamProfile } from '$lib/types';
 
@@ -75,6 +76,7 @@ export const load: PageServerLoad = ({ params }) => {
 		profiles,
 		decisionParams,
 		decisionProfiles,
-		siblings: getSiblingUsage(id)
+		siblings: getSiblingUsage(id),
+		sharedSteps: listSharedSteps(decisionId)
 	};
 };

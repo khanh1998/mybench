@@ -31,6 +31,7 @@
   interface Step {
     id: number;
     design_id: number;
+    shared_step_id?: number | null;
     position: number;
     name: string;
     type: DesignStepType;
@@ -88,6 +89,7 @@
   interface Profile { id: number; design_id: number; name: string; values: { param_name: string; value: string }[]; }
   interface DecisionParam { id: number; decision_id: number; position: number; name: string; value: string; }
   interface DecisionProfile { id: number; decision_id: number; name: string; values: { param_name: string; value: string }[]; }
+  interface SharedStepInfo { id: number; name: string; type: string; designs: { design_id: number; design_name: string; step_id: number }[]; }
   interface SiblingUsage { design_id: number; design_name: string; local_params: { name: string; value: string }[]; local_profiles: string[]; referenced: string[]; }
   type PerfMode = 'stat' | 'record' | 'trace' | 'c2c';
   const PERF_MODES: PerfMode[] = ['stat', 'record', 'trace', 'c2c'];
@@ -101,6 +103,11 @@
   let decisionProfiles = $state<DecisionProfile[]>([]);
   let siblings = $state<SiblingUsage[]>([]);
   let sharedParamsDirty = $state(false);
+  let sharedSteps = $state<SharedStepInfo[]>([]);
+  let showSharedStepPicker = $state(false);
+  // Content snapshot of each shared step as last loaded/saved — only edited shared steps are
+  // sent as shared_dirty, so saving never propagates a stale copy to other designs.
+  let sharedSnapshots = new Map<number, string>();
   let selectedStepId = $state<number|null>(null);
   let selectedScriptIdx = $state(0);
   let saving = $state(false);
@@ -195,6 +202,8 @@
     decisionParams = [...((data.decisionParams ?? []) as DecisionParam[])];
     decisionProfiles = [...((data.decisionProfiles ?? []) as DecisionProfile[])];
     siblings = [...((data.siblings ?? []) as SiblingUsage[])];
+    sharedSteps = [...((data.sharedSteps ?? []) as SharedStepInfo[])];
+    sharedSnapshots = new Map((nextDesign?.steps ?? []).filter(st => st.shared_step_id).map(st => [st.id, stepContentKey(st)]));
     sharedParamsDirty = false;
     selectedStepId = nextDesign?.steps?.find(s => s.enabled)?.id ?? nextDesign?.steps?.[0]?.id ?? null;
     selectedScriptIdx = 0;
@@ -639,14 +648,96 @@
     return LEGACY_STEP_LABELS[type] ?? type;
   }
 
-  async function save() {
+  // ── Shared steps ─────────────────────────────────────────────────────────────
+
+  function stepContentKey(step: Step): string {
+    const { id: _id, design_id: _d, position: _p, enabled: _e, shared_step_id: _s, ...content } = step;
+    return JSON.stringify({
+      ...content,
+      pgbench_scripts: (content.pgbench_scripts ?? []).map(({ id: _i, step_id: _sid, ...ps }) => ps)
+    });
+  }
+
+  function snapshotSharedSteps() {
+    sharedSnapshots = new Map((design?.steps ?? []).filter(st => st.shared_step_id).map(st => [st.id, stepContentKey(st)]));
+  }
+
+  function sharedStepUsers(step: Step): string[] {
+    const info = sharedSteps.find(x => x.id === step.shared_step_id);
+    return (info?.designs ?? []).filter(d => d.design_id !== id).map(d => d.design_name);
+  }
+
+  const linkableSharedSteps = $derived(sharedSteps.filter(x => !x.designs.some(d => d.design_id === id)));
+
+  async function sharedStepsRequest(body: Record<string, unknown>): Promise<Record<string, unknown> | null> {
+    const res = await fetch(`/api/designs/${id}/shared-steps`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (!res.ok) {
+      alert((await res.json().catch(() => null))?.message ?? `Request failed (${res.status})`);
+      return null;
+    }
+    const out = await res.json();
+    if (out.shared_steps) sharedSteps = out.shared_steps;
+    return out;
+  }
+
+  async function makeStepShared(step: Step) {
     if (!design) return;
+    if (!confirm(`Share step "${step.name}" with the other designs in this decision?\n\nThe design is saved first. Other designs can then add it from "+ Shared", and edits from any design apply to all of them.`)) return;
+    if (!(await save())) return;
+    const out = await sharedStepsRequest({ action: 'share', step_id: step.id });
+    if (!out) return;
+    step.shared_step_id = out.shared_step_id as number;
+    sharedSnapshots.set(step.id, stepContentKey(step));
+  }
+
+  async function linkSharedStepUi(info: SharedStepInfo) {
+    if (!design) return;
+    showSharedStepPicker = false;
+    const out = await sharedStepsRequest({ action: 'link', shared_step_id: info.id, position: design.steps.length });
+    if (!out?.step) return;
+    const step = { ...(out.step as Step), position: design.steps.length };
+    design.steps = [...design.steps, step];
+    sharedSnapshots.set(step.id, stepContentKey(step));
+    selectedStepId = step.id;
+    selectedScriptIdx = 0;
+  }
+
+  async function detachSharedStep(step: Step) {
+    const others = sharedStepUsers(step);
+    if (!confirm(`Detach "${step.name}" from the shared step?\n\nThis design keeps its own copy; ${others.length ? others.join(', ') + ' keep' : 'the shared step keeps'} following the shared version. Later edits here won't sync.`)) return;
+    const out = await sharedStepsRequest({ action: 'detach', step_id: step.id });
+    if (!out) return;
+    step.shared_step_id = null;
+    sharedSnapshots.delete(step.id);
+  }
+
+  async function unshareStepEverywhere(step: Step) {
+    if (!design || !step.shared_step_id) return;
+    const others = sharedStepUsers(step);
+    const dirty = stepContentKey(step) !== sharedSnapshots.get(step.id);
+    let msg = `Unshare "${step.name}" everywhere?\n\nEvery design using it (${['this design', ...others].join(', ')}) keeps its own copy of the current content, and later edits won't sync.`;
+    if (dirty) msg += `\n\n⚠ Your unsaved edits to this step will only apply to this design.`;
+    if (!confirm(msg)) return;
+    const sharedId = step.shared_step_id;
+    const out = await sharedStepsRequest({ action: 'unshare', shared_step_id: sharedId });
+    if (!out) return;
+    for (const st of design.steps) {
+      if (st.shared_step_id === sharedId) { st.shared_step_id = null; sharedSnapshots.delete(st.id); }
+    }
+  }
+
+  async function save(): Promise<boolean> {
+    if (!design) return false;
     if (hasScriptWeightErrors || hasPerfDurationErrors) {
       const lines: string[] = ['Cannot save — please fix these errors first:'];
       if (hasScriptWeightErrors) lines.push('· Invalid script weight(s): must be a number or {{PARAM_NAME}}');
       if (hasPerfDurationErrors) lines.push('· Invalid perf duration(s): must be a number or {{PARAM_NAME}}');
       alert(lines.join('\n'));
-      return;
+      return false;
     }
     if (validationErrors.length > 0 || weightErrors.length > 0) {
       const lines: string[] = [];
@@ -660,24 +751,36 @@
         weightErrors.forEach(e => lines.push(`  "${e.step}": active total weight ${e.totalWeight} exceeds 100`));
       }
       lines.push('\nSave anyway?');
-      if (!confirm(lines.join('\n'))) return;
+      if (!confirm(lines.join('\n'))) return false;
     }
     saving = true;
     const designToSave = {
       ...design,
       steps: (design.steps ?? []).map((s: Step) => ({
         ...s,
+        shared_dirty: s.shared_step_id ? stepContentKey(s) !== sharedSnapshots.get(s.id) : undefined,
         pgbench_scripts: (s.pgbench_scripts ?? []).map((ps: PgbenchScript) => ({
           ...ps,
           weight_expr: (ps.weight_expr && /^\{\{[\w]+\}\}$/.test(ps.weight_expr)) ? ps.weight_expr : null
         }))
       }))
     };
-    await fetch(`/api/designs/${id}`, {
+    const editedShared = designToSave.steps.some(s => s.shared_dirty);
+    const saveRes = await fetch(`/api/designs/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(designToSave)
     });
+    if (!saveRes.ok) {
+      saving = false;
+      alert(`Save failed (${saveRes.status})`);
+      return false;
+    }
+    snapshotSharedSteps();
+    if (editedShared) {
+      const r = await fetch(`/api/designs/${id}/shared-steps`);
+      if (r.ok) sharedSteps = await r.json();
+    }
     if (sharedParamsDirty) {
       await fetch(`/api/decisions/${design.decision_id}/params`, {
         method: 'PUT',
@@ -687,8 +790,9 @@
       sharedParamsDirty = false;
     }
     saving = false;
-    msg = 'Saved!';
-    setTimeout(() => msg = '', 2000);
+    msg = editedShared ? 'Saved! Shared step changes applied to all linked designs.' : 'Saved!';
+    setTimeout(() => msg = '', editedShared ? 4000 : 2000);
+    return true;
   }
 
   async function startRun() {
@@ -1307,8 +1411,25 @@
   <div class="steps-panel">
     <div class="steps-header">
       <span class="steps-title">Steps</span>
-      <button onclick={addStep} class="add-btn">+ Add</button>
+      <span class="steps-header-actions">
+        {#if linkableSharedSteps.length > 0}
+          <button onclick={() => showSharedStepPicker = !showSharedStepPicker} class="add-btn" title="Add a step shared by other designs in this decision">+ Shared ▾</button>
+        {/if}
+        <button onclick={addStep} class="add-btn">+ Add</button>
+      </span>
     </div>
+    {#if showSharedStepPicker && linkableSharedSteps.length > 0}
+      <div class="shared-picker">
+        <div class="shared-picker-title">Add a shared step</div>
+        {#each linkableSharedSteps as info (info.id)}
+          <button class="shared-picker-item" onclick={() => linkSharedStepUi(info)}>
+            <span class="step-item-name">{info.name}</span>
+            <span class="badge badge-{info.type}">{stepTypeLabel(info.type as DesignStepType)}</span>
+            <span class="shared-picker-users">used in {info.designs.map(d => d.design_name).join(', ')}</span>
+          </button>
+        {/each}
+      </div>
+    {/if}
     <div class="steps-list">
       {#each design.steps as step, i (step.id)}
         <div
@@ -1322,6 +1443,7 @@
         >
           <div class="step-item-main">
             <span class="step-item-name">{step.name}</span>
+            {#if step.shared_step_id}<span class="shared-badge" title="Shared step — edits apply to every design using it">🔗</span>{/if}
             <span class="badge badge-{step.type}">{stepTypeLabel(step.type)}</span>
           </div>
           <div class="step-item-controls" role="group">
@@ -1414,6 +1536,16 @@
   <!-- RIGHT: Editor -->
   <div class="editor-panel" class:shrunk={showParams}>
     {#if selectedStep}
+      {#if selectedStep.shared_step_id}
+        {@const users = sharedStepUsers(selectedStep)}
+        <div class="shared-banner">
+          <span>🔗 <strong>Shared step</strong> · {users.length ? `also used in ${users.join(', ')}` : 'not used by other designs yet'} — saving applies edits to every design using it. Position and on/off stay per design.</span>
+          <span class="shared-banner-actions">
+            <button onclick={() => detachSharedStep(selectedStep!)} title="Keep a local copy in this design only">Detach</button>
+            <button onclick={() => unshareStepEverywhere(selectedStep!)} title="Every design keeps its own copy">Unshare everywhere</button>
+          </span>
+        </div>
+      {/if}
       <div class="editor-top-bar">
         <input
           class="step-name-edit"
@@ -1425,6 +1557,9 @@
             <option value={option.value}>{option.label}</option>
           {/each}
         </select>
+        {#if !selectedStep.shared_step_id}
+          <button class="share-step-btn" onclick={() => makeStepShared(selectedStep!)} title="Reuse this step in other designs of this decision">🔗 Share</button>
+        {/if}
         {#if selectedStep.type === 'pgbench'}
           <input
             bind:value={selectedStep.pgbench_options}
@@ -2625,6 +2760,19 @@
     border-radius: 3px;
   }
   .add-btn:hover { background: #45475a; }
+  .steps-header-actions { display: inline-flex; gap: 4px; }
+  .shared-picker { background: #181825; border-bottom: 1px solid #313244; padding: 6px; display: flex; flex-direction: column; gap: 4px; }
+  .shared-picker-title { font-size: 9px; font-weight: 700; text-transform: uppercase; color: #7f849c; padding: 0 4px; }
+  .shared-picker-item { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; text-align: left; background: #313244; border: 1px solid #45475a; border-radius: 3px; padding: 5px 8px; color: #cdd6f4; cursor: pointer; }
+  .shared-picker-item:hover { background: #45475a; }
+  .shared-picker-users { flex-basis: 100%; font-size: 10px; color: #7f849c; }
+  .shared-badge { font-size: 10px; }
+  .shared-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 12px; background: #1e2a3d; color: #b4c8ee; font-size: 12px; border-bottom: 1px solid #2f4366; flex-shrink: 0; }
+  .shared-banner-actions { display: inline-flex; gap: 6px; flex-shrink: 0; }
+  .shared-banner-actions button { font-size: 11px; padding: 2px 8px; background: #2f4366; color: #dbe6ff; border: 1px solid #45608f; border-radius: 3px; cursor: pointer; }
+  .shared-banner-actions button:hover { background: #3c5580; }
+  .share-step-btn { font-size: 11px; padding: 3px 8px; background: #3c3c3c; color: #ccc; border: 1px solid #555; border-radius: 3px; cursor: pointer; white-space: nowrap; }
+  .share-step-btn:hover { background: #4a4a4a; }
 
   .steps-list {
     flex: 1;

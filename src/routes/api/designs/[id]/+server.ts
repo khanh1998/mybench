@@ -1,5 +1,6 @@
 import { json, error } from '@sveltejs/kit';
 import getDb from '$lib/server/db';
+import { syncSharedStep, cleanupOrphanSharedSteps } from '$lib/server/shared-steps';
 import type { RequestHandler } from './$types';
 import type { PgbenchScript, DesignParam } from '$lib/types';
 
@@ -122,9 +123,22 @@ export const PUT: RequestHandler = async ({ params: routeParams, request }) => {
 					)
 				: db.prepare('DELETE FROM design_steps WHERE design_id = ?');
 
+		// Shared steps: only rewrite (and propagate) content the client actually edited, so a
+		// stale editor tab saving unrelated changes can't overwrite another design's edit.
+		const sharedIdByStep = new Map(
+			(db.prepare('SELECT id, shared_step_id FROM design_steps WHERE design_id = ? AND shared_step_id IS NOT NULL').all(designId) as { id: number; shared_step_id: number }[])
+				.map(r => [r.id, r.shared_step_id])
+		);
+		const updatePlacement = db.prepare('UPDATE design_steps SET position = ?, enabled = ? WHERE id = ? AND design_id = ?');
+
 		const doUpsert = db.transaction(() => {
 			deleteRemovedSteps.run(designId, ...submittedStepIds);
 			for (const s of body.steps) {
+				const isShared = s.id != null && sharedIdByStep.has(s.id);
+				if (isShared && !s.shared_dirty) {
+					updatePlacement.run(s.position, s.enabled ?? 1, s.id, designId);
+					continue;
+				}
 				const result = upsert.run({
 					...s,
 					id: s.id ?? null,
@@ -172,7 +186,9 @@ export const PUT: RequestHandler = async ({ params: routeParams, request }) => {
 						insertScript.run(stepId, ps.position, ps.name, ps.weight, ps.weight_expr ?? null, ps.script);
 					}
 				}
+				if (isShared) syncSharedStep(stepId, db);
 			}
+			cleanupOrphanSharedSteps(db);
 			deleteParams.run(designId);
 			for (const p of body.params ?? []) {
 				insertParam.run(designId, p.position, p.name, p.value);

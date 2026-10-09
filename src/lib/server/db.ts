@@ -973,6 +973,15 @@ function migrate(db: Database.Database) {
 	if (!stepCols.includes('proc_interval_seconds')) db.exec(`ALTER TABLE design_steps ADD COLUMN proc_interval_seconds TEXT NOT NULL DEFAULT ''`);
 	// Also sample the runner host's own /proc (client-side saturation). On by default: overhead is negligible.
 	if (!stepCols.includes('proc_collect_runner')) db.exec(`ALTER TABLE design_steps ADD COLUMN proc_collect_runner INTEGER NOT NULL DEFAULT 1`);
+	// Shared steps: design_steps rows with the same shared_step_id are linked copies kept in sync (see shared-steps.ts)
+	db.exec(`
+    CREATE TABLE IF NOT EXISTS shared_steps (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      decision_id INTEGER NOT NULL REFERENCES decisions(id) ON DELETE CASCADE,
+      created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+	if (!stepCols.includes('shared_step_id')) db.exec(`ALTER TABLE design_steps ADD COLUMN shared_step_id INTEGER REFERENCES shared_steps(id) ON DELETE SET NULL`);
 	const perfModeToggleMigrated = db.prepare(`SELECT id FROM schema_migrations WHERE id = 'perf_mode_toggles_v1'`).get();
 	if (!perfModeToggleMigrated) {
 		db.exec(`
