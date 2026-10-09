@@ -1,5 +1,6 @@
 import { json, error } from '@sveltejs/kit';
 import getDb from '$lib/server/db';
+import { designProfileNameConflict } from '$lib/server/param-sharing';
 import type { RequestHandler } from './$types';
 
 export const PUT: RequestHandler = async ({ params, request }) => {
@@ -10,6 +11,10 @@ export const PUT: RequestHandler = async ({ params, request }) => {
 
 	const profile = db.prepare('SELECT * FROM design_param_profiles WHERE id = ?').get(profileId);
 	if (!profile) throw error(404, 'Profile not found');
+	if (name !== undefined) {
+		const conflict = designProfileNameConflict(Number(params.id), name, profileId);
+		if (conflict) throw error(409, conflict);
+	}
 
 	db.transaction(() => {
 		if (name !== undefined) db.prepare('UPDATE design_param_profiles SET name = ? WHERE id = ?').run(name, profileId);

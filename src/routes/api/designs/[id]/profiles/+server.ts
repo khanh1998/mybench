@@ -1,5 +1,6 @@
 import { json, error } from '@sveltejs/kit';
 import getDb from '$lib/server/db';
+import { designProfileNameConflict } from '$lib/server/param-sharing';
 import type { RequestHandler } from './$types';
 
 export const GET: RequestHandler = ({ params }) => {
@@ -28,6 +29,8 @@ export const POST: RequestHandler = async ({ params, request }) => {
 	const { name, values } = body as { name: string; values?: { param_name: string; value: string }[] };
 
 	if (!name) throw error(400, 'Missing name');
+	const conflict = designProfileNameConflict(designId, name);
+	if (conflict) throw error(409, conflict);
 
 	const result = db.transaction(() => {
 		const r = db.prepare('INSERT INTO design_param_profiles (design_id, name) VALUES (?, ?)').run(designId, name);

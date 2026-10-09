@@ -3,7 +3,7 @@
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import CodeEditor from '$lib/CodeEditor.svelte';
-  import { getRunnablePgbenchScripts, validateDesignParams, validateScriptWeights, resolveScriptWeight, type ValidationError, type WeightError } from '$lib/params';
+  import { findPlaceholders, getRunnablePgbenchScripts, validateDesignParams, validateScriptWeights, resolveScriptWeight, type ValidationError, type WeightError } from '$lib/params';
   import type { DesignStepType } from '$lib/types';
   import { SUPPORTED_SNAP_TABLES } from '$lib/snap-tables';
   import type { PageData } from './$types';
@@ -88,6 +88,7 @@
   interface Profile { id: number; design_id: number; name: string; values: { param_name: string; value: string }[]; }
   interface DecisionParam { id: number; decision_id: number; position: number; name: string; value: string; }
   interface DecisionProfile { id: number; decision_id: number; name: string; values: { param_name: string; value: string }[]; }
+  interface SiblingUsage { design_id: number; design_name: string; local_params: { name: string; value: string }[]; local_profiles: string[]; referenced: string[]; }
   type PerfMode = 'stat' | 'record' | 'trace' | 'c2c';
   const PERF_MODES: PerfMode[] = ['stat', 'record', 'trace', 'c2c'];
 
@@ -98,6 +99,8 @@
   let profiles = $state<Profile[]>([]);
   let decisionParams = $state<DecisionParam[]>([]);
   let decisionProfiles = $state<DecisionProfile[]>([]);
+  let siblings = $state<SiblingUsage[]>([]);
+  let sharedParamsDirty = $state(false);
   let selectedStepId = $state<number|null>(null);
   let selectedScriptIdx = $state(0);
   let saving = $state(false);
@@ -178,6 +181,7 @@
   // Profile management state
   let showProfileForm = $state(false);
   let editingProfileId = $state<number|null>(null);
+  let editingProfileShared = $state(false); // true = editing/creating a decision-level (shared) profile
   let profileFormName = $state('');
   let profileFormValues = $state<{ param_name: string; value: string }[]>([]);
 
@@ -190,6 +194,8 @@
     profiles = [...((data.profiles ?? []) as Profile[])];
     decisionParams = [...((data.decisionParams ?? []) as DecisionParam[])];
     decisionProfiles = [...((data.decisionProfiles ?? []) as DecisionProfile[])];
+    siblings = [...((data.siblings ?? []) as SiblingUsage[])];
+    sharedParamsDirty = false;
     selectedStepId = nextDesign?.steps?.find(s => s.enabled)?.id ?? nextDesign?.steps?.[0]?.id ?? null;
     selectedScriptIdx = 0;
   });
@@ -372,45 +378,59 @@
     showRunModal = true;
   }
 
-  function openProfileForm(profile?: Profile) {
-    // Effective params = decision params + design overrides (design wins)
-    const effectiveParams = mergeParamsHelper(
-      decisionParams.map(p => ({ name: p.name, value: p.value })),
-      design?.params.map((p: Param) => ({ name: p.name, value: p.value })) ?? []
-    );
+  // Base params a profile's values are relative to: shared profiles only see decision
+  // params (that is all suites use); local profiles see decision + design overrides.
+  function profileBaseParams(shared: boolean): { name: string; value: string }[] {
+    const decision = decisionParams.map(p => ({ name: p.name, value: p.value }));
+    if (shared) return decision;
+    return mergeParamsHelper(decision, design?.params.map((p: Param) => ({ name: p.name, value: p.value })) ?? []);
+  }
+
+  function openProfileForm(profile?: Profile | DecisionProfile, shared = false) {
+    editingProfileShared = shared;
+    const base = profileBaseParams(shared);
     if (profile) {
       editingProfileId = profile.id;
       profileFormName = profile.name;
-      profileFormValues = effectiveParams.map(p => {
+      profileFormValues = base.map(p => {
         const ov = profile.values.find(v => v.param_name === p.name);
         return { param_name: p.name, value: ov ? ov.value : p.value };
       });
     } else {
       editingProfileId = null;
       profileFormName = '';
-      profileFormValues = effectiveParams.map(p => ({ param_name: p.name, value: p.value }));
+      profileFormValues = base.map(p => ({ param_name: p.name, value: p.value }));
     }
     showProfileForm = true;
   }
 
   async function saveProfile() {
     if (!design || !profileFormName.trim()) return;
-    const values = profileFormValues.filter(v => v.value !== (design?.params.find(p => p.name === v.param_name)?.value ?? ''));
-    if (editingProfileId) {
-      await fetch(`/api/designs/${id}/profiles/${editingProfileId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: profileFormName.trim(), values })
-      });
-      profiles = profiles.map(p => p.id === editingProfileId ? { ...p, name: profileFormName.trim(), values } : p);
+    const base = profileBaseParams(editingProfileShared);
+    const values = profileFormValues.filter(v => v.value !== (base.find(p => p.name === v.param_name)?.value ?? ''));
+    const name = profileFormName.trim();
+    const root = editingProfileShared ? `/api/decisions/${design.decision_id}/profiles` : `/api/designs/${id}/profiles`;
+    const res = await fetch(editingProfileId ? `${root}/${editingProfileId}` : root, {
+      method: editingProfileId ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, values })
+    });
+    if (!res.ok) {
+      alert((await res.json().catch(() => null))?.message ?? `Failed to save profile (${res.status})`);
+      return;
+    }
+    if (editingProfileShared) {
+      if (editingProfileId) {
+        decisionProfiles = decisionProfiles.map(p => p.id === editingProfileId ? { ...p, name, values } : p);
+      } else {
+        const { profile_id } = await res.json();
+        decisionProfiles = [...decisionProfiles, { id: profile_id, decision_id: design.decision_id, name, values }];
+      }
+    } else if (editingProfileId) {
+      profiles = profiles.map(p => p.id === editingProfileId ? { ...p, name, values } : p);
     } else {
-      const res = await fetch(`/api/designs/${id}/profiles`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: profileFormName.trim(), values })
-      });
       const { profile_id } = await res.json();
-      profiles = [...profiles, { id: profile_id, design_id: id, name: profileFormName.trim(), values }];
+      profiles = [...profiles, { id: profile_id, design_id: id, name, values }];
     }
     showProfileForm = false;
   }
@@ -419,6 +439,113 @@
     if (!confirm('Delete this profile?')) return;
     await fetch(`/api/designs/${id}/profiles/${profileId}`, { method: 'DELETE' });
     profiles = profiles.filter(p => p.id !== profileId);
+  }
+
+  async function deleteSharedProfile(prof: DecisionProfile) {
+    if (!design) return;
+    const others = siblings.length;
+    if (!confirm(`Delete shared profile "${prof.name}"? It is removed for all ${others + 1} design(s) in this decision.`)) return;
+    await fetch(`/api/decisions/${design.decision_id}/profiles/${prof.id}`, { method: 'DELETE' });
+    decisionProfiles = decisionProfiles.filter(p => p.id !== prof.id);
+  }
+
+  // ── Sharing params/profiles with the other designs of this decision ──────────
+
+  async function sharingRequest(body: Record<string, unknown>): Promise<{ ok: boolean; profile_id?: number } | null> {
+    const res = await fetch(`/api/designs/${id}/sharing`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (!res.ok) {
+      alert((await res.json().catch(() => null))?.message ?? `Request failed (${res.status})`);
+      return null;
+    }
+    const out = await res.json();
+    const sib = await fetch(`/api/designs/${id}/sharing`);
+    if (sib.ok) siblings = await sib.json();
+    return out;
+  }
+
+  const sharedParamNames = $derived(new Set(decisionParams.map(p => p.name)));
+
+  // Placeholders used by this design's steps that only a local param defines —
+  // suites use decision params only, so these stay unresolved there.
+  const suiteUnresolvedParams = $derived.by(() => {
+    if (!design) return [] as string[];
+    const used = new Set(findPlaceholders(JSON.stringify(design.steps)));
+    return [...used].filter(n => !sharedParamNames.has(n));
+  });
+
+  function overrideParam(d: DecisionParam) {
+    if (!design) return;
+    design.params = [...design.params, { id: -(Date.now()), design_id: id, position: design.params.length, name: d.name, value: d.value }];
+  }
+
+  function resetOverride(name: string) {
+    if (!design) return;
+    design.params = design.params.filter(p => p.name !== name).map((p, i) => ({ ...p, position: i }));
+  }
+
+  async function shareParamUi(p: Param, e: Event) {
+    const box = e.currentTarget as HTMLInputElement;
+    box.checked = false;
+    if (!design) return;
+    const name = p.name.trim();
+    if (!name) return;
+    const withLocal = siblings.filter(sb => sb.local_params.some(lp => lp.name === name));
+    let msg = `Share "${name}" = "${p.value}" with all designs in this decision?\nEditing it from any design will update it everywhere.`;
+    if (withLocal.length > 0) msg += `\n\nThese designs have their own "${name}": ${withLocal.map(sb => `${sb.design_name} (${sb.local_params.find(lp => lp.name === name)?.value})`).join(', ')}.`;
+    if (!confirm(msg)) return;
+    const removeSiblingOverrides = withLocal.length > 0 &&
+      confirm(`Remove their own "${name}" so they use the shared value?\n\nOK = remove theirs · Cancel = keep theirs as overrides`);
+    const out = await sharingRequest({ action: 'share_param', name, value: p.value, remove_sibling_overrides: removeSiblingOverrides });
+    if (!out) return;
+    decisionParams = [...decisionParams, { id: -(Date.now()), decision_id: design.decision_id, position: decisionParams.length, name, value: p.value }];
+    design.params = design.params.filter(x => x !== p && x.name !== name).map((x, i) => ({ ...x, position: i }));
+  }
+
+  async function unshareParamUi(d: DecisionParam, e: Event) {
+    const box = e.currentTarget as HTMLInputElement;
+    box.checked = true;
+    if (!design) return;
+    const affected = siblings.filter(sb => sb.referenced.includes(d.name) && !sb.local_params.some(lp => lp.name === d.name));
+    let msg = `Stop sharing "${d.name}"? It becomes a local param of this design only.`;
+    if (affected.length > 0) msg += `\n\n⚠ ${affected.map(sb => sb.design_name).join(', ')} use {{${d.name}}} in their steps and will no longer have a value for it.`;
+    if (!confirm(msg)) return;
+    const out = await sharingRequest({ action: 'unshare_param', name: d.name });
+    if (!out) return;
+    decisionParams = decisionParams.filter(x => x !== d).map((x, i) => ({ ...x, position: i }));
+    if (!design.params.some(p => p.name === d.name)) {
+      design.params = [...design.params, { id: -(Date.now()), design_id: id, position: design.params.length, name: d.name, value: d.value }];
+    }
+  }
+
+  async function shareProfileUi(prof: Profile, e: Event) {
+    const box = e.currentTarget as HTMLInputElement;
+    box.checked = false;
+    if (!design) return;
+    const sameName = siblings.filter(sb => sb.local_profiles.includes(prof.name));
+    let msg = `Share profile "${prof.name}" with all designs in this decision?\nShared profiles are the ones suites run.`;
+    if (sameName.length > 0) msg += `\n\n⚠ ${sameName.map(sb => sb.design_name).join(', ')} have their own "${prof.name}" profile — it will be deleted in favour of the shared one.`;
+    if (!confirm(msg)) return;
+    const out = await sharingRequest({ action: 'share_profile', profile_id: prof.id, remove_sibling_same_name: sameName.length > 0 });
+    if (!out?.profile_id) return;
+    profiles = profiles.filter(p => p.id !== prof.id);
+    decisionProfiles = [...decisionProfiles, { id: out.profile_id, decision_id: design.decision_id, name: prof.name, values: prof.values }];
+  }
+
+  async function unshareProfileUi(prof: DecisionProfile, e: Event) {
+    const box = e.currentTarget as HTMLInputElement;
+    box.checked = true;
+    if (!design) return;
+    let msg = `Stop sharing profile "${prof.name}"? It moves to this design only.`;
+    if (siblings.length > 0) msg += `\n\n⚠ The other ${siblings.length} design(s) in this decision and its suites will no longer have it.`;
+    if (!confirm(msg)) return;
+    const out = await sharingRequest({ action: 'unshare_profile', profile_id: prof.id });
+    if (!out?.profile_id) return;
+    decisionProfiles = decisionProfiles.filter(p => p.id !== prof.id);
+    profiles = [...profiles, { id: out.profile_id, design_id: id, name: prof.name, values: prof.values }];
   }
 
   const selectedStep: Step | null = $derived(
@@ -551,6 +678,14 @@
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(designToSave)
     });
+    if (sharedParamsDirty) {
+      await fetch(`/api/decisions/${design.decision_id}/params`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ params: decisionParams.map((p, i) => ({ position: i, name: p.name, value: p.value })) })
+      });
+      sharedParamsDirty = false;
+    }
     saving = false;
     msg = 'Saved!';
     setTimeout(() => msg = '', 2000);
@@ -1917,66 +2052,115 @@
         <button onclick={addParam} class="add-btn">+ Add</button>
       </div>
       <div class="params-panel-body">
-        <!-- Inherited decision params (read-only) -->
-        {#if decisionParams.length > 0}
-          <div class="params-section-label">From decision (inherited)</div>
-          {#each decisionParams as p}
-            <div class="param-item param-item-inherited">
-              <span class="param-item-name param-item-name-ro">{p.name}</span>
-              <span class="param-item-value param-item-value-ro">{p.value}</span>
-            </div>
-          {/each}
-          {#if design.params.length > 0}
-            <div class="params-section-label" style="margin-top:6px">Local overrides</div>
-          {/if}
+        {#if suiteUnresolvedParams.length > 0}
+          <div class="params-warn" title="Suites only use shared (decision-level) params">
+            ⚠ Not shared, so unresolved in suites:
+            {#each suiteUnresolvedParams as n}<code>{`{{${n}}}`}</code> {/each}
+          </div>
         {/if}
 
         {#if design.params.length === 0 && decisionParams.length === 0}
           <div class="params-empty">No parameters yet</div>
         {/if}
-        {#each design.params as p, i (p.id)}
-          <div class="param-item" class:param-item-override={decisionParams.some(d => d.name === p.name)}>
-            <input class="param-item-name" bind:value={p.name} placeholder="NAME" spellcheck="false" />
-            <input class="param-item-value" bind:value={p.value} placeholder="value" spellcheck="false" />
-            <button class="icon-btn danger-icon" onclick={() => removeParam(i)} title="Remove">✕</button>
+
+        <!-- Shared (decision-level) params: editable here, change applies to every design -->
+        {#if decisionParams.length > 0}
+          <div class="params-section-label">Shared · all designs</div>
+        {/if}
+        {#each decisionParams as d (d.id)}
+          {@const local = design.params.find((p: Param) => p.name === d.name)}
+          <div class="param-item param-item-shared" class:param-item-override={!!local}>
+            <div class="param-row-head">
+              <span class="param-item-name-ro" title={d.name}>{d.name}</span>
+              <label class="share-toggle" title="Shared with every design in this decision — uncheck to make it local to this design">
+                <input type="checkbox" checked onchange={(e) => unshareParamUi(d, e)} /> shared
+              </label>
+            </div>
+            <input
+              class="param-item-value"
+              class:param-value-shadowed={!!local}
+              bind:value={d.value}
+              oninput={() => sharedParamsDirty = true}
+              placeholder="value"
+              spellcheck="false"
+              title="Shared value — saving updates it for every design"
+            />
+            {#if local}
+              <div class="param-override-row">
+                <input class="param-item-value" bind:value={local.value} placeholder="override" spellcheck="false" title="This design's override" />
+                <button class="icon-btn" onclick={() => resetOverride(d.name)} title="Reset to shared value">↺</button>
+              </div>
+              <span class="scope-tag scope-tag-override">overridden · single run / series only</span>
+            {:else}
+              <button class="link-btn" onclick={() => overrideParam(d)} title="Use a different value in this design (single runs and series only)">override for this design</button>
+            {/if}
           </div>
+        {/each}
+
+        <!-- Local (design-level) params -->
+        {#if design.params.some((p: Param) => !sharedParamNames.has(p.name))}
+          <div class="params-section-label" style="margin-top:6px">This design only</div>
+        {/if}
+        {#each design.params as p, i (p.id)}
+          {#if !sharedParamNames.has(p.name)}
+            <div class="param-item">
+              <input class="param-item-name" bind:value={p.name} placeholder="NAME" spellcheck="false" />
+              <input class="param-item-value" bind:value={p.value} placeholder="value" spellcheck="false" />
+              <button class="icon-btn danger-icon" onclick={() => removeParam(i)} title="Remove">✕</button>
+              <div class="param-row-head">
+                <span class="scope-tag" class:scope-tag-warn={suiteUnresolvedParams.includes(p.name)}>local · not used in suites</span>
+                <label class="share-toggle" title="Share with every design in this decision">
+                  <input type="checkbox" checked={false} disabled={!p.name.trim()} onchange={(e) => shareParamUi(p, e)} /> shared
+                </label>
+              </div>
+            </div>
+          {/if}
         {/each}
 
         <!-- Profiles section -->
         {#if decisionParams.length > 0 || design.params.length > 0}
           <div class="profiles-section-header">
             <span class="steps-title" style="font-size:10px">Profiles</span>
-            <button class="add-btn" style="font-size:10px" onclick={() => openProfileForm()}>+ Add</button>
+            <span>
+              <button class="add-btn" style="font-size:10px" onclick={() => openProfileForm(undefined, true)} title="New profile shared with all designs (used by suites)">+ Shared</button>
+              <button class="add-btn" style="font-size:10px" onclick={() => openProfileForm()} title="New profile for this design only">+ Local</button>
+            </span>
           </div>
-          <!-- Inherited decision profiles (read-only) -->
-          {#if decisionProfiles.length > 0}
-            <div class="params-section-label" style="font-size:9px">From decision</div>
-            {#each decisionProfiles as prof}
-              <div class="profile-item profile-item-inherited">
-                <div class="profile-item-header">
-                  <span class="profile-name" style="color:#888; font-style:italic">{prof.name}</span>
-                </div>
-                {#if prof.values.length > 0}
-                  <div class="profile-values">
-                    {#each prof.values as v}
-                      <span class="profile-value-pill" style="opacity:0.7">{v.param_name}={v.value}</span>
-                    {/each}
-                  </div>
-                {/if}
-              </div>
-            {/each}
-          {/if}
-          <!-- Local design profiles -->
-          {#if decisionProfiles.length > 0 && profiles.length > 0}
-            <div class="params-section-label" style="font-size:9px">Local</div>
-          {/if}
           {#if profiles.length === 0 && decisionProfiles.length === 0}
             <div class="params-empty">No profiles yet</div>
+          {/if}
+          {#if decisionProfiles.length > 0}
+            <div class="params-section-label">Shared · all designs</div>
+          {/if}
+          {#each decisionProfiles as prof (prof.id)}
+            <div class="profile-item profile-item-shared">
+              <div class="profile-item-header">
+                <span class="profile-name">{prof.name}</span>
+                <label class="share-toggle" title="Uncheck to move this profile to this design only">
+                  <input type="checkbox" checked onchange={(e) => unshareProfileUi(prof, e)} /> shared
+                </label>
+                <button class="icon-btn" style="font-size:10px" onclick={() => openProfileForm(prof, true)} title="Edit (applies to all designs)">✎</button>
+                <button class="icon-btn danger-icon" style="font-size:10px" onclick={() => deleteSharedProfile(prof)} title="Delete for all designs">✕</button>
+              </div>
+              {#if prof.values.length > 0}
+                <div class="profile-values">
+                  {#each prof.values as v}
+                    <span class="profile-value-pill">{v.param_name}={v.value}</span>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+          {/each}
+          {#if profiles.length > 0}
+            <div class="params-section-label">This design only</div>
           {/if}
           {#each profiles as prof (prof.id)}
             <div class="profile-item">
               <div class="profile-item-header">
                 <span class="profile-name">{prof.name}</span>
+                <label class="share-toggle" title="Share with every design in this decision">
+                  <input type="checkbox" checked={false} onchange={(e) => shareProfileUi(prof, e)} /> shared
+                </label>
                 <button class="icon-btn" style="font-size:10px" onclick={() => openProfileForm(prof)} title="Edit">✎</button>
                 <button class="icon-btn danger-icon" style="font-size:10px" onclick={() => deleteProfile(prof.id)} title="Delete">✕</button>
               </div>
@@ -1987,6 +2171,7 @@
                   {/each}
                 </div>
               {/if}
+              <span class="scope-tag">local · not used in suites</span>
             </div>
           {/each}
         {/if}
@@ -2010,7 +2195,10 @@
       }}
     >
       <div class="modal">
-        <h3 id="profile-modal-title" style="margin:0 0 16px">{editingProfileId ? 'Edit Profile' : 'Add Profile'}</h3>
+        <h3 id="profile-modal-title" style="margin:0 0 16px">{editingProfileId ? 'Edit' : 'Add'} {editingProfileShared ? 'Shared' : 'Local'} Profile</h3>
+        {#if editingProfileShared}
+          <p style="margin:-8px 0 12px;font-size:12px;color:#666">Shared with every design in this decision and used by suites. Values are relative to the shared params.</p>
+        {/if}
         <div class="form-group">
           <label for="profile-name">Profile name</label>
           <input id="profile-name" bind:value={profileFormName} placeholder="e.g. small, medium, large" />
@@ -2301,7 +2489,7 @@
 
   /* Params right-side panel */
   .params-panel {
-    width: 220px;
+    width: 260px;
     flex-shrink: 0;
     background: #1e1e2e;
     color: #cdd6f4;
@@ -2375,7 +2563,24 @@
   .param-item-name-ro { font-family: monospace; font-size: 11px; color: #a6adc8; font-style: italic; flex: 0 0 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .param-item-value-ro { font-size: 11px; color: #7c7f93; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .param-item-override { border-left: 2px solid #f9e2af; padding-left: 4px; }
-  .profile-item-inherited { opacity: 0.65; }
+  .param-item-shared { border-left: 2px solid #89b4fa; padding-left: 4px; }
+  .param-item-shared.param-item-override { border-left-color: #f9e2af; }
+  .param-row-head { display: flex; align-items: center; justify-content: space-between; gap: 4px; }
+  .param-item-shared .param-item-name-ro { flex: 1; font-style: normal; color: #cba6f7; font-weight: 600; }
+  .param-value-shadowed { opacity: 0.5; text-decoration: line-through; }
+  .param-override-row { display: flex; gap: 3px; align-items: center; }
+  .param-override-row .icon-btn { position: static; }
+  .share-toggle { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; color: #a6adc8; cursor: pointer; white-space: nowrap; }
+  .share-toggle input { margin: 0; }
+  .scope-tag { font-size: 9px; color: #7f849c; }
+  .scope-tag-override { color: #f9e2af; }
+  .scope-tag-warn { color: #fab387; }
+  .link-btn { background: none; border: none; padding: 0; font-size: 10px; color: #89b4fa; cursor: pointer; text-align: left; }
+  .link-btn:hover { text-decoration: underline; }
+  .params-warn { font-size: 10px; color: #fab387; background: #2a2333; border: 1px solid #5c4040; border-radius: 3px; padding: 4px 6px; margin-bottom: 8px; line-height: 1.5; }
+  .params-warn code { font-size: 10px; }
+  .profile-item-shared { border-color: #3b4a6b; }
+  .profile-item .scope-tag { display: block; margin-top: 4px; }
 
   /* Split pane — fills remaining height after topbar (+config) */
   .split-pane {

@@ -60,6 +60,7 @@
   let decisionParams = $state<{id:number; decision_id:number; position:number; name:string; value:string}[]>([]);
   let decisionParamsDirty = $state<{position:number; name:string; value:string}[]>([]);
   let decisionParamsSaving = $state(false);
+  let paramOverrides = $state<{ name: string; value: string; design_id: number; design_name: string }[]>([]);
 
   // Decision profiles state
   let decisionProfiles = $state<{id:number; decision_id:number; name:string; values:{param_name:string;value:string}[]}[]>([]);
@@ -183,6 +184,7 @@
     decisionParams = await res.json();
     decisionParamsDirty = decisionParams.map(p => ({ position: p.position, name: p.name, value: p.value }));
     decisionParamsSaving = false;
+    fetch(`/api/decisions/${id}/params/overrides`).then(r => r.ok ? r.json() : []).then(o => paramOverrides = o);
   }
 
   // Decision profiles CRUD
@@ -206,18 +208,21 @@
     if (!decisionProfileFormName.trim()) return;
     decisionProfileSaving = true;
     const values = decisionProfileFormValues.filter(v => v.value !== '');
-    if (editingDecisionProfileId) {
-      await fetch(`/api/decisions/${id}/profiles/${editingDecisionProfileId}`, {
+    const res = editingDecisionProfileId
+      ? await fetch(`/api/decisions/${id}/profiles/${editingDecisionProfileId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: decisionProfileFormName, values })
-      });
-    } else {
-      await fetch(`/api/decisions/${id}/profiles`, {
+      })
+      : await fetch(`/api/decisions/${id}/profiles`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: decisionProfileFormName, values })
       });
+    if (!res.ok) {
+      alert((await res.json().catch(() => null))?.message ?? `Failed to save profile (${res.status})`);
+      decisionProfileSaving = false;
+      return;
     }
     const r = await fetch(`/api/decisions/${id}/profiles`);
     decisionProfiles = await r.json();
@@ -240,6 +245,7 @@
       fetch(`/api/decisions/${id}/params`),
       fetch(`/api/decisions/${id}/profiles`)
     ]);
+    fetch(`/api/decisions/${id}/params/overrides`).then(r => r.ok ? r.json() : []).then(o => paramOverrides = o);
     decision = await dRes.json();
     designs = await dsRes.json();
     servers = await sRes.json();
@@ -751,7 +757,7 @@
         <button class="primary" onclick={addDecisionParam}>+ Add</button>
       </div>
       {#if decisionParamsDirty.length === 0}
-        <p style="color:#888; font-size:13px">No parameters yet. Add shared parameters that all designs will inherit.</p>
+        <p style="color:#888; font-size:13px">No parameters yet. Add shared parameters that all designs will inherit — or mark a param as shared from any design's Params panel.</p>
       {:else}
         <div class="params-list">
           {#each decisionParamsDirty as param, i}
@@ -760,6 +766,12 @@
               <input class="param-value-input" bind:value={param.value} placeholder="default value" />
               <button class="icon-btn danger-icon" onclick={() => removeDecisionParam(i)}>✕</button>
             </div>
+            {@const ovs = paramOverrides.filter(o => o.name === param.name)}
+            {#if ovs.length > 0}
+              <div class="param-overrides" title="Design-level overrides apply to single runs and series only; suites use the value above">
+                overridden in: {#each ovs as o, j}<a href="/designs/{o.design_id}">{o.design_name}</a> ({o.value}){j < ovs.length - 1 ? ', ' : ''}{/each}
+              </div>
+            {/if}
           {/each}
         </div>
       {/if}
@@ -866,6 +878,7 @@
   .param-row { display: flex; align-items: center; gap: 8px; }
   .param-name-input { width: 180px; font-family: monospace; font-size: 13px; }
   .param-value-input { flex: 1; font-size: 13px; }
+  .param-overrides { font-size: 11px; color: #a06a00; margin: -2px 0 2px 188px; }
   .param-name-label { width: 180px; font-family: monospace; font-size: 13px; color: #555; flex-shrink: 0; }
 
   .profiles-list { display: flex; flex-direction: column; gap: 8px; }
