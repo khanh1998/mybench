@@ -250,7 +250,7 @@ export function generatePlan(designId: number, overrides: PlanRunSettingsOverrid
 
 		// 4. Resolve {{PARAM}} in interval fields; 0 = use run-level snapshot_interval_seconds (same as proc)
 		const rawIntervalSecs = parseInt(resolveParamExpr(pgStatStep.pg_stat_interval_seconds || ''), 10) || 0;
-		const intervalSecs = rawIntervalSecs > 0 ? Math.max(5, rawIntervalSecs) : 0;
+		const intervalSecs = rawIntervalSecs > 0 ? rawIntervalSecs : 0;
 		const pgLocksIntervalSecs = parseInt(resolveParamExpr(pgStatStep.pg_stat_pg_locks_interval || ''), 10) || 0;
 
 		// 5. pg_stat_statements columns (only needed when collecting at bench end)

@@ -13,52 +13,139 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// collectionScript reads all proc files in one SSH round trip.
-// Sections are delimited by ===SECTION:<name>=== markers.
-// Per-PID sections use ===SECTION:pid_<type>:<pid>=== markers.
-const collectionScript = `
-echo '===SECTION:loadavg==='
-cat /proc/loadavg 2>/dev/null
-echo '===SECTION:meminfo==='
-cat /proc/meminfo 2>/dev/null
-echo '===SECTION:stat==='
-cat /proc/stat 2>/dev/null
-echo '===SECTION:proc_vmstat==='
-cat /proc/vmstat 2>/dev/null
-echo '===SECTION:diskstats==='
-cat /proc/diskstats 2>/dev/null
-echo '===SECTION:netdev==='
-cat /proc/net/dev 2>/dev/null
-echo '===SECTION:schedstat==='
-cat /proc/schedstat 2>/dev/null
-echo '===SECTION:psi_cpu==='
-cat /proc/pressure/cpu 2>/dev/null
-echo '===SECTION:psi_memory==='
-cat /proc/pressure/memory 2>/dev/null
-echo '===SECTION:psi_io==='
-cat /proc/pressure/io 2>/dev/null
-echo '===SECTION:file_nr==='
-cat /proc/sys/fs/file-nr 2>/dev/null
-for pid in $(pgrep -x postgres 2>/dev/null | sort -u); do
-  [ -d /proc/$pid ] || continue
-  echo "===SECTION:pid_cmdline:$pid==="
-  tr '\0' ' ' < /proc/$pid/cmdline 2>/dev/null; echo
-  echo "===SECTION:pid_stat:$pid==="
-  cat /proc/$pid/stat 2>/dev/null
-  echo "===SECTION:pid_statm:$pid==="
-  cat /proc/$pid/statm 2>/dev/null
-  echo "===SECTION:pid_io:$pid==="
-  cat /proc/$pid/io 2>/dev/null
-  echo "===SECTION:pid_schedstat:$pid==="
-  cat /proc/$pid/schedstat 2>/dev/null
-  echo "===SECTION:pid_wchan:$pid==="
-  cat /proc/$pid/wchan 2>/dev/null; echo
-  echo "===SECTION:pid_fd_count:$pid==="
-  ls /proc/$pid/fd 2>/dev/null | wc -l
-  echo "===SECTION:pid_status:$pid==="
-  grep -E "^(Name|State|FDSize|Threads|VmPeak|VmSize|VmRSS|RssAnon|RssFile|RssShmem|VmSwap|voluntary_ctxt_switches|nonvoluntary_ctxt_switches)" /proc/$pid/status 2>/dev/null
-done
-`
+// hostFiles lists, per host-wide proc group, the files it reads and the section
+// name collectOnce looks them up under.
+var hostFiles = []struct {
+	group, section, path string
+}{
+	{"loadavg", "loadavg", "/proc/loadavg"},
+	{"meminfo", "meminfo", "/proc/meminfo"},
+	{"stat", "stat", "/proc/stat"},
+	{"vmstat", "proc_vmstat", "/proc/vmstat"},
+	{"diskstats", "diskstats", "/proc/diskstats"},
+	{"net_dev", "netdev", "/proc/net/dev"},
+	{"schedstat", "schedstat", "/proc/schedstat"},
+	{"pressure", "psi_cpu", "/proc/pressure/cpu"},
+	{"pressure", "psi_memory", "/proc/pressure/memory"},
+	{"pressure", "psi_io", "/proc/pressure/io"},
+	{"file_nr", "file_nr", "/proc/sys/fs/file-nr"},
+}
+
+// pidFiles lists, per per-PID group, the /proc/<pid>/ files it reads. The
+// section name is "pid_<file>:<pid>". cmdline only labels pid_stat rows.
+var pidFiles = []struct {
+	group string
+	files []string
+}{
+	{"pid_stat", []string{"cmdline", "stat"}},
+	{"pid_statm", []string{"statm"}},
+	{"pid_io", []string{"io"}},
+	{"pid_schedstat", []string{"schedstat"}},
+	{"pid_wchan", []string{"wchan"}},
+}
+
+const pidStatusPattern = "^(Name|State|FDSize|Threads|VmPeak|VmSize|VmRSS|RssAnon|RssFile|RssShmem|VmSwap|voluntary_ctxt_switches|nonvoluntary_ctxt_switches):"
+
+// buildCollectionScript returns a script that reads the proc files of the
+// selected groups (nil = all) in one SSH round trip.
+//
+// Every process the script starts costs ~1 ms of CPU on the DB host, and a
+// cat per file per postgres PID adds up to ~130 processes per sample under
+// load (≈5–8% TPS on a 4-vCPU server at a 1s interval). So each file set is
+// read by a single `grep -aH ''`, which prefixes every line with its path;
+// parseCollectionOutput splits the output back into sections. The fd count
+// uses a shell glob, so it starts no process at all.
+func buildCollectionScript(groups map[string]bool) string {
+	want := func(g string) bool { return groups == nil || groups[g] }
+	var b strings.Builder
+
+	var hostPaths []string
+	for _, f := range hostFiles {
+		if want(f.group) {
+			hostPaths = append(hostPaths, f.path)
+		}
+	}
+	if len(hostPaths) > 0 {
+		fmt.Fprintf(&b, "grep -aH '' %s 2>/dev/null\n", strings.Join(hostPaths, " "))
+	}
+
+	var perPid []string
+	for _, f := range pidFiles {
+		if want(f.group) {
+			perPid = append(perPid, f.files...)
+		}
+	}
+	status, fd := want("pid_status"), want("pid_fd")
+	if len(perPid) > 0 || status || fd {
+		b.WriteString("pids=$(pgrep -x postgres 2>/dev/null)\n")
+	}
+	if len(perPid) > 0 {
+		b.WriteString("f=''\nfor p in $pids; do f=\"$f")
+		for _, name := range perPid {
+			b.WriteString(" /proc/$p/" + name)
+		}
+		b.WriteString("\"; done\n[ -n \"$f\" ] && grep -aH '' $f 2>/dev/null\n")
+	}
+	if status {
+		b.WriteString("f=''\nfor p in $pids; do f=\"$f /proc/$p/status\"; done\n")
+		fmt.Fprintf(&b, "[ -n \"$f\" ] && grep -aHE '%s' $f 2>/dev/null\n", pidStatusPattern)
+	}
+	if fd {
+		b.WriteString("for p in $pids; do set -- /proc/$p/fd/*; [ -e \"$1\" ] && echo \"/proc/$p/fd_count:$#\"; done\n")
+	}
+	// grep exits non-zero when a PID vanished mid-sample; that is not a failure.
+	b.WriteString("exit 0\n")
+	return b.String()
+}
+
+// hostSectionByPath maps a host-wide proc path to its section name.
+var hostSectionByPath = func() map[string]string {
+	m := make(map[string]string, len(hostFiles))
+	for _, f := range hostFiles {
+		m[f.path] = f.section
+	}
+	return m
+}()
+
+// parseCollectionOutput groups the "path:line" output of buildCollectionScript
+// into sections keyed like "stat" or "pid_schedstat:<pid>".
+func parseCollectionOutput(output string) map[string]string {
+	bufs := make(map[string]*strings.Builder)
+	var order []string
+	for _, line := range strings.Split(output, "\n") {
+		i := strings.IndexByte(line, ':')
+		if i < 0 {
+			continue
+		}
+		path, content := line[:i], line[i+1:]
+		key, ok := hostSectionByPath[path]
+		if !ok {
+			// /proc/<pid>/<file>
+			rest, found := strings.CutPrefix(path, "/proc/")
+			if !found {
+				continue
+			}
+			pid, file, found := strings.Cut(rest, "/")
+			if !found || pid == "" || strings.Trim(pid, "0123456789") != "" {
+				continue
+			}
+			key = "pid_" + file + ":" + pid
+		}
+		buf := bufs[key]
+		if buf == nil {
+			buf = &strings.Builder{}
+			bufs[key] = buf
+			order = append(order, key)
+		}
+		buf.WriteString(content)
+		buf.WriteByte('\n')
+	}
+	sections := make(map[string]string, len(order))
+	for _, k := range order {
+		sections[k] = strings.TrimSpace(bufs[k].String())
+	}
+	return sections
+}
 
 const configScript = `
 echo "nproc=$(nproc 2>/dev/null)"
@@ -86,6 +173,7 @@ type HostMetricsCollector struct {
 	interval   time.Duration
 	started    bool
 	groups     map[string]bool // nil = all groups
+	script     string          // collection script for the selected groups
 }
 
 // NewHostMetricsCollector creates a host metrics collector but does NOT start collection.
@@ -145,6 +233,7 @@ func NewHostMetricsCollector(srv plan.ServerConfig, intervalSecs int, groups []s
 		doneCh:    make(chan struct{}),
 		interval:  time.Duration(intervalSecs) * time.Second,
 		groups:    groupsMap,
+		script:    buildCollectionScript(groupsMap),
 	}
 	return c
 }
@@ -239,12 +328,12 @@ func (c *HostMetricsCollector) shouldCollect(group string) bool {
 
 func (c *HostMetricsCollector) collectOnce() {
 	ts := time.Now().UTC().Format(time.RFC3339Nano)
-	out, err := c.runCommand(collectionScript)
+	out, err := c.runCommand(c.script)
 	if err != nil {
 		fmt.Printf("warning: host_metrics: collect: %v\n", err)
 		return
 	}
-	sections := parseSections(out)
+	sections := parseCollectionOutput(out)
 
 	addRow := func(tableName string, row result.SnapshotRow) {
 		if len(row) == 0 {
@@ -415,33 +504,6 @@ func (c *HostMetricsCollector) collectOnce() {
 			}
 		}
 	}
-}
-
-// parseSections splits script output into a map keyed by section name.
-// Delimiters have the form ===SECTION:<name>=== on their own line.
-func parseSections(output string) map[string]string {
-	sections := make(map[string]string)
-	lines := strings.Split(output, "\n")
-	var currentKey string
-	var buf strings.Builder
-
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "===SECTION:") && strings.HasSuffix(trimmed, "===") {
-			if currentKey != "" {
-				sections[currentKey] = strings.TrimSpace(buf.String())
-				buf.Reset()
-			}
-			currentKey = trimmed[len("===SECTION:") : len(trimmed)-3]
-		} else if currentKey != "" {
-			buf.WriteString(line)
-			buf.WriteByte('\n')
-		}
-	}
-	if currentKey != "" {
-		sections[currentKey] = strings.TrimSpace(buf.String())
-	}
-	return sections
 }
 
 // --- Parsers ---
