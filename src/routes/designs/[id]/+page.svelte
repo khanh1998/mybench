@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import RunnerIntervalField from '$lib/RunnerIntervalField.svelte';
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import CodeEditor from '$lib/CodeEditor.svelte';
@@ -153,6 +154,7 @@
   let runName = $state('');
   let runEc2ServerId = $state<number|null>(null);
   let runUsePrivateIp = $state(false);
+  let runRunnerInterval = $state(10);
 
   const privateIpApplicable = $derived((() => {
     const srv = servers.find(s => s.id === runServer);
@@ -174,6 +176,7 @@
   let seriesServer = $state<number|null>(null);
   let seriesDatabase = $state('');
   let seriesUsePrivateIp = $state(false);
+  let seriesRunnerInterval = $state(10);
 
   const seriesPrivateIpApplicable = $derived((() => {
     const srv = servers.find(s => s.id === seriesServer);
@@ -321,6 +324,7 @@
     seriesServer = design.server_id;
     seriesDatabase = design.database;
     seriesUsePrivateIp = false;
+    seriesRunnerInterval = 10;
     showSeriesModal = true;
   }
 
@@ -356,6 +360,7 @@
       ec2_server_id: seriesEc2ServerId
     };
     if (seriesUsePrivateIp) body.use_private_ip = true;
+    body.runner_interval_seconds = seriesRunnerInterval;
     const res = await fetch('/api/series', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -384,6 +389,7 @@
     runName = '';
     runEc2ServerId = null;
     runUsePrivateIp = false;
+    runRunnerInterval = 10;
     showRunModal = true;
   }
 
@@ -815,6 +821,7 @@
       ec2_server_id: runEc2ServerId
     };
     if (runUsePrivateIp) body.use_private_ip = true;
+    body.runner_interval_seconds = runRunnerInterval;
     const res = await fetch('/api/runs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1222,6 +1229,8 @@
         </div>
       {/if}
 
+      <RunnerIntervalField bind:value={runRunnerInterval} idPrefix="run-runner-interval" />
+
       <!-- Benchmark plan timeline -->
       {#if design.steps.filter(s => s.enabled).length > 0}
         <div class="run-timeline">
@@ -1354,6 +1363,7 @@
         <label for="series-db">Database</label>
         <input id="series-db" bind:value={seriesDatabase} placeholder="benchmark_db" />
       </div>
+      <RunnerIntervalField bind:value={seriesRunnerInterval} idPrefix="series-runner-interval" />
       <div class="modal-actions">
         <button onclick={() => showSeriesModal = false}>Cancel</button>
         <button class="primary" onclick={startSeries}

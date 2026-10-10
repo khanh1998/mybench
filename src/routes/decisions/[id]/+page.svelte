@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import RunnerIntervalField from '$lib/RunnerIntervalField.svelte';
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
 
@@ -85,6 +86,7 @@
   let suiteEc2ServerId = $state<number|null>(null);
   let suiteDatabase = $state('');
   let suiteUsePrivateIp = $state(false);
+  let suiteRunnerInterval = $state(10);
   let suiteDesigns = $state<SuiteDesignEntry[]>([]);
   let suiteDecisionProfileIds = $state<number[]>([]);
   let suiteAvailableDecisionProfiles = $state<{id:number; name:string}[]>([]);
@@ -106,6 +108,7 @@
     suiteEc2ServerId = null;
     suiteDatabase = '';
     suiteUsePrivateIp = false;
+    suiteRunnerInterval = 10;
     showSuiteModal = true;
 
     const DEFAULT_PROFILE = { id: 0, name: 'Default' };
@@ -155,6 +158,7 @@
     };
     body.ec2_server_id = suiteEc2ServerId;
     if (suiteUsePrivateIp) body.use_private_ip = true;
+    body.runner_interval_seconds = suiteRunnerInterval;
     const res = await fetch('/api/suites', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -705,6 +709,8 @@
             {/if}
           {/if}
         </div>
+
+        <RunnerIntervalField bind:value={suiteRunnerInterval} idPrefix="suite-runner-interval" />
 
         <div class="modal-actions">
           <button onclick={() => showSuiteModal = false}>Cancel</button>

@@ -100,9 +100,11 @@ func Run(ctx context.Context, opts RunOpts, pool *pgxpool.Pool) (*result.Result,
 	// Runner-host collector: independent of DB-host SSH, so it also works for managed databases.
 	var runnerCollector *LocalMetricsCollector
 	if opts.Plan.ProcStep != nil && opts.Plan.ProcStep.CollectRunner {
-		intervalSecs := opts.Plan.ProcStep.IntervalSeconds
+		// Client-side metrics have their own interval, independent of the DB-side
+		// snapshot/proc cadence (which may be 1s).
+		intervalSecs := opts.Plan.ProcStep.RunnerIntervalSeconds
 		if intervalSecs <= 0 {
-			intervalSecs = opts.Plan.RunSettings.SnapshotIntervalSeconds
+			intervalSecs = runnerDefaultInterval
 		}
 		runnerCollector = NewLocalMetricsCollector(intervalSecs)
 	}

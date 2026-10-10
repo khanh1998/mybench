@@ -9,6 +9,7 @@ export interface PlanRunSettingsOverride {
 	database?: string;
 	use_private_ip?: boolean;
 	suiteMode?: boolean;
+	runner_interval_seconds?: number; // runner-host metrics sampling period; default 10
 }
 
 function mergeParams(
@@ -283,6 +284,8 @@ export function generatePlan(designId: number, overrides: PlanRunSettingsOverrid
 			groups,          // empty = all groups
 			interval_seconds: intervalSecs, // 0 = use snapshot interval
 			collect_runner: procStep.proc_collect_runner !== 0, // sample the runner host's own /proc
+			runner_interval_seconds: overrides.runner_interval_seconds && overrides.runner_interval_seconds > 0
+				? Math.floor(overrides.runner_interval_seconds) : 10,
 		};
 	}
 

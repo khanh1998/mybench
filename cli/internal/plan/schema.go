@@ -2,27 +2,28 @@ package plan
 
 // Plan is the top-level structure parsed from plan.json.
 type Plan struct {
-	Version           int                `json:"version"`
-	ExportedAt        string             `json:"exported_at"`
-	DesignID          int                `json:"design_id"`
-	DesignName        string             `json:"design_name"`
-	Server            ServerConfig       `json:"server"`
-	RunSettings       RunSettings        `json:"run_settings"`
-	Params            []Param            `json:"params"`
-	Profiles          []Profile          `json:"profiles,omitempty"`
-	ProfileName       string             `json:"profile_name,omitempty"`
-	Steps             []Step             `json:"steps"`
-	EnabledSnapTables []SnapTableSpec    `json:"enabled_snap_tables"` // backward compat
-	PgStatStep        *PgStatStepConfig  `json:"pg_stat_step,omitempty"`
-	ProcStep          *ProcStepConfig    `json:"proc_step,omitempty"`
+	Version           int               `json:"version"`
+	ExportedAt        string            `json:"exported_at"`
+	DesignID          int               `json:"design_id"`
+	DesignName        string            `json:"design_name"`
+	Server            ServerConfig      `json:"server"`
+	RunSettings       RunSettings       `json:"run_settings"`
+	Params            []Param           `json:"params"`
+	Profiles          []Profile         `json:"profiles,omitempty"`
+	ProfileName       string            `json:"profile_name,omitempty"`
+	Steps             []Step            `json:"steps"`
+	EnabledSnapTables []SnapTableSpec   `json:"enabled_snap_tables"` // backward compat
+	PgStatStep        *PgStatStepConfig `json:"pg_stat_step,omitempty"`
+	ProcStep          *ProcStepConfig   `json:"proc_step,omitempty"`
 }
 
 // ProcStepConfig holds resolved proc (host metrics) collection config from the proc step.
 // Nil means no host metrics collection for this run.
 type ProcStepConfig struct {
-	Groups          []string `json:"groups"`           // empty = all groups
-	IntervalSeconds int      `json:"interval_seconds"` // 0 = use snapshot interval
-	CollectRunner   bool     `json:"collect_runner"`   // also sample the runner host's own /proc (client-side saturation)
+	Groups                []string `json:"groups"`                            // empty = all groups
+	IntervalSeconds       int      `json:"interval_seconds"`                  // 0 = use snapshot interval
+	CollectRunner         bool     `json:"collect_runner"`                    // also sample the runner host's own /proc (client-side saturation)
+	RunnerIntervalSeconds int      `json:"runner_interval_seconds,omitempty"` // runner-host sampling period; 0 = runnerDefaultInterval
 }
 
 // PgStatStepConfig holds resolved pg_stat collection config from the pg_stat step.
@@ -117,8 +118,8 @@ type Step struct {
 	PerfC2cDelay       string          `json:"perf_c2c_delay,omitempty"`
 	PerfLdlat          string          `json:"perf_ldlat,omitempty"`
 	PerfCgroup         string          `json:"perf_cgroup,omitempty"`
-	PgbenchOptions string          `json:"pgbench_options,omitempty"`
-	PgbenchScripts []PgbenchScript `json:"pgbench_scripts,omitempty"`
+	PgbenchOptions     string          `json:"pgbench_options,omitempty"`
+	PgbenchScripts     []PgbenchScript `json:"pgbench_scripts,omitempty"`
 }
 
 // PgbenchScript is a named pgbench custom script with a weight.

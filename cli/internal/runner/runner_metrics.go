@@ -17,6 +17,10 @@ import (
 // no information for benchmark-scale analysis and only costs CPU on the runner.
 const runnerMinInterval = time.Second
 
+// runnerDefaultInterval is the sampling period (seconds) for runner-host metrics when the
+// plan does not set proc_step.runner_interval_seconds.
+const runnerDefaultInterval = 10
+
 // LocalMetricsCollector samples the runner host's own /proc (the machine that executes
 // pgbench/sysbench) so client-side saturation can be told apart from server-side waits.
 //

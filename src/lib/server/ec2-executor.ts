@@ -23,6 +23,7 @@ export interface StartEc2RunOptions {
 	profile_source?: 'decision' | 'design';
 	name?: string;
 	use_private_ip?: boolean;
+	runner_interval_seconds?: number;
 }
 
 const MB_PREFIX = '__MB__';
@@ -444,7 +445,8 @@ async function executeEc2RunAsync(
 		const plan = generatePlan(designId, {
 			server_id: opts.server_id,
 			database: opts.database,
-			use_private_ip: opts.use_private_ip
+			use_private_ip: opts.use_private_ip,
+			runner_interval_seconds: opts.runner_interval_seconds
 		});
 		storeStepConfigs(runId, plan, profileName);
 		writeFileSync(localPlanPath, JSON.stringify(plan));

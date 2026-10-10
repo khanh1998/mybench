@@ -26,6 +26,7 @@ export interface StartSeriesOptions {
 	server_id?: number;
 	database?: string;
 	use_private_ip?: boolean;
+	runner_interval_seconds?: number;
 	suite_id?: number;           // optional — set when series is part of a decision suite
 	useDecisionProfiles?: boolean; // resolve profile names from decision_param_profiles instead of design_param_profiles
 }
@@ -208,7 +209,8 @@ export function startSeries(opts: StartSeriesOptions): number {
 	executeEc2SeriesAsync(
 		seriesId, seriesToken, entries, design.id, ec2Server,
 		opts.server_id, resolvedDatabase, snapshot_interval_seconds, delaySeconds, emitter,
-		!!opts.use_private_ip
+		!!opts.use_private_ip,
+		opts.runner_interval_seconds
 	).catch(() => {});
 
 	return seriesId;
@@ -225,7 +227,8 @@ async function executeEc2SeriesAsync(
 	snapshot_interval_seconds: number,
 	delaySeconds: number,
 	emitter: SeriesEmitter,
-	usePrivateIp = false
+	usePrivateIp = false,
+	runnerIntervalSeconds?: number
 ): Promise<void> {
 	const db = getDb();
 	const binaryPath = `${ec2Server.remote_dir}/mybench-runner`;
@@ -260,7 +263,8 @@ async function executeEc2SeriesAsync(
 		const plan = generatePlan(designId, {
 			server_id: overrideServerId,
 			database: resolvedDatabase,
-			use_private_ip: usePrivateIp
+			use_private_ip: usePrivateIp,
+			runner_interval_seconds: runnerIntervalSeconds
 		});
 		for (const entry of entries) storeStepConfigs(entry.runId, plan, entry.cliProfileName);
 		const localPlanPath = `/tmp/mybench-series-${seriesToken}.json`;

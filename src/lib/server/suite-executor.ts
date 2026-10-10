@@ -98,6 +98,7 @@ export interface StartSuiteOptions {
 	server_id?: number;
 	database?: string;
 	use_private_ip?: boolean;
+	runner_interval_seconds?: number;
 }
 
 export interface SuiteEmitter extends EventEmitter {
@@ -168,6 +169,7 @@ async function executeLocalSuiteAsync(
 				name: designName,
 				server_id: opts.server_id,
 				database: opts.database,
+				runner_interval_seconds: opts.runner_interval_seconds,
 				suite_id: suiteId,
 				useDecisionProfiles: true,
 			});
@@ -336,6 +338,7 @@ async function executeEc2SuiteAsync(
 			const plan = generatePlan(de.designId, {
 				server_id: opts.server_id,
 				use_private_ip: !!opts.use_private_ip,
+				runner_interval_seconds: opts.runner_interval_seconds,
 				suiteMode: true
 			});
 			for (const r of de.runs) storeStepConfigs(r.runId, plan, r.cliProfileName);
