@@ -1103,7 +1103,7 @@
       </div>
       <div class="form-group" style="flex:0 0 160px">
         <label for="design-snap-interval" title="How often pg_stat_* snapshots are collected during a pgbench run">Snapshot interval (s)</label>
-        <input id="design-snap-interval" type="number" bind:value={design.snapshot_interval_seconds} min="5" max="300" />
+        <input id="design-snap-interval" type="number" bind:value={design.snapshot_interval_seconds} min="1" max="300" />
       </div>
     </div>
   </div>
